@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "==> [pre-commit] cargo fmt --check"
+cargo fmt --check || {
+    echo ""
+    echo "ERROR: rustfmt check failed."
+    echo "Run 'cargo fmt' to fix formatting, then re-stage and commit."
+    exit 1
+}
+
+echo "==> [pre-commit] cargo clippy --features full"
+cargo clippy --features full -- -D warnings || {
+    echo ""
+    echo "ERROR: clippy found warnings treated as errors."
+    echo "Fix the issues above and try again."
+    exit 1
+}
+
+echo "==> [pre-commit] All checks passed."

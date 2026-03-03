@@ -1,0 +1,332 @@
+---
+alwaysApply: true
+---
+
+# Agentic Framework Architecture Patterns
+
+Daimon is a Rust-native AI agent framework. Its architecture draws from established patterns in Eino (Go), Strands (AWS/Python), AutoAgents (Rust), AgentSDK (Rust), LangChain/LangGraph (Python), and Google ADK. All designs must be idiomatic Rust, leveraging the type system and async/await.
+
+## Core Architecture Layers
+
+Daimon follows a layered architecture. Each layer has clear responsibilities and communicates through well-defined traits:
+
+```
+┌─────────────────────────────────────────────┐
+│  Application Layer (user-facing API)        │
+│  Agent builders, presets, high-level config  │
+├─────────────────────────────────────────────┤
+│  Orchestration Layer                         │
+│  Agent loop, graph/chain/workflow execution  │
+├─────────────────────────────────────────────┤
+│  Component Layer                             │
+│  Models, Tools, Memory, Retrievers           │
+├─────────────────────────────────────────────┤
+│  Protocol Layer                              │
+│  MCP, A2A, streaming, transport              │
+├─────────────────────────────────────────────┤
+│  Runtime Layer                               │
+│  Tokio, tracing, error handling              │
+└─────────────────────────────────────────────┘
+```
+
+## Core Traits
+
+### The Model Trait
+
+All LLM providers implement a single trait. Streaming is first-class:
+
+```rust
+pub trait Model: Send + Sync {
+    async fn generate(&self, request: &ChatRequest) -> Result<ChatResponse>;
+    async fn generate_stream(
+        &self,
+        request: &ChatRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatResponseChunk>> + Send>>>;
+}
+```
+
+Design rules:
+- Models MUST be stateless - configuration lives in the struct, not mutated per-call
+- Models MUST support cancellation via `tokio::select!` or `CancellationToken`
+- Streaming MUST be the default path; non-streaming wraps the stream
+
+### The Tool Trait
+
+Tools are the agent's hands. They MUST be async and return structured output:
+
+```rust
+pub trait Tool: Send + Sync {
+    fn name(&self) -> &str;
+    fn description(&self) -> &str;
+    fn parameters_schema(&self) -> &Value;
+    async fn execute(&self, input: &Value) -> Result<ToolOutput>;
+}
+```
+
+Design rules:
+- Tools MUST declare a JSON Schema for their parameters
+- Tools MUST be idempotent where possible
+- Tools MUST NOT hold mutable state - use external state stores
+- Tool errors are returned as `Result`, NEVER panics
+- Provide a `#[tool]` proc-macro or derive to reduce boilerplate
+
+### The Memory Trait
+
+Memory provides context persistence across agent turns:
+
+```rust
+pub trait Memory: Send + Sync {
+    async fn add(&self, entry: MemoryEntry) -> Result<()>;
+    async fn search(&self, query: &str, limit: usize) -> Result<Vec<MemoryEntry>>;
+    async fn get_recent(&self, limit: usize) -> Result<Vec<MemoryEntry>>;
+    async fn clear(&self) -> Result<()>;
+}
+```
+
+Design rules:
+- Memory implementations MUST be pluggable (in-memory, SQLite, Redis, vector DB)
+- Message history is a separate concern from semantic/long-term memory
+- Memory MUST support TTL/eviction strategies
+
+### The Retriever Trait
+
+Retrievers fetch relevant context from external sources:
+
+```rust
+pub trait Retriever: Send + Sync {
+    async fn retrieve(&self, query: &str, options: &RetrieveOptions) -> Result<Vec<Document>>;
+}
+```
+
+## Orchestration Patterns
+
+### Agent Loop (ReAct Pattern)
+
+The core agent loop follows Reason-Act-Observe. This is the default execution model:
+
+```
+User Message → Model → [Tool Call?] → Execute Tool → Model → ... → Final Response
+```
+
+Design rules:
+- The loop MUST have a configurable max iteration limit (default: 25)
+- Each iteration MUST be traceable via `tracing` spans
+- The loop MUST support graceful interruption (human-in-the-loop)
+- Tool results feed back into the model as assistant/tool messages
+
+### Graph Orchestration (like Eino's Graph / LangGraph)
+
+For complex workflows, support directed graph execution:
+
+```rust
+pub trait Node: Send + Sync {
+    async fn execute(&self, state: &mut GraphState) -> Result<NodeOutput>;
+}
+
+pub struct Graph {
+    nodes: HashMap<String, Arc<dyn Node>>,
+    edges: Vec<Edge>,
+    entry_point: String,
+}
+```
+
+Design rules:
+- Graphs support both cyclic and acyclic topologies
+- Conditional edges route based on node output
+- Graph state is passed through nodes, not stored globally
+- Graphs MUST be serializable for persistence/replay
+
+### Chain Orchestration (like Eino's Chain)
+
+Simple linear pipelines for straightforward flows:
+
+```rust
+pub struct Chain {
+    steps: Vec<Arc<dyn ChainStep>>,
+}
+```
+
+Design rules:
+- Chains are strictly linear (no branching)
+- Each step transforms input to output
+- Chains are composable - a chain can be a step in another chain
+
+## Multi-Agent Patterns
+
+### Agent-as-Tool
+
+An agent can be exposed as a tool for another agent:
+
+```rust
+impl Tool for Agent {
+    fn name(&self) -> &str { &self.name }
+    fn description(&self) -> &str { &self.description }
+    async fn execute(&self, input: &Value) -> Result<ToolOutput> {
+        let response = self.run(input).await?;
+        Ok(ToolOutput::from(response))
+    }
+}
+```
+
+### Supervisor Pattern
+
+A supervisor agent delegates tasks to specialized sub-agents:
+
+```rust
+pub struct Supervisor {
+    agents: HashMap<String, Arc<Agent>>,
+    router: Arc<dyn Router>,
+}
+```
+
+Design rules:
+- Sub-agents MUST be independently testable
+- Communication between agents uses structured messages, not arbitrary strings
+- Supervisor tracks task state and handles sub-agent failures
+
+### Handoff Pattern
+
+Agents can transfer control to other agents mid-conversation:
+
+```rust
+pub enum AgentAction {
+    Respond(String),
+    ToolCall(ToolCallRequest),
+    Handoff { target: AgentId, context: Value },
+}
+```
+
+## Protocol Integration
+
+### Model Context Protocol (MCP)
+
+Daimon MUST support MCP for tool discovery and execution:
+
+- Implement MCP client for connecting to external tool servers
+- Implement MCP server for exposing Daimon tools to other agents
+- MCP tools are registered alongside native tools in the same registry
+
+### Streaming
+
+All responses MUST support streaming via async streams:
+
+```rust
+pub type ResponseStream = Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>;
+
+pub enum StreamEvent {
+    TextDelta(String),
+    ToolCallStart { id: String, name: String },
+    ToolCallDelta { id: String, arguments_delta: String },
+    ToolCallEnd { id: String },
+    Done,
+}
+```
+
+## Builder Pattern
+
+All complex types MUST use the builder pattern for construction:
+
+```rust
+let agent = Agent::builder()
+    .name("research-assistant")
+    .model(OpenAiModel::new("gpt-4o"))
+    .system_prompt("You are a research assistant.")
+    .tool(web_search)
+    .tool(calculator)
+    .memory(InMemoryMemory::new())
+    .max_iterations(10)
+    .build()?;
+```
+
+Design rules:
+- Builders validate at `.build()` time and return `Result`
+- Required fields cause compile-time errors if missing (use typestate pattern where practical)
+- Provide sensible defaults for optional configuration
+
+## Observability
+
+### Tracing
+
+Every async operation MUST be instrumented:
+
+```rust
+#[tracing::instrument(skip(self, request))]
+pub async fn generate(&self, request: &ChatRequest) -> Result<ChatResponse> {
+    tracing::info!(model = %self.model_id, "generating response");
+    // ...
+}
+```
+
+Design rules:
+- Use `tracing` with structured fields, not string interpolation
+- Agent iterations, tool calls, and model requests each get their own span
+- Support OpenTelemetry export for production observability
+
+### Callbacks/Hooks
+
+Provide lifecycle hooks for extensibility:
+
+```rust
+pub trait AgentHook: Send + Sync {
+    async fn on_iteration_start(&self, state: &AgentState) -> Result<()> { Ok(()) }
+    async fn on_tool_call(&self, call: &ToolCall) -> Result<()> { Ok(()) }
+    async fn on_tool_result(&self, call: &ToolCall, result: &ToolOutput) -> Result<()> { Ok(()) }
+    async fn on_iteration_end(&self, state: &AgentState) -> Result<()> { Ok(()) }
+    async fn on_error(&self, error: &DaimonError) -> Result<()> { Ok(()) }
+}
+```
+
+## Feature Flags
+
+Use Cargo feature flags for optional integrations:
+
+```toml
+[features]
+default = ["openai"]
+openai = ["reqwest"]
+anthropic = ["reqwest"]
+ollama = ["reqwest"]
+mcp = ["tokio-tungstenite"]
+memory-sqlite = ["sqlx"]
+memory-redis = ["redis"]
+```
+
+Design rules:
+- Core framework compiles with zero model providers (traits only)
+- Each provider is behind a feature flag
+- `default` includes the most common provider(s)
+
+## Anti-Patterns to Avoid
+
+### Do NOT
+
+- Use `Box<dyn Any>` for message passing between components
+- Store conversation state in global mutable statics
+- Implement synchronous blocking calls in async code (no `block_on` inside async)
+- Couple the framework to a specific LLM provider in core types
+- Use string-typed enums when Rust enums are appropriate
+- Create God objects that combine agent + model + tools + memory in one struct
+- Ignore backpressure in streaming responses
+
+### Do
+
+- Keep core types provider-agnostic
+- Use compile-time type safety wherever possible
+- Make everything async from the ground up
+- Provide both high-level (builder) and low-level (trait) APIs
+- Design for testability - every trait should be mockable
+- Use `Arc<dyn Trait>` for runtime polymorphism in plugin systems
+- Document every public trait with usage examples
+
+## Reference Implementations
+
+When designing new components, study these frameworks for patterns:
+
+| Framework | Language | Key Pattern to Study |
+|-----------|----------|---------------------|
+| Eino | Go | Graph/Chain/Workflow orchestration, component interfaces |
+| Strands | Python | Model-driven simplicity, tool registration |
+| LangGraph | Python | Stateful graph execution, checkpointing |
+| AutoAgents | Rust | Actor model (Ractor), WASM sandboxing |
+| AgentSDK | Rust | Type-safe tool definitions, compile-time validation |
+| Google ADK | Python | Agent-as-tool composition, A2A protocol |

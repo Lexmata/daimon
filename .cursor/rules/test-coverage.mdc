@@ -1,0 +1,352 @@
+---
+alwaysApply: true
+---
+
+# Test Coverage Requirements
+
+Daimon targets ~90% unit test coverage. Every module, trait implementation, and public API must have thorough tests.
+
+## Coverage Targets
+
+| Metric | Target | Minimum (CI gate) |
+|--------|--------|--------------------|
+| Line Coverage | 90% | 85% |
+| Branch Coverage | 85% | 80% |
+| Function Coverage | 95% | 90% |
+
+PRs that drop coverage below the minimum gate MUST NOT be merged.
+
+## Measuring Coverage
+
+### cargo-tarpaulin
+
+```bash
+cargo install cargo-tarpaulin
+
+# Quick coverage report
+cargo tarpaulin --out Stdout
+
+# HTML report for local review
+cargo tarpaulin --out Html --output-dir coverage
+
+# CI-friendly Lcov output
+cargo tarpaulin --ignore-tests --out Lcov --output-dir coverage
+```
+
+### cargo-llvm-cov (alternative)
+
+```bash
+cargo install cargo-llvm-cov
+
+cargo llvm-cov --html
+cargo llvm-cov --lcov --output-path coverage/lcov.info
+```
+
+## Test Organization
+
+### Unit Tests: Co-located with Source
+
+Every source file with logic MUST have a `#[cfg(test)]` module at the bottom:
+
+```rust
+// src/tool/registry.rs
+
+pub struct ToolRegistry { /* ... */ }
+
+impl ToolRegistry {
+    pub fn register(&mut self, tool: Arc<dyn Tool>) -> Result<()> { /* ... */ }
+    pub fn get(&self, name: &str) -> Option<&Arc<dyn Tool>> { /* ... */ }
+    pub fn list(&self) -> Vec<&str> { /* ... */ }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mock_tool(name: &str) -> Arc<dyn Tool> {
+        // test helper
+    }
+
+    #[test]
+    fn register_adds_tool_to_registry() {
+        let mut registry = ToolRegistry::new();
+        let tool = mock_tool("calculator");
+        registry.register(tool).unwrap();
+        assert!(registry.get("calculator").is_some());
+    }
+
+    #[test]
+    fn register_duplicate_name_returns_error() {
+        let mut registry = ToolRegistry::new();
+        registry.register(mock_tool("calc")).unwrap();
+        let result = registry.register(mock_tool("calc"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn get_nonexistent_returns_none() {
+        let registry = ToolRegistry::new();
+        assert!(registry.get("nonexistent").is_none());
+    }
+
+    #[test]
+    fn list_returns_all_registered_names() {
+        let mut registry = ToolRegistry::new();
+        registry.register(mock_tool("a")).unwrap();
+        registry.register(mock_tool("b")).unwrap();
+        let names = registry.list();
+        assert_eq!(names.len(), 2);
+        assert!(names.contains(&"a"));
+        assert!(names.contains(&"b"));
+    }
+}
+```
+
+### Integration Tests: `tests/` Directory
+
+For testing cross-module behavior:
+
+```
+tests/
+├── agent_loop.rs        # Full agent loop integration
+├── tool_execution.rs    # Tool registration + execution
+├── graph_execution.rs   # Graph orchestration end-to-end
+└── streaming.rs         # Stream response integration
+```
+
+### Async Tests
+
+Use `#[tokio::test]` for async test functions:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn agent_completes_simple_task() {
+        let agent = Agent::builder()
+            .model(MockModel::new())
+            .build()
+            .unwrap();
+        let response = agent.run("Hello").await.unwrap();
+        assert!(!response.text().is_empty());
+    }
+}
+```
+
+## What to Test
+
+### Must Test (coverage-critical)
+
+- [ ] All public functions and methods
+- [ ] All trait implementations
+- [ ] Error paths and error variants
+- [ ] Edge cases: empty input, max values, None/null
+- [ ] Builder validation (missing required fields, invalid config)
+- [ ] Async behavior: cancellation, timeout, concurrent access
+
+### Should Test
+
+- [ ] Internal helper functions with non-trivial logic
+- [ ] State transitions in agent loops and graph execution
+- [ ] Serialization/deserialization roundtrips
+- [ ] Feature-flag-gated code paths
+
+### May Skip (exclude from coverage)
+
+- Trivial `Debug`/`Display` implementations
+- Simple getters that return a field reference
+- Generated code (proc-macro output)
+- Platform-specific code untestable in CI
+
+Mark exclusions explicitly:
+
+```rust
+#[cfg(not(tarpaulin_include))]
+impl std::fmt::Display for DaimonError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // ...
+    }
+}
+```
+
+## Test Naming Convention
+
+```
+test_<unit>_<scenario>_<expected_result>
+```
+
+Examples:
+
+```rust
+#[test]
+fn test_registry_register_duplicate_returns_error() { }
+
+#[tokio::test]
+async fn test_agent_loop_max_iterations_stops_execution() { }
+
+#[test]
+fn test_tool_schema_validates_required_fields() { }
+
+#[tokio::test]
+async fn test_stream_cancellation_cleans_up_resources() { }
+```
+
+## Test Patterns
+
+### Mock Implementations for Traits
+
+Create mock implementations in a shared test utilities module:
+
+```rust
+// src/testing.rs (behind #[cfg(test)] or a `testing` feature flag)
+
+pub struct MockModel {
+    responses: Vec<ChatResponse>,
+}
+
+impl MockModel {
+    pub fn new(responses: Vec<ChatResponse>) -> Self {
+        Self { responses }
+    }
+
+    pub fn single(response: ChatResponse) -> Self {
+        Self { responses: vec![response] }
+    }
+}
+
+impl Model for MockModel {
+    async fn generate(&self, _request: &ChatRequest) -> Result<ChatResponse> {
+        // Return responses in sequence
+    }
+}
+```
+
+### Error Path Testing
+
+Every `Result`-returning function needs both success and failure tests:
+
+```rust
+#[test]
+fn test_parse_valid_input_succeeds() {
+    let result = parse_tool_call(r#"{"name": "calc", "args": {}}"#);
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_parse_invalid_json_returns_error() {
+    let result = parse_tool_call("not json");
+    assert!(matches!(result, Err(DaimonError::Serialization(_))));
+}
+
+#[test]
+fn test_parse_missing_name_returns_error() {
+    let result = parse_tool_call(r#"{"args": {}}"#);
+    assert!(matches!(result, Err(DaimonError::ToolExecution(_))));
+}
+```
+
+### Property-Based Testing
+
+Use `proptest` for input-space exploration:
+
+```rust
+use proptest::prelude::*;
+
+proptest! {
+    #[test]
+    fn tool_name_roundtrips_through_serialization(name in "[a-z][a-z0-9_]{0,63}") {
+        let tool = DynamicTool::new(&name, "desc", schema);
+        let serialized = serde_json::to_string(&tool).unwrap();
+        let deserialized: DynamicTool = serde_json::from_str(&serialized).unwrap();
+        prop_assert_eq!(tool.name(), deserialized.name());
+    }
+}
+```
+
+### Boundary/Stress Testing
+
+```rust
+#[tokio::test]
+async fn test_agent_loop_respects_max_iterations() {
+    let model = MockModel::always_calls_tool();
+    let agent = Agent::builder()
+        .model(model)
+        .tool(noop_tool())
+        .max_iterations(3)
+        .build()
+        .unwrap();
+
+    let result = agent.run("loop forever").await;
+    // Agent should stop after max_iterations, not hang
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_registry_handles_1000_tools() {
+    let mut registry = ToolRegistry::new();
+    for i in 0..1000 {
+        registry.register(mock_tool(&format!("tool_{}", i))).unwrap();
+    }
+    assert_eq!(registry.list().len(), 1000);
+}
+```
+
+## CI Integration
+
+### Coverage in CI Pipeline
+
+```yaml
+- name: Run tests with coverage
+  run: cargo tarpaulin --ignore-tests --out Xml --output-dir coverage
+
+- name: Check coverage threshold
+  run: |
+    COVERAGE=$(cargo tarpaulin --ignore-tests --out Stdout 2>&1 | rg 'coverage' | rg -o '[0-9]+\.[0-9]+')
+    echo "Coverage: ${COVERAGE}%"
+    if (( $(echo "$COVERAGE < 85" | bc -l) )); then
+      echo "::error::Coverage ${COVERAGE}% is below 85% minimum"
+      exit 1
+    fi
+```
+
+### PR Coverage Diff
+
+PRs should show coverage diff. If a PR decreases coverage by more than 2%, it must add tests before merging.
+
+## When Coverage Drops
+
+1. Run `cargo tarpaulin --out Html` and review the report
+2. Identify uncovered lines (red in HTML report)
+3. Prioritize:
+   - Error handling paths first
+   - Public API methods second
+   - Edge cases third
+4. Add targeted tests for uncovered branches
+5. If code is unreachable, consider removing it
+
+## Quick Reference
+
+```bash
+# Run all tests
+cargo test
+
+# Run tests for a specific module
+cargo test tool::registry::tests
+
+# Run a single test
+cargo test test_registry_register_duplicate
+
+# Run tests with output visible
+cargo test -- --nocapture
+
+# Run only ignored/slow tests
+cargo test -- --ignored
+
+# Coverage report
+cargo tarpaulin --out Html --output-dir coverage
+
+# Open coverage report
+xdg-open coverage/tarpaulin-report.html
+```

@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+COMMIT_MSG_FILE="$1"
+
+if ! command -v cargo-commitlint &> /dev/null; then
+    echo "WARNING: cargo-commitlint not found, skipping commit message lint."
+    echo "Install with: cargo install cargo-commitlint"
+    exit 0
+fi
+
+echo "==> [commit-msg] Linting commit message with cargo-commitlint"
+cargo commitlint --edit "$COMMIT_MSG_FILE" || {
+    echo ""
+    echo "ERROR: Commit message does not follow Conventional Commits."
+    echo ""
+    echo "Expected format: <type>(<optional scope>): <description>"
+    echo ""
+    echo "Valid types: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert, release"
+    echo "Description must be 10-72 characters."
+    echo ""
+    echo "Examples:"
+    echo "  feat(agent): add cancellation token support"
+    echo "  fix(openai): handle 429 rate limit with backoff"
+    echo "  docs: update README quick start"
+    exit 1
+}
+
+echo "==> [commit-msg] Message lint passed."

@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "==> [pre-push] cargo test --features full"
+cargo test --features full || {
+    echo ""
+    echo "ERROR: Tests failed. Push aborted."
+    echo "Fix failing tests before pushing."
+    exit 1
+}
+
+echo "==> [pre-push] cargo doc --features full --no-deps"
+cargo doc --features full --no-deps --document-private-items 2>&1 | {
+    has_warnings=0
+    while IFS= read -r line; do
+        echo "$line"
+        if echo "$line" | grep -q "warning:"; then
+            has_warnings=1
+        fi
+    done
+    if [ "$has_warnings" -eq 1 ]; then
+        echo ""
+        echo "WARNING: Documentation has warnings. Consider fixing before pushing."
+    fi
+}
+
+echo "==> [pre-push] All checks passed."

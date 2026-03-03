@@ -1,0 +1,89 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  validate:
+    name: Validate release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify Cargo.toml version matches tag
+        env:
+          TAG_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          cargo_version=$(cargo metadata --format-version=1 --no-deps | jq -r '.packages[0].version')
+          if [[ "$cargo_version" != "$TAG_VERSION" ]]; then
+            echo "::error::Cargo.toml version ($cargo_version) does not match tag ($TAG_VERSION)"
+            exit 1
+          fi
+
+      - name: Verify CHANGELOG has entry
+        env:
+          TAG_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if ! grep -q "\[${TAG_VERSION}\]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no entry for version $TAG_VERSION"
+            exit 1
+          fi
+
+      - name: Full test suite
+        run: cargo test --features full
+
+      - name: Clippy
+        run: cargo clippy --features full -- -D warnings
+
+      - name: Coverage check
+        run: cargo llvm-cov --no-default-features --fail-under-lines 90
+
+      - name: Publish dry-run
+        run: cargo publish --dry-run
+
+  release:
+    name: Create GitHub release
+    runs-on: ubuntu-latest
+    needs: [validate]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract changelog for this version
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          awk "/^## \[${RELEASE_VERSION}\]/{found=1; next} /^## \[/{if(found) exit} found{print}" CHANGELOG.md > release_notes.md
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: release_notes.md
+          generate_release_notes: false
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}

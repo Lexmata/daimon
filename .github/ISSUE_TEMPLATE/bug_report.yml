@@ -1,0 +1,97 @@
+name: Bug Report
+description: Report a bug or unexpected behavior
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. Please fill in as much detail as you can.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: A clear and concise description of the bug.
+      placeholder: "When I call agent.prompt() with..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to Reproduce
+      description: Minimal code or steps to reproduce the issue.
+      placeholder: |
+        1. Create an agent with `Agent::builder().model(...)...`
+        2. Call `.prompt("...")`
+        3. Observe error...
+      render: rust
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What you expected to happen.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+      description: What actually happened. Include error messages or panic output.
+    validations:
+      required: true
+
+  - type: input
+    id: daimon-version
+    attributes:
+      label: Daimon Version
+      description: "Output of `cargo pkgid daimon` or the version in Cargo.toml"
+      placeholder: "0.1.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: features
+    attributes:
+      label: Enabled Features
+      description: Which feature flags are enabled?
+      multiple: true
+      options:
+        - "openai (default)"
+        - "anthropic (default)"
+        - "bedrock"
+        - "full"
+        - "no-default-features"
+    validations:
+      required: true
+
+  - type: input
+    id: rust-version
+    attributes:
+      label: Rust Version
+      description: "Output of `rustc --version`"
+      placeholder: "rustc 1.85.0 (..."
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating System
+      options:
+        - Linux
+        - macOS
+        - Windows
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional Context
+      description: Any other context, logs, or screenshots.

@@ -1,0 +1,78 @@
+[package]
+name = "daimon"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "A Rust-native AI agent framework"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Lexmata/daimon"
+homepage = "https://github.com/Lexmata/daimon"
+documentation = "https://docs.rs/daimon"
+keywords = ["ai", "agent", "llm", "openai", "anthropic"]
+categories = ["asynchronous", "api-bindings"]
+readme = "README.md"
+
+[features]
+default = ["openai", "anthropic"]
+openai = ["dep:reqwest"]
+anthropic = ["dep:reqwest"]
+gemini = ["dep:reqwest"]
+azure = ["dep:reqwest"]
+bedrock = ["dep:aws-sdk-bedrockruntime", "dep:aws-config", "dep:aws-smithy-types"]
+full = ["openai", "anthropic", "gemini", "azure", "bedrock"]
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+futures = "0.3"
+pin-project-lite = "0.2"
+async-stream = "0.3"
+
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"], default-features = false, optional = true }
+aws-sdk-bedrockruntime = { version = "1", optional = true }
+aws-config = { version = "1", features = ["behavior-version-latest"], optional = true }
+aws-smithy-types = { version = "1", optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+proptest = "1"
+
+[dev-dependencies.cargo-husky]
+version = "1"
+default-features = false
+features = ["user-hooks"]
+
+[[example]]
+name = "simple_agent"
+path = "examples/simple_agent.rs"
+required-features = ["openai"]
+
+[[example]]
+name = "with_tools"
+path = "examples/with_tools.rs"
+required-features = ["openai"]
+
+[[example]]
+name = "streaming"
+path = "examples/streaming.rs"
+required-features = ["openai"]
+
+[[example]]
+name = "bedrock_agent"
+path = "examples/bedrock_agent.rs"
+required-features = ["bedrock"]
+
+[[example]]
+name = "gemini_agent"
+path = "examples/gemini_agent.rs"
+required-features = ["gemini"]
+
+[[example]]
+name = "azure_agent"
+path = "examples/azure_agent.rs"
+required-features = ["azure"]

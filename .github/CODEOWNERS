@@ -1,0 +1,16 @@
+# Default owners for all files
+* @quinnjr
+
+# CI and build configuration
+/.github/ @quinnjr
+/Cargo.toml @quinnjr
+/deny.toml @quinnjr
+
+# Core framework
+/src/agent/ @quinnjr
+/src/model/ @quinnjr
+/src/tool/ @quinnjr
+/src/memory/ @quinnjr
+/src/stream/ @quinnjr
+/src/hooks.rs @quinnjr
+/src/error.rs @quinnjr
