@@ -1,0 +1,312 @@
+---
+alwaysApply: true
+---
+
+# Git Workflow and Branch Protection
+
+Daimon uses Git-Flow branching with mandatory Pull Requests and cargo-commitlint for commit message enforcement.
+
+## Branch Strategy
+
+### Protected Branches
+
+| Branch | Purpose | Direct Commits |
+|--------|---------|---------------|
+| `main` | Production releases only | **FORBIDDEN** |
+| `develop` | Integration branch | **FORBIDDEN** (PRs only) |
+
+### Working Branches
+
+All work happens on named branches:
+
+| Type | Pattern | Base Branch | Merges Into |
+|------|---------|-------------|-------------|
+| Feature | `feature/<jira-ticket>-<description>` | `develop` | `develop` via PR |
+| Bugfix | `bugfix/<jira-ticket>-<description>` | `develop` | `develop` via PR |
+| Release | `release/v<version>` | `develop` | `main` AND `develop` via PR |
+| Hotfix | `hotfix/<jira-ticket>-<description>` | `main` | `main` AND `develop` via PR |
+
+### Branch Naming Examples
+
+```bash
+feature/DAIM-12-add-tool-trait
+bugfix/DAIM-34-fix-stream-backpressure
+release/v0.1.0
+hotfix/DAIM-56-fix-memory-leak
+```
+
+## Mandatory Pull Requests
+
+### Rule: All Commits to `main` and `develop` MUST Come Through PRs
+
+```bash
+# ❌ FORBIDDEN - Direct commit to develop
+git checkout develop
+git commit -m "feat: add something"
+
+# ❌ FORBIDDEN - Direct commit to main
+git checkout main
+git commit -m "release: v1.0.0"
+
+# ✅ CORRECT - Feature branch → PR → develop
+git checkout develop
+git pull origin develop
+git checkout -b feature/DAIM-12-add-tool-trait
+# ... work ...
+git push -u origin feature/DAIM-12-add-tool-trait
+# Create PR targeting develop
+
+# ✅ CORRECT - Release branch → PR → main
+git checkout develop
+git checkout -b release/v0.1.0
+# ... version bump, changelog ...
+git push -u origin release/v0.1.0
+# Create PR targeting main
+```
+
+### PR Requirements
+
+Every PR must satisfy:
+
+1. **Passes CI** - `cargo build`, `cargo test`, `cargo clippy`, `cargo fmt --check`
+2. **Passes commit lint** - All commits validated by `cargo-commitlint`
+3. **Has a description** - Summary of changes and motivation
+4. **References Jira ticket** - In branch name or PR description
+
+### Only Releases Merge to `main`
+
+The ONLY branches that can target `main` via PR:
+
+- `release/v*` - Planned releases from develop
+- `hotfix/*` - Emergency production fixes
+
+Everything else targets `develop`.
+
+## Commit Message Linting
+
+### cargo-commitlint
+
+All commit messages are validated by `cargo-commitlint` using the Conventional Commits specification.
+
+#### Installation
+
+```bash
+cargo install cargo-commitlint
+```
+
+#### Git Hook Setup
+
+Install the commit-msg hook:
+
+```bash
+cargo commitlint install
+```
+
+This installs a `.git/hooks/commit-msg` hook that rejects non-conforming commits.
+
+### Conventional Commits Format
+
+```
+<type>(<scope>): <subject>
+
+[optional body]
+
+[optional footer(s)]
+```
+
+### Allowed Types
+
+| Type | Description |
+|------|-------------|
+| `feat` | New feature |
+| `fix` | Bug fix |
+| `docs` | Documentation only |
+| `style` | Formatting, no code change |
+| `refactor` | Code restructuring, no behavior change |
+| `perf` | Performance improvement |
+| `test` | Adding or updating tests |
+| `build` | Build system or external dependencies |
+| `ci` | CI configuration changes |
+| `chore` | Maintenance tasks |
+| `revert` | Reverts a previous commit |
+
+### Allowed Scopes
+
+Scopes correspond to crate modules or cross-cutting concerns:
+
+- `agent` - Agent loop and orchestration
+- `model` - Model trait and providers
+- `tool` - Tool trait and registry
+- `memory` - Memory trait and implementations
+- `graph` - Graph/chain orchestration
+- `mcp` - MCP protocol integration
+- `stream` - Streaming infrastructure
+- `error` - Error types
+- `config` - Configuration
+- `deps` - Dependency updates
+
+### Commit Message Rules
+
+| Rule | Value |
+|------|-------|
+| Header max length | 72 characters |
+| Subject case | lowercase |
+| Subject ending | No period |
+| Subject mood | Imperative ("add" not "added") |
+| Body leading blank | Required |
+| Body line length | 100 characters max |
+
+### Examples
+
+```bash
+# ✅ CORRECT
+feat(tool): add JSON Schema validation for tool parameters
+fix(agent): prevent infinite loop when tool returns error
+refactor(model): extract streaming logic into separate module
+test(memory): add integration tests for SQLite memory backend
+docs(agent): add usage examples to Agent builder
+chore(deps): update tokio to 1.40
+
+# ✅ CORRECT with body
+feat(agent): add human-in-the-loop interrupt support
+
+The agent loop now checks for pending interrupts between iterations.
+When interrupted, the agent pauses execution and waits for user
+input before continuing.
+
+Closes DAIM-42
+
+# ✅ CORRECT breaking change
+feat(tool)!: change Tool::execute to return ToolOutput instead of Value
+
+BREAKING CHANGE: Tool::execute now returns Result<ToolOutput> instead
+of Result<Value>. ToolOutput provides structured output with metadata.
+
+# ❌ WRONG
+added new feature
+Fix stuff
+WIP
+update code
+feat:missing space after colon
+```
+
+### commitlint.toml Configuration
+
+The project root should contain:
+
+```toml
+[rules]
+[rules.type]
+enum = ["feat", "fix", "docs", "style", "refactor", "perf", "test", "build", "ci", "chore", "revert"]
+case = "lowercase"
+
+[rules.scope]
+enum = []
+case = "lowercase"
+
+subject_case = ["lowercase"]
+subject_empty = false
+subject_full_stop = "."
+
+header_max_length = 72
+header_min_length = 10
+
+body_leading_blank = true
+body_max_line_length = 100
+
+footer_leading_blank = true
+footer_max_line_length = 100
+
+[parser]
+pattern = "^(?P<type>\\w+)(?:\\((?P<scope>[^)]+)\\))?(?P<breaking>!)?:\\s(?P<subject>.*)$"
+
+ignores = [
+    "^Merge.*",
+    "^Revert.*",
+]
+```
+
+## Git Workflow Commands
+
+### Starting a Feature
+
+```bash
+git checkout develop
+git pull origin develop
+git checkout -b feature/DAIM-XX-description
+```
+
+### Finishing a Feature
+
+```bash
+git push -u origin feature/DAIM-XX-description
+# Create PR targeting develop
+# After PR approval and merge:
+git checkout develop
+git pull origin develop
+git branch -d feature/DAIM-XX-description
+```
+
+### Creating a Release
+
+```bash
+git checkout develop
+git pull origin develop
+git checkout -b release/v0.1.0
+# Bump version in Cargo.toml
+# Update CHANGELOG
+git commit -m "chore: bump version to 0.1.0"
+git push -u origin release/v0.1.0
+# Create PR targeting main
+# After merge to main, tag:
+git checkout main
+git pull origin main
+git tag -a v0.1.0 -m "Release v0.1.0"
+git push origin v0.1.0
+# Also merge release back to develop
+```
+
+### Emergency Hotfix
+
+```bash
+git checkout main
+git pull origin main
+git checkout -b hotfix/DAIM-XX-critical-fix
+# Fix the issue
+git push -u origin hotfix/DAIM-XX-critical-fix
+# Create PR targeting main
+# After merge, also create PR targeting develop
+```
+
+## Enforcement
+
+### Before Any Commit
+
+1. Check your branch: `git branch --show-current`
+2. If on `main` or `develop`: STOP, create a working branch
+3. Run `cargo fmt` and `cargo clippy`
+4. Commit with a conventional message
+
+### NEVER Use
+
+```bash
+# ❌ NEVER bypass hooks
+git commit --no-verify
+git push --no-verify
+
+# ❌ NEVER force push to protected branches
+git push --force origin main
+git push --force origin develop
+```
+
+### If a Hook Fails
+
+Fix the underlying issue. Do not bypass:
+
+```bash
+# Hook says commit message is invalid?
+# → Fix the message, don't skip the hook
+
+# Hook says clippy failed?
+# → Fix the lint, don't skip the hook
+```

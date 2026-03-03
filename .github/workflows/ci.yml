@@ -1,0 +1,204 @@
+name: CI
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+    branches: [develop]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Fast checks (no compilation) ──────────────────────────────────
+  fmt:
+    name: Formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  commitlint:
+    name: Commit messages
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-commitlint
+        run: cargo install cargo-commitlint --locked
+      - name: Lint commits
+        run: |
+          for sha in $(git log --format=%H origin/${{ github.base_ref }}..HEAD); do
+            cargo commitlint --commit "$sha"
+          done
+
+  # ── Compilation matrix ────────────────────────────────────────────
+  check:
+    name: Check (${{ matrix.toolchain }}, ${{ matrix.features }})
+    runs-on: ubuntu-latest
+    needs: [fmt]
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: [stable, "1.85"]
+        features:
+          - "--no-default-features"
+          - "--features openai"
+          - "--features anthropic"
+          - "--features bedrock"
+          - "--features full"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: check-${{ matrix.toolchain }}-${{ matrix.features }}
+      - run: cargo check ${{ matrix.features }}
+
+  # ── Linting ───────────────────────────────────────────────────────
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    needs: [check]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: clippy
+      - name: Clippy (no default features)
+        run: cargo clippy --no-default-features --all-targets -- -D warnings
+      - name: Clippy (full features)
+        run: cargo clippy --features full --all-targets -- -D warnings
+
+  # ── Tests ─────────────────────────────────────────────────────────
+  test:
+    name: Test (${{ matrix.features }})
+    runs-on: ubuntu-latest
+    needs: [check]
+    strategy:
+      fail-fast: false
+      matrix:
+        features:
+          - "--no-default-features"
+          - "--features full"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: test-${{ matrix.features }}
+      - run: cargo test ${{ matrix.features }} -- --nocapture
+
+  # ── Coverage ──────────────────────────────────────────────────────
+  coverage:
+    name: Coverage (≥90%)
+    runs-on: ubuntu-latest
+    needs: [test]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: coverage
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - name: Generate coverage
+        run: cargo llvm-cov --no-default-features --fail-under-lines 90 --lcov --output-path lcov.info
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: lcov.info
+          retention-days: 7
+
+  # ── Examples ──────────────────────────────────────────────────────
+  examples:
+    name: Examples
+    runs-on: ubuntu-latest
+    needs: [check]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: examples
+      - name: Check simple_agent
+        run: cargo check --example simple_agent --features openai
+      - name: Check with_tools
+        run: cargo check --example with_tools --features openai
+      - name: Check streaming
+        run: cargo check --example streaming --features openai
+      - name: Check bedrock_agent
+        run: cargo check --example bedrock_agent --features bedrock
+
+  # ── Documentation ─────────────────────────────────────────────────
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+    needs: [check]
+    env:
+      RUSTDOCFLAGS: -Dwarnings
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: docs
+      - run: cargo doc --features full --no-deps --document-private-items
+
+  # ── Dependency audit ──────────────────────────────────────────────
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories licenses bans
+
+  # ── Final gate ────────────────────────────────────────────────────
+  ci-pass:
+    name: CI passed
+    if: always()
+    needs: [fmt, check, clippy, test, coverage, examples, docs, deny]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify all jobs succeeded
+        run: |
+          results=( \
+            "${{ needs.fmt.result }}" \
+            "${{ needs.check.result }}" \
+            "${{ needs.clippy.result }}" \
+            "${{ needs.test.result }}" \
+            "${{ needs.coverage.result }}" \
+            "${{ needs.examples.result }}" \
+            "${{ needs.docs.result }}" \
+            "${{ needs.deny.result }}" \
+          )
+          for r in "${results[@]}"; do
+            if [[ "$r" != "success" ]]; then
+              echo "::error::One or more CI jobs failed or were cancelled."
+              exit 1
+            fi
+          done
+          echo "All CI jobs passed."

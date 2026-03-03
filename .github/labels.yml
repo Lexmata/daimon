@@ -1,0 +1,78 @@
+# Bug and issue lifecycle
+- name: bug
+  color: "d73a4a"
+  description: Something isn't working
+- name: enhancement
+  color: "a2eeef"
+  description: New feature or improvement
+- name: triage
+  color: "e4e669"
+  description: Needs triage and prioritization
+- name: stale
+  color: "ededed"
+  description: Inactive for 60+ days
+- name: pinned
+  color: "006b75"
+  description: Exempt from stale bot
+- name: wontfix
+  color: "ffffff"
+  description: Will not be addressed
+- name: duplicate
+  color: "cfd3d7"
+  description: Already reported or exists
+
+# Priority
+- name: "priority: critical"
+  color: "b60205"
+  description: Must be fixed immediately
+- name: "priority: high"
+  color: "d93f0b"
+  description: Important, fix soon
+- name: "priority: medium"
+  color: "fbca04"
+  description: Should be fixed
+- name: "priority: low"
+  color: "0e8a16"
+  description: Nice to have
+
+# Area
+- name: "area: agent"
+  color: "1d76db"
+  description: Agent / ReAct loop
+- name: "area: model"
+  color: "1d76db"
+  description: Model providers
+- name: "area: tool"
+  color: "1d76db"
+  description: Tool system
+- name: "area: memory"
+  color: "1d76db"
+  description: Memory backends
+- name: "area: streaming"
+  color: "1d76db"
+  description: Streaming support
+- name: "area: docs"
+  color: "1d76db"
+  description: Documentation
+
+# Automation
+- name: dependencies
+  color: "0366d6"
+  description: Dependency updates
+- name: automated
+  color: "bfdadc"
+  description: Created by automation
+- name: ci
+  color: "5319e7"
+  description: CI/CD changes
+- name: security
+  color: "b60205"
+  description: Security related
+
+# Contributor experience
+- name: "good first issue"
+  color: "7057ff"
+  description: Good for newcomers
+- name: "help wanted"
+  color: "008672"
+  description: Extra attention needed

@@ -1,0 +1,374 @@
+---
+alwaysApply: true
+---
+
+# Rust 2024 Coding Standards
+
+This project uses Rust Edition 2024. All code must follow modern, idiomatic Rust practices.
+
+## Edition and Toolchain
+
+- **Edition**: `2024` (specified in `Cargo.toml`)
+- **Minimum Rust Version**: `1.85` or later
+- **Target**: Stable Rust (no nightly-only features unless gated behind a feature flag)
+
+## Rust 2024 Specific Syntax
+
+### Reserved Keywords
+
+The following are reserved keywords in Rust 2024:
+
+- `gen` - Use `_gen` or `generation` instead
+- `try` - Already reserved
+
+```rust
+// ✅ CORRECT
+fn create_id(_gen: u32) -> String { /* ... */ }
+
+// ❌ WRONG
+fn create_id(gen: u32) -> String { /* ... */ }  // 'gen' is reserved in 2024
+```
+
+### Unsafe Attribute Syntax
+
+Use the new `#[unsafe(...)]` syntax for unsafe attributes:
+
+```rust
+// ✅ CORRECT (Rust 2024)
+#[unsafe(no_mangle)]
+pub extern "C" fn exported_fn() {}
+
+// ❌ WRONG (pre-2024 syntax)
+#[no_mangle]
+pub extern "C" fn exported_fn() {}
+```
+
+### Static Initialization
+
+Use `LazyLock` from the standard library, not `lazy_static!`:
+
+```rust
+use std::sync::LazyLock;
+
+// ✅ CORRECT
+static REGISTRY: LazyLock<Registry> = LazyLock::new(Registry::new);
+
+// ❌ WRONG
+lazy_static! {
+    static ref REGISTRY: Registry = Registry::new();
+}
+```
+
+### Const Functions
+
+Use `const fn` wherever possible:
+
+```rust
+// ✅ CORRECT
+pub const fn default_timeout() -> Duration {
+    Duration::from_secs(30)
+}
+```
+
+## Safety Requirements
+
+### Unsafe Policy
+
+**NEVER use `unsafe` unless absolutely necessary.** Valid exceptions:
+
+1. **FFI boundaries** - Interfacing with C libraries
+2. **Performance-critical hot paths** - Must be benchmarked and documented
+3. **Low-level memory operations** - When safe abstractions are insufficient
+
+When `unsafe` is required, always wrap it in a safe abstraction with a `// SAFETY:` comment explaining the invariants:
+
+```rust
+// ✅ CORRECT
+pub fn get_unchecked(slice: &[u8], index: usize) -> u8 {
+    assert!(index < slice.len());
+    // SAFETY: We just checked that index is within bounds.
+    unsafe { *slice.get_unchecked(index) }
+}
+```
+
+## Error Handling
+
+### Use `thiserror` for Library Errors
+
+```rust
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum DaimonError {
+    #[error("tool execution failed: {0}")]
+    ToolExecution(String),
+
+    #[error("model returned invalid response: {0}")]
+    ModelResponse(String),
+
+    #[error("I/O error")]
+    Io(#[from] std::io::Error),
+
+    #[error("serialization error")]
+    Serialization(#[from] serde_json::Error),
+}
+
+pub type Result<T> = std::result::Result<T, DaimonError>;
+```
+
+### Error Propagation
+
+Always use `?` and `map_err()` with context:
+
+```rust
+// ✅ CORRECT
+pub async fn invoke_tool(&self, name: &str, input: &Value) -> Result<Value> {
+    let tool = self.registry.get(name)
+        .ok_or_else(|| DaimonError::ToolExecution(format!("tool '{}' not found", name)))?;
+    tool.execute(input).await
+        .map_err(|e| DaimonError::ToolExecution(format!("tool '{}' failed: {}", name, e)))
+}
+
+// ❌ WRONG
+pub async fn invoke_tool(&self, name: &str, input: &Value) -> Value {
+    let tool = self.registry.get(name).unwrap();
+    tool.execute(input).await.unwrap()
+}
+```
+
+### Never `unwrap()` in Library Code
+
+The ONLY acceptable uses of `unwrap()` or `expect()`:
+
+1. **Test code** (`#[cfg(test)]`)
+2. **Provably infallible** (e.g., hardcoded regex, mutex locks) with `expect("reason")`
+3. **Example/doc code** (with a comment noting it's for brevity)
+
+Everywhere else, return `Result<T, E>` or `Option<T>`.
+
+## Async/Await
+
+### Tokio as Runtime
+
+Use `tokio` as the async runtime:
+
+```rust
+// ✅ CORRECT
+#[tokio::main]
+async fn main() -> Result<()> {
+    let agent = Agent::builder().build()?;
+    agent.run().await
+}
+```
+
+### Async Trait Methods
+
+Rust 2024 supports async fn in traits natively. Use them:
+
+```rust
+// ✅ CORRECT (Rust 2024 native async traits)
+pub trait Tool: Send + Sync {
+    fn name(&self) -> &str;
+    fn description(&self) -> &str;
+    async fn execute(&self, input: &Value) -> Result<Value>;
+}
+
+// ❌ WRONG (no longer needed)
+#[async_trait]
+pub trait Tool: Send + Sync {
+    async fn execute(&self, input: &Value) -> Result<Value>;
+}
+```
+
+### Send + Sync Bounds
+
+All types used across async boundaries must be `Send + Sync`. Use `Arc<T>` for shared ownership:
+
+```rust
+pub type SharedTool = Arc<dyn Tool>;
+pub type ToolRegistry = Arc<HashMap<String, SharedTool>>;
+```
+
+## Trait Design
+
+### Use Trait Objects Sparingly
+
+Prefer generics with trait bounds for performance. Use `dyn Trait` when you need heterogeneous collections or plugin systems:
+
+```rust
+// ✅ Generics for known concrete types
+pub fn run_agent<M: Model>(model: M, tools: Vec<Arc<dyn Tool>>) -> Result<Response> { /* ... */ }
+
+// ✅ dyn Trait for plugin/extensibility systems
+pub struct AgentConfig {
+    pub model: Box<dyn Model>,
+    pub tools: Vec<Arc<dyn Tool>>,
+}
+```
+
+### Blanket Implementations
+
+Provide blanket impls where useful:
+
+```rust
+impl<F, Fut> Tool for F
+where
+    F: Fn(&Value) -> Fut + Send + Sync,
+    Fut: Future<Output = Result<Value>> + Send,
+{
+    // ...
+}
+```
+
+## Type System
+
+### No `any` Equivalent
+
+Never use `Box<dyn Any>` as a general-purpose container. Define proper types:
+
+```rust
+// ✅ CORRECT
+pub enum ToolInput {
+    Text(String),
+    Json(serde_json::Value),
+    Binary(Vec<u8>),
+}
+
+// ❌ WRONG
+pub type ToolInput = Box<dyn std::any::Any>;
+```
+
+### Newtypes for Domain Concepts
+
+Use newtypes to prevent mixing up string IDs:
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AgentId(String);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ToolId(String);
+```
+
+## Memory Management
+
+### Ownership and Borrowing
+
+- Take ownership (`String`, `Vec<u8>`) when the function needs to store the data
+- Borrow (`&str`, `&[u8]`) when the function only reads
+- Use `Cow<'_, str>` when you sometimes need to clone
+
+### Smart Pointers
+
+| Type | Use Case |
+|------|----------|
+| `Arc<T>` | Shared ownership across async tasks |
+| `Arc<Mutex<T>>` | Shared mutable state (prefer `tokio::sync::Mutex` for async) |
+| `Arc<RwLock<T>>` | Read-heavy shared state |
+| `Box<dyn Trait>` | Owned trait objects |
+
+## Crate Preferences
+
+| Purpose | Crate | Notes |
+|---------|-------|-------|
+| Error handling | `thiserror` | For library error types |
+| Error context | `anyhow` | For application-level errors only |
+| Serialization | `serde`, `serde_json` | Derive macros |
+| Async runtime | `tokio` | Full features |
+| HTTP client | `reqwest` | With `rustls-tls` |
+| Logging | `tracing` | Structured, async-aware |
+| CLI | `clap` | Derive-based |
+| Testing | Built-in + `proptest` | Property-based testing |
+
+## Code Organization
+
+### File Size
+
+- **Soft limit**: 500 lines
+- **Hard limit**: 1000 lines
+- Files exceeding 1000 lines MUST be split into submodules
+
+### Module Structure
+
+```
+src/
+├── lib.rs            # Public API re-exports
+├── error.rs          # DaimonError and Result type
+├── agent/
+│   ├── mod.rs
+│   ├── builder.rs
+│   └── runner.rs
+├── model/
+│   ├── mod.rs
+│   └── traits.rs
+├── tool/
+│   ├── mod.rs
+│   ├── traits.rs
+│   └── registry.rs
+└── memory/
+    ├── mod.rs
+    └── traits.rs
+```
+
+### Re-exports
+
+Keep the public API clean via `lib.rs`:
+
+```rust
+pub use agent::Agent;
+pub use error::{DaimonError, Result};
+pub use model::Model;
+pub use tool::Tool;
+```
+
+## Formatting and Linting
+
+Run before every commit:
+
+```bash
+cargo fmt
+cargo clippy -- -D warnings
+```
+
+## Documentation
+
+All public items must have doc comments:
+
+```rust
+/// A tool that can be invoked by an agent during execution.
+///
+/// # Examples
+///
+/// ```
+/// use daimon::Tool;
+///
+/// struct Calculator;
+///
+/// impl Tool for Calculator {
+///     fn name(&self) -> &str { "calculator" }
+///     fn description(&self) -> &str { "Performs arithmetic" }
+///     async fn execute(&self, input: &Value) -> Result<Value> {
+///         // ...
+///     }
+/// }
+/// ```
+pub trait Tool: Send + Sync {
+    fn name(&self) -> &str;
+    fn description(&self) -> &str;
+    async fn execute(&self, input: &Value) -> Result<Value>;
+}
+```
+
+## Summary Checklist
+
+- [ ] Edition 2024 syntax (`#[unsafe(...)]`, reserved keywords)
+- [ ] `LazyLock` over `lazy_static!`
+- [ ] `thiserror` for error types, `?` for propagation
+- [ ] NEVER `unwrap()` in library code
+- [ ] Native async traits (no `#[async_trait]` macro)
+- [ ] `Send + Sync` on all async-boundary types
+- [ ] `tokio` as async runtime
+- [ ] `tracing` for logging
+- [ ] Doc comments on all public items
+- [ ] `cargo fmt` and `cargo clippy -- -D warnings` clean
+- [ ] Files under 1000 lines
