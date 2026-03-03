@@ -307,6 +307,10 @@ fn parse_response(response: OpenAiResponse) -> Result<ChatResponse> {
         usage: response.usage.map(|u| Usage {
             input_tokens: u.prompt_tokens,
             output_tokens: u.completion_tokens,
+            cached_tokens: u
+                .prompt_tokens_details
+                .map(|d| d.cached_tokens)
+                .unwrap_or(0),
         }),
     })
 }
@@ -446,6 +450,13 @@ struct OpenAiFunction {
 struct OpenAiUsage {
     prompt_tokens: u32,
     completion_tokens: u32,
+    prompt_tokens_details: Option<OpenAiPromptTokensDetails>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiPromptTokensDetails {
+    #[serde(default)]
+    cached_tokens: u32,
 }
 
 #[derive(Deserialize)]
@@ -536,6 +547,7 @@ mod tests {
             usage: Some(OpenAiUsage {
                 prompt_tokens: 10,
                 completion_tokens: 5,
+                prompt_tokens_details: None,
             }),
         };
         let resp = parse_response(raw).unwrap();

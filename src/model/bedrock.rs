@@ -7,10 +7,10 @@ use std::time::Duration;
 
 use aws_sdk_bedrockruntime::Client as BedrockClient;
 use aws_sdk_bedrockruntime::types::{
-    ContentBlock, ConversationRole, GuardrailConfiguration, GuardrailStreamConfiguration,
-    InferenceConfiguration, Message as BedrockMessage, SystemContentBlock, ToolConfiguration,
-    ToolInputSchema, ToolResultBlock, ToolResultContentBlock, ToolResultStatus, ToolSpecification,
-    ToolUseBlock,
+    CachePointBlock, CachePointType, ContentBlock, ConversationRole, GuardrailConfiguration,
+    GuardrailStreamConfiguration, InferenceConfiguration, Message as BedrockMessage,
+    SystemContentBlock, ToolConfiguration, ToolInputSchema, ToolResultBlock,
+    ToolResultContentBlock, ToolResultStatus, ToolSpecification, ToolUseBlock,
 };
 
 use crate::error::{DaimonError, Result};
@@ -31,6 +31,7 @@ pub struct Bedrock {
     max_retries: u32,
     guardrail_id: Option<String>,
     guardrail_version: Option<String>,
+    use_prompt_caching: bool,
 }
 
 impl Bedrock {
@@ -43,6 +44,7 @@ impl Bedrock {
             max_retries: 3,
             guardrail_id: None,
             guardrail_version: None,
+            use_prompt_caching: false,
         }
     }
 
@@ -71,6 +73,18 @@ impl Bedrock {
         self
     }
 
+    /// Enables prompt caching for system messages and tool definitions.
+    ///
+    /// When enabled, a `CachePoint` content block is appended after the
+    /// system prompt and after the tool configuration in each request.
+    /// This allows the Bedrock Converse API to cache and reuse these
+    /// prefix segments across requests, reducing latency and cost for
+    /// models that support it (e.g. Anthropic models on Bedrock).
+    pub fn with_prompt_caching(mut self) -> Self {
+        self.use_prompt_caching = true;
+        self
+    }
+
     async fn get_client(&self) -> Result<BedrockClient> {
         if let Some(ref client) = self.client {
             return Ok(client.clone());
@@ -84,7 +98,10 @@ impl Bedrock {
         Ok(BedrockClient::new(&config))
     }
 
-    fn build_messages(request: &ChatRequest) -> (Vec<SystemContentBlock>, Vec<BedrockMessage>) {
+    fn build_messages(
+        request: &ChatRequest,
+        use_prompt_caching: bool,
+    ) -> (Vec<SystemContentBlock>, Vec<BedrockMessage>) {
         let mut system_blocks = Vec::new();
         let mut messages = Vec::new();
 
@@ -153,10 +170,22 @@ impl Bedrock {
             }
         }
 
+        if use_prompt_caching && !system_blocks.is_empty() {
+            system_blocks.push(SystemContentBlock::CachePoint(
+                CachePointBlock::builder()
+                    .r#type(CachePointType::Default)
+                    .build()
+                    .expect("valid cache point block"),
+            ));
+        }
+
         (system_blocks, messages)
     }
 
-    fn build_tool_config(request: &ChatRequest) -> Option<ToolConfiguration> {
+    fn build_tool_config(
+        request: &ChatRequest,
+        use_prompt_caching: bool,
+    ) -> Option<ToolConfiguration> {
         if request.tools.is_empty() {
             return None;
         }
@@ -180,6 +209,14 @@ impl Bedrock {
         let mut builder = ToolConfiguration::builder();
         for tool in tools {
             builder = builder.tools(tool);
+        }
+        if use_prompt_caching {
+            builder = builder.tools(aws_sdk_bedrockruntime::types::Tool::CachePoint(
+                CachePointBlock::builder()
+                    .r#type(CachePointType::Default)
+                    .build()
+                    .expect("valid cache point block"),
+            ));
         }
         Some(builder.build().expect("valid tool config"))
     }
@@ -232,6 +269,7 @@ impl Bedrock {
         let usage = output.usage().map(|u| Usage {
             input_tokens: u.input_tokens() as u32,
             output_tokens: u.output_tokens() as u32,
+            cached_tokens: u.cache_read_input_tokens().unwrap_or(0) as u32,
         });
 
         Ok(ChatResponse {
@@ -259,12 +297,14 @@ impl Model for Bedrock {
         let client = self.get_client().await?;
         tracing::debug!("obtained Bedrock client");
 
-        let (system_blocks, messages) = Self::build_messages(request);
-        let tool_config = Self::build_tool_config(request);
+        let (system_blocks, messages) =
+            Self::build_messages(request, self.use_prompt_caching);
+        let tool_config = Self::build_tool_config(request, self.use_prompt_caching);
         tracing::debug!(
             system_blocks = system_blocks.len(),
             message_count = messages.len(),
             has_tools = tool_config.is_some(),
+            prompt_caching = self.use_prompt_caching,
             "built request messages"
         );
 
@@ -339,12 +379,14 @@ impl Model for Bedrock {
         let client = self.get_client().await?;
         tracing::debug!("obtained Bedrock client for streaming");
 
-        let (system_blocks, messages) = Self::build_messages(request);
-        let tool_config = Self::build_tool_config(request);
+        let (system_blocks, messages) =
+            Self::build_messages(request, self.use_prompt_caching);
+        let tool_config = Self::build_tool_config(request, self.use_prompt_caching);
         tracing::debug!(
             system_blocks = system_blocks.len(),
             message_count = messages.len(),
             has_tools = tool_config.is_some(),
+            prompt_caching = self.use_prompt_caching,
             "built request messages for stream"
         );
 
@@ -536,7 +578,7 @@ mod tests {
             temperature: None,
             max_tokens: None,
         };
-        let (system, messages) = Bedrock::build_messages(&request);
+        let (system, messages) = Bedrock::build_messages(&request, false);
         assert_eq!(system.len(), 1);
         assert_eq!(messages.len(), 1);
     }
@@ -557,8 +599,32 @@ mod tests {
             temperature: None,
             max_tokens: None,
         };
-        let (_, messages) = Bedrock::build_messages(&request);
+        let (_, messages) = Bedrock::build_messages(&request, false);
         assert_eq!(messages.len(), 3);
+    }
+
+    #[test]
+    fn test_build_messages_with_caching() {
+        let request = ChatRequest {
+            messages: vec![Message::system("Be helpful"), Message::user("hello")],
+            tools: vec![],
+            temperature: None,
+            max_tokens: None,
+        };
+        let (system, _) = Bedrock::build_messages(&request, true);
+        assert_eq!(system.len(), 2, "should have text + cache point");
+    }
+
+    #[test]
+    fn test_build_messages_caching_no_system() {
+        let request = ChatRequest {
+            messages: vec![Message::user("hello")],
+            tools: vec![],
+            temperature: None,
+            max_tokens: None,
+        };
+        let (system, _) = Bedrock::build_messages(&request, true);
+        assert!(system.is_empty(), "no cache point when no system prompt");
     }
 
     #[test]
@@ -644,7 +710,7 @@ mod tests {
             temperature: None,
             max_tokens: None,
         };
-        assert!(Bedrock::build_tool_config(&request).is_none());
+        assert!(Bedrock::build_tool_config(&request, false).is_none());
     }
 
     #[test]
@@ -659,6 +725,12 @@ mod tests {
             temperature: None,
             max_tokens: None,
         };
-        assert!(Bedrock::build_tool_config(&request).is_some());
+        assert!(Bedrock::build_tool_config(&request, false).is_some());
+    }
+
+    #[test]
+    fn test_with_prompt_caching() {
+        let model = Bedrock::new("test").with_prompt_caching();
+        assert!(model.use_prompt_caching);
     }
 }

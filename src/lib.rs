@@ -29,29 +29,42 @@
 //! |---------|-------------|
 //! | `openai` | OpenAI API provider (default) |
 //! | `anthropic` | Anthropic Claude API provider (default) |
+//! | `macros` | `#[tool_fn]` proc macro (default) |
 //! | `gemini` | Google Gemini / Vertex AI provider |
 //! | `azure` | Azure OpenAI Service provider |
 //! | `bedrock` | AWS Bedrock provider |
-//! | `full` | All model providers |
+//! | `ollama` | Ollama local model provider |
+//! | `sqlite` | SQLite memory backend |
+//! | `mcp` | Model Context Protocol client |
+//! | `full` | All model providers + macros + MCP |
 //!
 //! The core framework compiles with no features; enable providers as needed.
 //!
 //! ## Module Overview
 //!
-//! - [`agent`] - Agent builder and ReAct loop execution
-//! - [`model`] - LLM provider trait and implementations
-//! - [`tool`] - Tool trait, registry, and execution
-//! - [`memory`] - Conversation memory implementations
-//! - [`stream`] - Streaming response types
-//! - [`hooks`] - Lifecycle hooks for observability and control
+//! - [`agent`] — Agent builder and ReAct loop execution
+//! - [`model`] — LLM provider trait and implementations
+//! - [`tool`] — Tool trait, registry, and execution
+//! - [`memory`] — Conversation memory implementations
+//! - [`stream`] — Streaming response types
+//! - [`hooks`] — Lifecycle hooks for observability and control
+//! - [`orchestration`] — Chain and graph multi-agent orchestration
+//! - [`mcp`] — Model Context Protocol client for external tool servers
 
 pub mod agent;
 pub mod error;
 pub mod hooks;
 pub mod memory;
 pub mod model;
+pub mod orchestration;
 pub mod prelude;
 pub mod stream;
 pub mod tool;
+
+#[cfg(feature = "mcp")]
+pub mod mcp;
+
+#[cfg(feature = "macros")]
+pub use daimon_macros::tool_fn;
 
 pub use error::{DaimonError, Result};

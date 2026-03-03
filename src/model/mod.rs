@@ -1,7 +1,7 @@
 //! LLM provider abstraction and implementations.
 //!
 //! Implement [`Model`] to add new providers. Built-in providers (each behind a feature flag):
-//! `openai`, `anthropic`, `gemini`, `azure`, `bedrock`.
+//! `openai`, `anthropic`, `gemini`, `azure`, `bedrock`, `ollama`.
 
 mod traits;
 pub mod types;
@@ -22,3 +22,6 @@ pub mod azure;
 
 #[cfg(feature = "bedrock")]
 pub mod bedrock;
+
+#[cfg(feature = "ollama")]
+pub mod ollama;

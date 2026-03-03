@@ -309,6 +309,10 @@ fn parse_response(response: AzureResponse) -> Result<ChatResponse> {
         usage: response.usage.map(|u| Usage {
             input_tokens: u.prompt_tokens,
             output_tokens: u.completion_tokens,
+            cached_tokens: u
+                .prompt_tokens_details
+                .map(|d| d.cached_tokens)
+                .unwrap_or(0),
         }),
     })
 }
@@ -444,6 +448,13 @@ struct AzureFunction {
 struct AzureUsage {
     prompt_tokens: u32,
     completion_tokens: u32,
+    prompt_tokens_details: Option<AzurePromptTokensDetails>,
+}
+
+#[derive(Deserialize)]
+struct AzurePromptTokensDetails {
+    #[serde(default)]
+    cached_tokens: u32,
 }
 
 #[derive(Deserialize)]
@@ -596,6 +607,7 @@ mod tests {
             usage: Some(AzureUsage {
                 prompt_tokens: 10,
                 completion_tokens: 5,
+                prompt_tokens_details: None,
             }),
         };
         let resp = parse_response(raw).unwrap();

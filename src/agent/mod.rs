@@ -4,6 +4,7 @@
 //! then call [`Agent::prompt`] or [`Agent::prompt_stream`] to run the ReAct loop.
 
 mod builder;
+pub mod hitl;
 mod runner;
 
 pub use builder::AgentBuilder;
@@ -29,6 +30,7 @@ pub struct Agent {
     pub(crate) max_iterations: usize,
     pub(crate) temperature: Option<f32>,
     pub(crate) max_tokens: Option<u32>,
+    pub(crate) validate_tool_inputs: bool,
 }
 
 impl std::fmt::Debug for Agent {
@@ -39,6 +41,7 @@ impl std::fmt::Debug for Agent {
             .field("temperature", &self.temperature)
             .field("max_tokens", &self.max_tokens)
             .field("tools_count", &self.tools.len())
+            .field("validate_tool_inputs", &self.validate_tool_inputs)
             .finish_non_exhaustive()
     }
 }

@@ -119,9 +119,11 @@ impl Agent {
             };
 
             let response = {
-                let _span = tracing::info_span!("model_generate", iteration).entered();
-                tracing::debug!("calling model");
-                self.model.generate_erased(&request).await?
+                tracing::debug!(iteration, "calling model");
+                self.model
+                    .generate_erased(&request)
+                    .instrument(tracing::info_span!("model_generate", iteration))
+                    .await?
             };
 
             if let Some(ref usage) = response.usage {
@@ -175,6 +177,10 @@ impl Agent {
     }
 
     /// Execute multiple tool calls concurrently with `tokio::spawn`.
+    ///
+    /// When `validate_tool_inputs` is enabled, each call's arguments are
+    /// validated against the tool's JSON Schema before execution. Invalid
+    /// inputs are returned as error messages to the model.
     async fn execute_tools_parallel(
         &self,
         tool_calls: &[crate::tool::ToolCall],
@@ -183,9 +189,33 @@ impl Agent {
 
         let mut join_set = JoinSet::new();
         let mut order = Vec::with_capacity(tool_calls.len());
+        let validate = self.validate_tool_inputs;
 
         for (idx, call) in tool_calls.iter().enumerate() {
             self.hooks.on_tool_call_erased(call).await.ok();
+
+            if validate {
+                if let Some(errors) = self.tools.validate_input(&call.name, &call.arguments) {
+                    tracing::warn!(
+                        tool = %call.name,
+                        id = %call.id,
+                        "tool input schema validation failed: {errors}"
+                    );
+                    let output = crate::tool::ToolOutput::error(format!(
+                        "Invalid arguments for tool '{}': {errors}",
+                        call.name
+                    ));
+                    let err = DaimonError::SchemaValidation {
+                        tool: call.name.clone(),
+                        errors: errors.clone(),
+                    };
+                    self.hooks.on_error_erased(&err).await.ok();
+                    order.push(idx);
+                    let idx_copy = idx;
+                    join_set.spawn(async move { (idx_copy, output) });
+                    continue;
+                }
+            }
 
             let call_clone = call.clone();
             let tool_opt = self.tools.get(&call.name).cloned();
@@ -274,6 +304,7 @@ impl Agent {
         let tools = self.tools.clone();
         let temperature = self.temperature;
         let max_tokens = self.max_tokens;
+        let validate = self.validate_tool_inputs;
 
         let out_stream = async_stream::try_stream! {
             let mut iteration = 0;
@@ -351,15 +382,35 @@ impl Agent {
                 messages.push(Message::assistant_with_tool_calls(completed_calls.clone()));
 
                 for call in &completed_calls {
-                    let tool_result = match tools.get(&call.name) {
-                        Some(tool) => match tool.execute_erased(&call.arguments).await {
-                            Ok(output) => output,
-                            Err(e) => crate::tool::ToolOutput::error(e.to_string()),
-                        },
-                        None => crate::tool::ToolOutput::error(format!(
-                            "tool '{}' not found",
-                            call.name
-                        )),
+                    let tool_result = if validate {
+                        if let Some(errors) = tools.validate_input(&call.name, &call.arguments) {
+                            crate::tool::ToolOutput::error(format!(
+                                "Invalid arguments for tool '{}': {errors}",
+                                call.name
+                            ))
+                        } else {
+                            match tools.get(&call.name) {
+                                Some(tool) => match tool.execute_erased(&call.arguments).await {
+                                    Ok(output) => output,
+                                    Err(e) => crate::tool::ToolOutput::error(e.to_string()),
+                                },
+                                None => crate::tool::ToolOutput::error(format!(
+                                    "tool '{}' not found",
+                                    call.name
+                                )),
+                            }
+                        }
+                    } else {
+                        match tools.get(&call.name) {
+                            Some(tool) => match tool.execute_erased(&call.arguments).await {
+                                Ok(output) => output,
+                                Err(e) => crate::tool::ToolOutput::error(e.to_string()),
+                            },
+                            None => crate::tool::ToolOutput::error(format!(
+                                "tool '{}' not found",
+                                call.name
+                            )),
+                        }
                     };
 
                     yield StreamEvent::ToolResult {
@@ -405,6 +456,7 @@ mod tests {
                 usage: Some(Usage {
                     input_tokens: 10,
                     output_tokens: 5,
+                    cached_tokens: 0,
                 }),
             })
         }
@@ -440,6 +492,7 @@ mod tests {
                     usage: Some(Usage {
                         input_tokens: 20,
                         output_tokens: 10,
+                        cached_tokens: 0,
                     }),
                 })
             } else {
@@ -449,6 +502,7 @@ mod tests {
                     usage: Some(Usage {
                         input_tokens: 30,
                         output_tokens: 8,
+                        cached_tokens: 0,
                     }),
                 })
             }
@@ -691,5 +745,129 @@ mod tests {
             result.unwrap_err(),
             crate::error::DaimonError::Cancelled
         ));
+    }
+
+    struct StrictAdderTool;
+
+    impl Tool for StrictAdderTool {
+        fn name(&self) -> &str {
+            "adder"
+        }
+        fn description(&self) -> &str {
+            "Adds two numbers"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "a": { "type": "integer" },
+                    "b": { "type": "integer" }
+                },
+                "required": ["a", "b"]
+            })
+        }
+        async fn execute(&self, input: &serde_json::Value) -> Result<ToolOutput> {
+            let a = input["a"].as_i64().unwrap_or(0);
+            let b = input["b"].as_i64().unwrap_or(0);
+            Ok(ToolOutput::text(format!("{}", a + b)))
+        }
+    }
+
+    struct InvalidThenValidModel {
+        call_count: AtomicUsize,
+    }
+
+    impl InvalidThenValidModel {
+        fn new() -> Self {
+            Self {
+                call_count: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl Model for InvalidThenValidModel {
+        async fn generate(&self, request: &ChatRequest) -> Result<ChatResponse> {
+            let count = self.call_count.fetch_add(1, Ordering::SeqCst);
+            if count == 0 {
+                Ok(ChatResponse {
+                    message: Message::assistant_with_tool_calls(vec![crate::tool::ToolCall {
+                        id: "call_1".into(),
+                        name: "adder".into(),
+                        arguments: serde_json::json!({"a": "not_a_number", "b": 3}),
+                    }]),
+                    stop_reason: StopReason::ToolUse,
+                    usage: None,
+                })
+            } else if count == 1 {
+                let last = request.messages.last().and_then(|m| m.content.as_deref()).unwrap_or("");
+                assert!(last.contains("Invalid arguments"), "model should see validation error: {last}");
+                Ok(ChatResponse {
+                    message: Message::assistant_with_tool_calls(vec![crate::tool::ToolCall {
+                        id: "call_2".into(),
+                        name: "adder".into(),
+                        arguments: serde_json::json!({"a": 2, "b": 3}),
+                    }]),
+                    stop_reason: StopReason::ToolUse,
+                    usage: None,
+                })
+            } else {
+                Ok(ChatResponse {
+                    message: Message::assistant("The sum is 5"),
+                    stop_reason: StopReason::EndTurn,
+                    usage: None,
+                })
+            }
+        }
+
+        async fn generate_stream(&self, _request: &ChatRequest) -> Result<ResponseStream> {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_schema_validation_rejects_invalid_input() {
+        let agent = Agent::builder()
+            .model(InvalidThenValidModel::new())
+            .tool(StrictAdderTool)
+            .build()
+            .unwrap();
+
+        let response = agent.prompt("add 2 and 3").await.unwrap();
+        assert_eq!(response.text(), "The sum is 5");
+        assert_eq!(response.iterations, 3);
+    }
+
+    #[tokio::test]
+    async fn test_schema_validation_disabled_allows_invalid_input() {
+        struct AlwaysInvalidModel;
+
+        impl Model for AlwaysInvalidModel {
+            async fn generate(&self, _request: &ChatRequest) -> Result<ChatResponse> {
+                Ok(ChatResponse {
+                    message: Message::assistant_with_tool_calls(vec![crate::tool::ToolCall {
+                        id: "call_1".into(),
+                        name: "adder".into(),
+                        arguments: serde_json::json!({"a": "string", "b": "string"}),
+                    }]),
+                    stop_reason: StopReason::ToolUse,
+                    usage: None,
+                })
+            }
+            async fn generate_stream(&self, _request: &ChatRequest) -> Result<ResponseStream> {
+                Ok(Box::pin(futures::stream::empty()))
+            }
+        }
+
+        let agent = Agent::builder()
+            .model(AlwaysInvalidModel)
+            .tool(StrictAdderTool)
+            .validate_tool_inputs(false)
+            .max_iterations(1)
+            .build()
+            .unwrap();
+
+        let result = agent.prompt("test").await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), crate::error::DaimonError::MaxIterations(1)));
     }
 }

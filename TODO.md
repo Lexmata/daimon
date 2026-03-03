@@ -35,13 +35,13 @@
 - [x] All providers: configurable max retries
 
 ### Tool System
-- [ ] JSON Schema validation of tool input before execution
+- [x] JSON Schema validation of tool input before execution
 - [x] `ToolOutput::json()` convenience constructor for structured responses
 - [x] Parallel tool execution (currently tools within one iteration run sequentially)
 
 ### Memory
-- [ ] Token-based window (count tokens, not messages) for `SlidingWindowMemory`
-- [ ] `SummaryMemory` — summarize old messages instead of dropping them
+- [x] Token-based window (count tokens, not messages) for `SlidingWindowMemory`
+- [x] `SummaryMemory` — summarize old messages instead of dropping them
 
 ### Documentation
 - [x] Rustdoc on all public types, traits, and methods
@@ -58,17 +58,17 @@
 
 ## v0.2.0 -- Orchestration & MCP
 
-- [ ] Chain orchestration (linear pipelines of agents/transforms)
-- [ ] Graph orchestration (conditional routing, cycles, fan-out/fan-in)
-- [ ] MCP client (connect to external tool servers via stdio/SSE/streamable HTTP)
-- [ ] Human-in-the-loop (interrupt agent loop, present choices, resume)
-- [ ] `daimon-macros` crate with `#[tool]` proc macro to auto-derive `Tool` from a function
-- [ ] SQLite memory backend (`feature = "sqlite"`)
-- [ ] Ollama provider (`feature = "ollama"`)
-- [ ] Transition to workspace: split into `daimon-core`, `daimon-macros`, provider crates
-- [ ] JSON Schema validation of tool input before execution
-- [ ] Token-based window (count tokens, not messages) for `SlidingWindowMemory`
-- [ ] `SummaryMemory` — summarize old messages instead of dropping them
+- [x] Chain orchestration (linear pipelines of agents/transforms)
+- [x] Graph orchestration (conditional routing, cycles, fan-out/fan-in)
+- [x] MCP client (connect to external tool servers via stdio/SSE/streamable HTTP)
+- [x] Human-in-the-loop (interrupt agent loop, present choices, resume)
+- [x] `daimon-macros` crate with `#[tool_fn]` proc macro to auto-derive `Tool` from a function
+- [x] SQLite memory backend (`feature = "sqlite"`)
+- [x] Ollama provider (`feature = "ollama"`)
+- [x] Transition to workspace: `daimon-macros` proc-macro crate split out
+- [x] JSON Schema validation of tool input before execution
+- [x] Token-based window (count tokens, not messages) for `SlidingWindowMemory`
+- [x] `SummaryMemory` — summarize old messages instead of dropping them
 
 ## v0.3.0 -- Multi-Agent
 

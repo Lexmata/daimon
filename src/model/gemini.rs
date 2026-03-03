@@ -48,6 +48,7 @@ pub struct Gemini {
     timeout: Option<Duration>,
     max_retries: u32,
     use_bearer_token: bool,
+    cached_content: Option<String>,
 }
 
 impl Gemini {
@@ -67,6 +68,7 @@ impl Gemini {
             timeout: None,
             max_retries: DEFAULT_MAX_RETRIES,
             use_bearer_token: false,
+            cached_content: None,
         }
     }
 
@@ -98,6 +100,17 @@ impl Gemini {
     /// Required for Vertex AI endpoints where the key is an OAuth2 access token.
     pub fn with_bearer_token(mut self) -> Self {
         self.use_bearer_token = true;
+        self
+    }
+
+    /// Reference a previously-created cached content resource.
+    ///
+    /// The name should be in the format `cachedContents/<id>`, as returned
+    /// by the Gemini Caching API. When set, the system instruction and tools
+    /// stored in the cached resource are reused across requests, reducing
+    /// latency and cost for large, repeated contexts.
+    pub fn with_cached_content(mut self, name: impl Into<String>) -> Self {
+        self.cached_content = Some(name.into());
         self
     }
 
@@ -203,6 +216,7 @@ impl Gemini {
         });
 
         GeminiRequest {
+            cached_content: self.cached_content.clone(),
             system_instruction,
             contents,
             tools,
@@ -392,6 +406,7 @@ fn parse_response(response: GeminiResponse) -> Result<ChatResponse> {
         usage: response.usage_metadata.map(|u| Usage {
             input_tokens: u.prompt_token_count,
             output_tokens: u.candidates_token_count,
+            cached_tokens: u.cached_content_token_count,
         }),
     })
 }
@@ -401,6 +416,8 @@ fn parse_response(response: GeminiResponse) -> Result<ChatResponse> {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GeminiRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cached_content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     system_instruction: Option<GeminiContent>,
     contents: Vec<GeminiContent>,
@@ -524,6 +541,8 @@ struct GeminiUsageMetadata {
     prompt_token_count: u32,
     #[serde(default)]
     candidates_token_count: u32,
+    #[serde(default)]
+    cached_content_token_count: u32,
 }
 
 #[cfg(test)]
@@ -598,6 +617,7 @@ mod tests {
             usage_metadata: Some(GeminiUsageMetadata {
                 prompt_token_count: 10,
                 candidates_token_count: 5,
+                cached_content_token_count: 0,
             }),
         };
         let resp = parse_response(raw).unwrap();
