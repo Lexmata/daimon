@@ -1,6 +1,9 @@
+[workspace]
+members = ["daimon-macros"]
+
 [package]
 name = "daimon"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
 description = "A Rust-native AI agent framework"
@@ -13,13 +16,17 @@ categories = ["asynchronous", "api-bindings"]
 readme = "README.md"
 
 [features]
-default = ["openai", "anthropic"]
+default = ["openai", "anthropic", "macros", "ollama"]
+macros = ["dep:daimon-macros"]
 openai = ["dep:reqwest"]
 anthropic = ["dep:reqwest"]
 gemini = ["dep:reqwest"]
 azure = ["dep:reqwest"]
 bedrock = ["dep:aws-sdk-bedrockruntime", "dep:aws-config", "dep:aws-smithy-types"]
-full = ["openai", "anthropic", "gemini", "azure", "bedrock"]
+ollama = ["dep:reqwest"]
+sqlite = ["dep:rusqlite"]
+mcp = ["dep:reqwest"]
+full = ["openai", "anthropic", "gemini", "azure", "bedrock", "ollama", "macros", "mcp"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -31,8 +38,11 @@ tracing = "0.1"
 futures = "0.3"
 pin-project-lite = "0.2"
 async-stream = "0.3"
+jsonschema = "0.43"
 
+daimon-macros = { path = "daimon-macros", version = "0.2.0", optional = true }
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"], default-features = false, optional = true }
+rusqlite = { version = "0.32", features = ["bundled"], optional = true }
 aws-sdk-bedrockruntime = { version = "1", optional = true }
 aws-config = { version = "1", features = ["behavior-version-latest"], optional = true }
 aws-smithy-types = { version = "1", optional = true }
@@ -76,3 +86,23 @@ required-features = ["gemini"]
 name = "azure_agent"
 path = "examples/azure_agent.rs"
 required-features = ["azure"]
+
+[[example]]
+name = "ollama_agent"
+path = "examples/ollama_agent.rs"
+required-features = ["ollama"]
+
+[[example]]
+name = "tool_macro"
+path = "examples/tool_macro.rs"
+required-features = ["openai", "macros"]
+
+[[example]]
+name = "chain"
+path = "examples/chain.rs"
+required-features = ["openai"]
+
+[[example]]
+name = "mcp_client"
+path = "examples/mcp_client.rs"
+required-features = ["mcp", "openai"]

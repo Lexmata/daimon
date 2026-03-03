@@ -41,9 +41,25 @@ pub enum DaimonError {
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
 
-    /// An HTTP request failed (only available with `openai` or `anthropic` features).
+    /// Tool input failed JSON Schema validation.
+    #[error("schema validation failed for tool '{tool}': {errors}")]
+    SchemaValidation {
+        /// Name of the tool whose input failed validation.
+        tool: String,
+        /// Human-readable description of validation errors.
+        errors: String,
+    },
+
+    /// An HTTP request failed.
     #[error("HTTP request failed: {0}")]
-    #[cfg(any(feature = "openai", feature = "anthropic"))]
+    #[cfg(any(
+        feature = "openai",
+        feature = "anthropic",
+        feature = "gemini",
+        feature = "azure",
+        feature = "ollama",
+        feature = "mcp",
+    ))]
     Http(#[from] reqwest::Error),
 
     /// A stream was closed before completing.
@@ -57,6 +73,14 @@ pub enum DaimonError {
     /// The operation was cancelled via a cancellation token.
     #[error("operation cancelled")]
     Cancelled,
+
+    /// An orchestration error (chain or graph execution failure).
+    #[error("orchestration error: {0}")]
+    Orchestration(String),
+
+    /// An MCP protocol error.
+    #[error("MCP error: {0}")]
+    Mcp(String),
 
     /// A catch-all for other errors.
     #[error("{0}")]

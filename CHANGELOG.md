@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-03-03
+
+### Added
+
+- **Provider prompt caching** across all backends:
+  - **Anthropic**: `with_prompt_caching()` now correctly injects `cache_control` blocks on the system message and the last tool definition, enabling actual cache hits. Parses `cache_creation_input_tokens` and `cache_read_input_tokens` from usage with tracing.
+  - **OpenAI**: Parses `prompt_tokens_details.cached_tokens` from the usage response (automatic prompt caching).
+  - **Azure OpenAI**: Same as OpenAI — parses `prompt_tokens_details.cached_tokens`.
+  - **Google Gemini**: New `with_cached_content(name)` builder method to reference a `cachedContents/<id>` resource. Parses `cachedContentTokenCount` from usage metadata.
+  - **AWS Bedrock**: New `with_prompt_caching()` builder inserts `CachePoint` blocks after system messages and tool definitions. Parses `cache_read_input_tokens` from the Converse API response.
+  - **Ollama**: New `with_keep_alive(duration)` builder to control KV cache retention (e.g. `"5m"`, `"1h"`, `"0"`).
+- `Usage::cached_tokens` field — number of input tokens served from the provider's cache (subset of `input_tokens`, defaults to 0).
+
+### Fixed
+
+- **Anthropic caching was non-functional**: the `with_prompt_caching()` flag sent the beta header but never added `cache_control` content blocks, so no caching actually occurred. Now correctly marks the system prompt and last tool definition as cache breakpoints.
+
 ## [0.1.0] - 2026-03-03
 
 ### Added
@@ -48,5 +65,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `commitlint.toml` for Conventional Commits enforcement.
 - `rustfmt.toml` and `clippy.toml` for consistent code style.
 
-[Unreleased]: https://github.com/Lexmata/daimon/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Lexmata/daimon/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Lexmata/daimon/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Lexmata/daimon/releases/tag/v0.1.0

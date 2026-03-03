@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::agent::Agent;
+use crate::agent::hitl::{AskHumanTool, HumanInputHandler};
 use crate::error::{DaimonError, Result};
 use crate::hooks::{AgentHook, ErasedAgentHook, NoOpHook};
 use crate::memory::{Memory, SharedMemory, SlidingWindowMemory};
@@ -19,6 +20,7 @@ pub struct AgentBuilder {
     max_iterations: usize,
     temperature: Option<f32>,
     max_tokens: Option<u32>,
+    validate_tool_inputs: bool,
 }
 
 impl AgentBuilder {
@@ -33,6 +35,7 @@ impl AgentBuilder {
             max_iterations: 25,
             temperature: None,
             max_tokens: None,
+            validate_tool_inputs: true,
         }
     }
 
@@ -90,6 +93,25 @@ impl AgentBuilder {
         self
     }
 
+    /// Enables or disables JSON Schema validation of tool inputs before execution.
+    ///
+    /// When enabled (the default), the agent validates each tool call's arguments
+    /// against the tool's declared `parameters_schema()` before executing it.
+    /// Invalid inputs are returned as error messages to the model so it can
+    /// correct itself on the next iteration.
+    pub fn validate_tool_inputs(mut self, enabled: bool) -> Self {
+        self.validate_tool_inputs = enabled;
+        self
+    }
+
+    /// Adds human-in-the-loop support. Registers an `ask_human` tool that the
+    /// agent can call to request input from the user. The handler receives the
+    /// request and must return the human's response.
+    pub fn human_input<H: HumanInputHandler + 'static>(mut self, handler: H) -> Self {
+        let _ = self.tools.register(AskHumanTool::new(handler));
+        self
+    }
+
     /// Builds the agent. Fails if model is not set.
     pub fn build(self) -> Result<Agent> {
         let model = self
@@ -111,6 +133,7 @@ impl AgentBuilder {
             max_iterations: self.max_iterations,
             temperature: self.temperature,
             max_tokens: self.max_tokens,
+            validate_tool_inputs: self.validate_tool_inputs,
         })
     }
 }

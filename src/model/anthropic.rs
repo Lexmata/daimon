@@ -87,13 +87,23 @@ impl Anthropic {
     }
 
     fn build_request_body(&self, request: &ChatRequest) -> AnthropicRequest {
-        let mut system = None;
+        let mut system: Option<serde_json::Value> = None;
         let mut messages = Vec::new();
 
         for msg in &request.messages {
             match msg.role {
                 Role::System => {
-                    system = msg.content.clone();
+                    if let Some(ref text) = msg.content {
+                        if self.use_prompt_caching {
+                            system = Some(serde_json::json!([{
+                                "type": "text",
+                                "text": text,
+                                "cache_control": {"type": "ephemeral"}
+                            }]));
+                        } else {
+                            system = Some(serde_json::Value::String(text.clone()));
+                        }
+                    }
                 }
                 Role::User => {
                     messages.push(AnthropicMessage {
@@ -142,7 +152,15 @@ impl Anthropic {
         let tools: Option<Vec<AnthropicTool>> = if request.tools.is_empty() {
             None
         } else {
-            Some(request.tools.iter().map(Into::into).collect())
+            let mut tool_list: Vec<AnthropicTool> =
+                request.tools.iter().map(Into::into).collect();
+            if self.use_prompt_caching {
+                if let Some(last) = tool_list.last_mut() {
+                    last.cache_control =
+                        Some(serde_json::json!({"type": "ephemeral"}));
+                }
+            }
+            Some(tool_list)
         };
 
         AnthropicRequest {
@@ -348,9 +366,19 @@ fn parse_response(response: AnthropicResponse) -> Result<ChatResponse> {
     Ok(ChatResponse {
         message,
         stop_reason,
-        usage: response.usage.map(|u| Usage {
-            input_tokens: u.input_tokens,
-            output_tokens: u.output_tokens,
+        usage: response.usage.map(|u| {
+            if u.cache_creation_input_tokens > 0 || u.cache_read_input_tokens > 0 {
+                tracing::debug!(
+                    cache_write = u.cache_creation_input_tokens,
+                    cache_read = u.cache_read_input_tokens,
+                    "prompt caching stats"
+                );
+            }
+            Usage {
+                input_tokens: u.input_tokens,
+                output_tokens: u.output_tokens,
+                cached_tokens: u.cache_read_input_tokens,
+            }
         }),
     })
 }
@@ -361,7 +389,7 @@ fn parse_response(response: AnthropicResponse) -> Result<ChatResponse> {
 struct AnthropicRequest {
     model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    system: Option<String>,
+    system: Option<serde_json::Value>,
     messages: Vec<AnthropicMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<AnthropicTool>>,
@@ -405,6 +433,8 @@ struct AnthropicTool {
     name: String,
     description: String,
     input_schema: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<serde_json::Value>,
 }
 
 impl From<&ToolSpec> for AnthropicTool {
@@ -413,6 +443,7 @@ impl From<&ToolSpec> for AnthropicTool {
             name: spec.name.clone(),
             description: spec.description.clone(),
             input_schema: spec.parameters.clone(),
+            cache_control: None,
         }
     }
 }
@@ -441,6 +472,10 @@ enum AnthropicResponseBlock {
 struct AnthropicUsage {
     input_tokens: u32,
     output_tokens: u32,
+    #[serde(default)]
+    cache_creation_input_tokens: u32,
+    #[serde(default)]
+    cache_read_input_tokens: u32,
 }
 
 #[derive(Deserialize)]
@@ -477,6 +512,8 @@ mod tests {
             usage: Some(AnthropicUsage {
                 input_tokens: 10,
                 output_tokens: 5,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
             }),
         };
         let resp = parse_response(raw).unwrap();
@@ -586,7 +623,51 @@ mod tests {
             max_tokens: None,
         };
         let body = model.build_request_body(&request);
-        assert_eq!(body.system.as_deref(), Some("Be helpful"));
+        assert_eq!(body.system.as_ref().unwrap().as_str(), Some("Be helpful"));
         assert_eq!(body.messages.len(), 1);
+    }
+
+    #[test]
+    fn test_prompt_caching_system_block() {
+        let model = Anthropic::with_api_key("test", "key").with_prompt_caching();
+        let request = ChatRequest {
+            messages: vec![Message::system("Be helpful"), Message::user("hi")],
+            tools: vec![],
+            temperature: None,
+            max_tokens: None,
+        };
+        let body = model.build_request_body(&request);
+        let sys = body.system.unwrap();
+        assert!(sys.is_array(), "system should be array when caching enabled");
+        let blocks = sys.as_array().unwrap();
+        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(blocks[0]["text"], "Be helpful");
+        assert!(blocks[0]["cache_control"].is_object());
+    }
+
+    #[test]
+    fn test_prompt_caching_tool_cache_control() {
+        let model = Anthropic::with_api_key("test", "key").with_prompt_caching();
+        let request = ChatRequest {
+            messages: vec![Message::user("hi")],
+            tools: vec![
+                ToolSpec {
+                    name: "a".into(),
+                    description: "first".into(),
+                    parameters: serde_json::json!({"type": "object"}),
+                },
+                ToolSpec {
+                    name: "b".into(),
+                    description: "second".into(),
+                    parameters: serde_json::json!({"type": "object"}),
+                },
+            ],
+            temperature: None,
+            max_tokens: None,
+        };
+        let body = model.build_request_body(&request);
+        let tools = body.tools.unwrap();
+        assert!(tools[0].cache_control.is_none(), "only last tool gets cache_control");
+        assert!(tools[1].cache_control.is_some(), "last tool should have cache_control");
     }
 }

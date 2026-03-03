@@ -167,6 +167,10 @@ pub struct Usage {
     pub input_tokens: u32,
     /// Number of output (completion) tokens.
     pub output_tokens: u32,
+    /// Number of input tokens served from the provider's cache.
+    /// Cached tokens are a subset of `input_tokens`, not additive.
+    /// Providers that don't report this leave it at 0.
+    pub cached_tokens: u32,
 }
 
 impl Usage {
@@ -179,5 +183,6 @@ impl Usage {
     pub fn accumulate(&mut self, other: &Usage) {
         self.input_tokens += other.input_tokens;
         self.output_tokens += other.output_tokens;
+        self.cached_tokens += other.cached_tokens;
     }
 }

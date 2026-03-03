@@ -57,6 +57,41 @@ impl ToolRegistry {
         self.tools.is_empty()
     }
 
+    /// Validates tool input against the tool's declared JSON Schema.
+    ///
+    /// Returns `Ok(())` if the input is valid, or a `ToolOutput::error` containing
+    /// the validation error details if it fails. This allows the model to see
+    /// the error and correct its arguments on the next iteration.
+    pub fn validate_input(&self, tool_name: &str, input: &serde_json::Value) -> Option<String> {
+        let tool = self.tools.get(tool_name)?;
+        let schema = tool.parameters_schema();
+
+        let validator = match jsonschema::validator_for(&schema) {
+            Ok(v) => v,
+            Err(e) => {
+                return Some(format!("invalid schema for tool '{tool_name}': {e}"));
+            }
+        };
+
+        let result = validator.validate(input);
+        if result.is_ok() {
+            None
+        } else {
+            let errors: Vec<String> = validator
+                .iter_errors(input)
+                .map(|e| {
+                    let path = e.instance_path().to_string();
+                    if path.is_empty() {
+                        e.to_string()
+                    } else {
+                        format!("{path}: {e}")
+                    }
+                })
+                .collect();
+            Some(errors.join("; "))
+        }
+    }
+
     /// Returns tool specs for the model (name, description, parameters schema). Used when building chat requests.
     pub fn tool_specs(&self) -> Vec<ToolSpec> {
         self.tools
@@ -197,5 +232,95 @@ mod tests {
         let result = tool.execute_erased(&serde_json::json!({})).await.unwrap();
         assert_eq!(result.content, "mock result");
         assert!(!result.is_error);
+    }
+
+    struct StrictTool;
+
+    impl Tool for StrictTool {
+        fn name(&self) -> &str {
+            "strict"
+        }
+        fn description(&self) -> &str {
+            "Tool with strict schema"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "minLength": 1 },
+                    "count": { "type": "integer", "minimum": 0 }
+                },
+                "required": ["name", "count"],
+                "additionalProperties": false
+            })
+        }
+        async fn execute(&self, _input: &serde_json::Value) -> Result<ToolOutput> {
+            Ok(ToolOutput::text("ok"))
+        }
+    }
+
+    #[test]
+    fn test_validate_input_valid() {
+        let mut registry = ToolRegistry::new();
+        registry.register(StrictTool).unwrap();
+
+        let input = serde_json::json!({"name": "foo", "count": 5});
+        assert!(registry.validate_input("strict", &input).is_none());
+    }
+
+    #[test]
+    fn test_validate_input_missing_required_field() {
+        let mut registry = ToolRegistry::new();
+        registry.register(StrictTool).unwrap();
+
+        let input = serde_json::json!({"name": "foo"});
+        let err = registry.validate_input("strict", &input);
+        assert!(err.is_some());
+        assert!(err.unwrap().contains("count"));
+    }
+
+    #[test]
+    fn test_validate_input_wrong_type() {
+        let mut registry = ToolRegistry::new();
+        registry.register(StrictTool).unwrap();
+
+        let input = serde_json::json!({"name": "foo", "count": "not_a_number"});
+        let err = registry.validate_input("strict", &input);
+        assert!(err.is_some());
+    }
+
+    #[test]
+    fn test_validate_input_additional_properties() {
+        let mut registry = ToolRegistry::new();
+        registry.register(StrictTool).unwrap();
+
+        let input = serde_json::json!({"name": "foo", "count": 1, "extra": true});
+        let err = registry.validate_input("strict", &input);
+        assert!(err.is_some());
+    }
+
+    #[test]
+    fn test_validate_input_constraint_violation() {
+        let mut registry = ToolRegistry::new();
+        registry.register(StrictTool).unwrap();
+
+        let input = serde_json::json!({"name": "", "count": -1});
+        let err = registry.validate_input("strict", &input);
+        assert!(err.is_some());
+    }
+
+    #[test]
+    fn test_validate_input_nonexistent_tool() {
+        let registry = ToolRegistry::new();
+        assert!(registry.validate_input("missing", &serde_json::json!({})).is_none());
+    }
+
+    #[test]
+    fn test_validate_input_permissive_schema() {
+        let mut registry = ToolRegistry::new();
+        registry.register(MockTool::new("mock")).unwrap();
+
+        let input = serde_json::json!({"anything": "goes", "extra": 42});
+        assert!(registry.validate_input("mock", &input).is_none());
     }
 }
