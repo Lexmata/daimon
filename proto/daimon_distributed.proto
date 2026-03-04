@@ -1,0 +1,38 @@
+syntax = "proto3";
+
+package daimon.distributed;
+
+service TaskBrokerService {
+    rpc Submit(SubmitRequest) returns (SubmitResponse);
+    rpc GetStatus(StatusRequest) returns (StatusResponse);
+    rpc Complete(CompleteRequest) returns (Empty);
+    rpc Fail(FailRequest) returns (Empty);
+}
+
+message SubmitRequest {
+    string task_json = 1;
+}
+
+message SubmitResponse {
+    string task_id = 1;
+}
+
+message StatusRequest {
+    string task_id = 1;
+}
+
+message StatusResponse {
+    string status_json = 1;
+}
+
+message CompleteRequest {
+    string task_id = 1;
+    string result_json = 2;
+}
+
+message FailRequest {
+    string task_id = 1;
+    string error = 2;
+}
+
+message Empty {}

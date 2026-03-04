@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use tokio::sync::Mutex;
 
 use crate::error::Result;
@@ -8,7 +10,7 @@ use crate::model::types::Message;
 ///
 /// When the window is exceeded, the oldest messages are evicted. Thread-safe via internal mutex.
 pub struct SlidingWindowMemory {
-    messages: Mutex<Vec<Message>>,
+    messages: Mutex<VecDeque<Message>>,
     max_messages: usize,
 }
 
@@ -17,7 +19,7 @@ impl SlidingWindowMemory {
     /// When exceeded, oldest messages are dropped.
     pub fn new(max_messages: usize) -> Self {
         Self {
-            messages: Mutex::new(Vec::new()),
+            messages: Mutex::new(VecDeque::new()),
             max_messages,
         }
     }
@@ -33,18 +35,17 @@ impl Default for SlidingWindowMemory {
 impl Memory for SlidingWindowMemory {
     async fn add_message(&self, message: Message) -> Result<()> {
         let mut messages = self.messages.lock().await;
-        messages.push(message);
+        messages.push_back(message);
 
-        if messages.len() > self.max_messages {
-            let drain_count = messages.len() - self.max_messages;
-            messages.drain(..drain_count);
+        while messages.len() > self.max_messages {
+            messages.pop_front();
         }
         Ok(())
     }
 
     async fn get_messages(&self) -> Result<Vec<Message>> {
         let messages = self.messages.lock().await;
-        Ok(messages.clone())
+        Ok(messages.iter().cloned().collect())
     }
 
     async fn clear(&self) -> Result<()> {

@@ -1,19 +1,30 @@
-//! Google Gemini model provider.
+//! Google Gemini model provider for the [Daimon](https://docs.rs/daimon) agent framework.
 //!
-//! This module provides integration with the Google Gemini API (both the
-//! Generative AI endpoint and Vertex AI). It supports tool use, streaming
-//! via SSE, configurable timeouts, and retries with exponential backoff.
+//! Supports the Generative AI endpoint and Vertex AI, tool use, SSE streaming,
+//! configurable timeouts, retries with exponential backoff, and cached content.
+//!
+//! # Example
+//!
+//! ```ignore
+//! use daimon_provider_gemini::Gemini;
+//! use daimon_core::Model;
+//!
+//! let model = Gemini::new("gemini-2.0-flash");
+//! ```
 
 use std::time::Duration;
 
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-use crate::error::{DaimonError, Result};
-use crate::model::Model;
-use crate::model::types::{ChatRequest, ChatResponse, Message, Role, StopReason, ToolSpec, Usage};
-use crate::stream::{ResponseStream, StreamEvent};
-use crate::tool::ToolCall;
+mod embedding;
+
+pub use embedding::GeminiEmbedding;
+
+use daimon_core::{
+    ChatRequest, ChatResponse, DaimonError, Message, Model, ResponseStream, Result, Role,
+    StopReason, StreamEvent, ToolCall, ToolSpec, Usage,
+};
 
 const DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
 const DEFAULT_MAX_RETRIES: u32 = 3;
@@ -31,14 +42,6 @@ fn build_client(timeout: Option<Duration>) -> Client {
 /// Connects to the Gemini REST API. Supports both the public Generative AI
 /// endpoint (default) and Vertex AI via `with_base_url()`. Authentication is
 /// via API key (passed as `?key=` query parameter) or bearer token for Vertex AI.
-///
-/// # Example
-///
-/// ```ignore
-/// use daimon::model::gemini::Gemini;
-///
-/// let model = Gemini::new("gemini-2.0-flash");
-/// ```
 #[derive(Debug)]
 pub struct Gemini {
     client: Client,
@@ -73,10 +76,6 @@ impl Gemini {
     }
 
     /// Set a custom base URL (e.g. for Vertex AI endpoints).
-    ///
-    /// For Vertex AI, use a URL like:
-    /// `https://{REGION}-aiplatform.googleapis.com/v1/projects/{PROJECT}/locations/{REGION}/publishers/google`
-    /// and call `with_bearer_token()` for authentication.
     pub fn with_base_url(mut self, url: impl Into<String>) -> Self {
         self.base_url = url.into();
         self
@@ -106,9 +105,7 @@ impl Gemini {
     /// Reference a previously-created cached content resource.
     ///
     /// The name should be in the format `cachedContents/<id>`, as returned
-    /// by the Gemini Caching API. When set, the system instruction and tools
-    /// stored in the cached resource are reused across requests, reducing
-    /// latency and cost for large, repeated contexts.
+    /// by the Gemini Caching API.
     pub fn with_cached_content(mut self, name: impl Into<String>) -> Self {
         self.cached_content = Some(name.into());
         self
@@ -236,11 +233,17 @@ impl Model for Gemini {
             let req = self.apply_auth(req);
 
             tracing::debug!(attempt, "sending Gemini generateContent request");
-            let response = req.send().await.map_err(DaimonError::Http)?;
+            let response = req
+                .send()
+                .await
+                .map_err(|e| DaimonError::Model(format!("Gemini HTTP error: {e}")))?;
             let status = response.status();
 
             if status.is_success() {
-                let api_resp: GeminiResponse = response.json().await.map_err(DaimonError::Http)?;
+                let api_resp: GeminiResponse = response
+                    .json()
+                    .await
+                    .map_err(|e| DaimonError::Model(format!("Gemini response parse error: {e}")))?;
                 tracing::debug!("received successful Gemini response");
                 return parse_response(api_resp);
             }
@@ -275,7 +278,10 @@ impl Model for Gemini {
         let req = self.apply_auth(req);
 
         tracing::debug!("sending Gemini streaming request");
-        let response = req.send().await.map_err(DaimonError::Http)?;
+        let response = req
+            .send()
+            .await
+            .map_err(|e| DaimonError::Model(format!("Gemini HTTP error: {e}")))?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -295,7 +301,7 @@ impl Model for Gemini {
             let mut stream = Box::pin(byte_stream);
 
             while let Some(chunk) = stream.next().await {
-                let chunk = chunk.map_err(DaimonError::Http)?;
+                let chunk = chunk.map_err(|e| DaimonError::Model(format!("Gemini stream error: {e}")))?;
                 buffer.push_str(&String::from_utf8_lossy(&chunk));
 
                 while let Some(line_end) = buffer.find('\n') {
@@ -662,10 +668,7 @@ mod tests {
     fn test_build_request_with_system_prompt() {
         let model = Gemini::with_api_key("gemini-pro", "key");
         let request = ChatRequest {
-            messages: vec![
-                Message::system("Be helpful"),
-                Message::user("Hello"),
-            ],
+            messages: vec![Message::system("Be helpful"), Message::user("Hello")],
             tools: vec![],
             temperature: Some(0.7),
             max_tokens: Some(1024),
@@ -673,7 +676,10 @@ mod tests {
         let body = model.build_request_body(&request);
         assert!(body.system_instruction.is_some());
         assert_eq!(body.contents.len(), 1);
-        assert_eq!(body.generation_config.as_ref().unwrap().temperature, Some(0.7));
+        assert_eq!(
+            body.generation_config.as_ref().unwrap().temperature,
+            Some(0.7)
+        );
     }
 
     #[test]

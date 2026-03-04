@@ -136,14 +136,15 @@ async fn test_streaming_react_with_tools() {
             StreamEvent::ToolCallDelta { .. } => "tool_delta",
             StreamEvent::ToolCallEnd { .. } => "tool_end",
             StreamEvent::ToolResult { .. } => "tool_result",
+            StreamEvent::Usage { .. } => "usage",
             StreamEvent::Error(_) => "error",
         };
         event_types.push(name);
     }
 
-    // First model call: tool_start, tool_delta x2, tool_end
+    // First model call: tool_start, tool_delta x2, tool_end, usage
     // Then tool execution: tool_result
-    // Second model call: text
+    // Second model call: text, usage
     // Finally: done
     assert_eq!(
         event_types,
@@ -152,8 +153,10 @@ async fn test_streaming_react_with_tools() {
             "tool_delta",
             "tool_delta",
             "tool_end",
+            "usage",
             "tool_result",
             "text",
+            "usage",
             "done"
         ]
     );
@@ -178,9 +181,10 @@ async fn test_empty_stream() {
     while let Some(event) = stream.next().await {
         events.push(event.unwrap());
     }
-    // Empty model stream still yields Done from the ReAct wrapper
-    assert_eq!(events.len(), 1);
-    assert!(matches!(&events[0], StreamEvent::Done));
+    // Empty model stream still yields Usage + Done from the ReAct wrapper
+    assert_eq!(events.len(), 2);
+    assert!(matches!(&events[0], StreamEvent::Usage { .. }));
+    assert!(matches!(&events[1], StreamEvent::Done));
 }
 
 #[tokio::test]
@@ -198,10 +202,11 @@ async fn test_stream_event_ordering() {
             StreamEvent::ToolCallDelta { .. } => "tool_delta",
             StreamEvent::ToolCallEnd { .. } => "tool_end",
             StreamEvent::ToolResult { .. } => "tool_result",
+            StreamEvent::Usage { .. } => "usage",
             StreamEvent::Error(_) => "error",
         };
         event_types.push(name);
     }
 
-    assert_eq!(event_types, vec!["text", "text", "done"]);
+    assert_eq!(event_types, vec!["text", "text", "usage", "done"]);
 }

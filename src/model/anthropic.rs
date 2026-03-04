@@ -198,7 +198,8 @@ impl Model for Anthropic {
             }
 
             tracing::debug!(attempt = attempt, "sending request to Anthropic API");
-            let response = req_builder.send().await?;
+            let response = req_builder.send().await
+                .map_err(|e| DaimonError::Model(format!("Anthropic HTTP error: {e}")))?;
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
 
@@ -251,7 +252,8 @@ impl Model for Anthropic {
         }
 
         tracing::debug!("sending streaming request to Anthropic API");
-        let response = req_builder.send().await?;
+        let response = req_builder.send().await
+            .map_err(|e| DaimonError::Model(format!("Anthropic HTTP error: {e}")))?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -271,7 +273,7 @@ impl Model for Anthropic {
             let mut stream = Box::pin(byte_stream);
 
             while let Some(chunk) = stream.next().await {
-                let chunk = chunk.map_err(DaimonError::Http)?;
+                let chunk = chunk.map_err(|e| DaimonError::Model(format!("Anthropic stream error: {e}")))?;
                 buffer.push_str(&String::from_utf8_lossy(&chunk));
 
                 while let Some(line_end) = buffer.find('\n') {

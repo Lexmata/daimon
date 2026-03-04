@@ -2,20 +2,37 @@
 //!
 //! Build an agent with [`Agent::builder()`], configure model, tools, memory, and hooks,
 //! then call [`Agent::prompt`] or [`Agent::prompt_stream`] to run the ReAct loop.
+//!
+//! ## Multi-Agent Patterns
+//!
+//! - [`as_tool::AgentTool`] — wrap an agent as a tool for another agent
+//! - [`supervisor::Supervisor`] — one agent delegates to specialized sub-agents
+//! - [`handoff::HandoffNetwork`] — agents transfer control to each other
+//! - [`structured::StructuredOutput`] — extract typed data from LLM responses
+//! - [`resumable`] — checkpoint-based resumable agent runs
 
+pub mod as_tool;
 mod builder;
+pub mod fork;
+pub mod handoff;
 pub mod hitl;
+pub mod resumable;
 mod runner;
+pub mod structured;
+pub mod supervisor;
 
 pub use builder::AgentBuilder;
 pub use runner::AgentResponse;
 
 use std::sync::Arc;
 
+use crate::cost::CostTracker;
+use crate::guardrails::{ErasedInputGuardrail, ErasedOutputGuardrail};
 use crate::hooks::ErasedAgentHook;
 use crate::memory::SharedMemory;
+use crate::middleware::MiddlewareStack;
 use crate::model::SharedModel;
-use crate::tool::ToolRegistry;
+use crate::tool::{ToolRegistry, ToolRetryPolicy};
 
 /// An AI agent that runs the ReAct loop: model → tool calls (optional) → model → … → final response.
 ///
@@ -27,10 +44,16 @@ pub struct Agent {
     pub(crate) tools: ToolRegistry,
     pub(crate) memory: SharedMemory,
     pub(crate) hooks: Arc<dyn ErasedAgentHook>,
+    pub(crate) middleware: MiddlewareStack,
+    pub(crate) input_guardrails: Vec<Arc<dyn ErasedInputGuardrail>>,
+    pub(crate) output_guardrails: Vec<Arc<dyn ErasedOutputGuardrail>>,
     pub(crate) max_iterations: usize,
     pub(crate) temperature: Option<f32>,
     pub(crate) max_tokens: Option<u32>,
     pub(crate) validate_tool_inputs: bool,
+    pub(crate) cost_tracker: Option<CostTracker>,
+    pub(crate) max_budget: Option<f64>,
+    pub(crate) tool_retry_policy: Option<ToolRetryPolicy>,
 }
 
 impl std::fmt::Debug for Agent {

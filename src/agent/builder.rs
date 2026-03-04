@@ -2,11 +2,15 @@ use std::sync::Arc;
 
 use crate::agent::Agent;
 use crate::agent::hitl::{AskHumanTool, HumanInputHandler};
+use crate::cost::{CostModel, CostTracker};
 use crate::error::{DaimonError, Result};
+use crate::guardrails::{InputGuardrail, OutputGuardrail};
 use crate::hooks::{AgentHook, ErasedAgentHook, NoOpHook};
 use crate::memory::{Memory, SharedMemory, SlidingWindowMemory};
+use crate::middleware::{Middleware, MiddlewareStack};
 use crate::model::{Model, SharedModel};
-use crate::tool::{Tool, ToolRegistry};
+use crate::prompt::PromptTemplate;
+use crate::tool::{Tool, ToolRegistry, ToolRetryPolicy};
 
 /// Fluent builder for constructing an [`Agent`].
 ///
@@ -14,13 +18,20 @@ use crate::tool::{Tool, ToolRegistry};
 pub struct AgentBuilder {
     model: Option<SharedModel>,
     system_prompt: Option<String>,
+    prompt_template: Option<PromptTemplate>,
     tools: ToolRegistry,
     memory: Option<SharedMemory>,
     hooks: Option<Arc<dyn ErasedAgentHook>>,
+    middleware: MiddlewareStack,
+    input_guardrails: Vec<Arc<dyn crate::guardrails::ErasedInputGuardrail>>,
+    output_guardrails: Vec<Arc<dyn crate::guardrails::ErasedOutputGuardrail>>,
     max_iterations: usize,
     temperature: Option<f32>,
     max_tokens: Option<u32>,
     validate_tool_inputs: bool,
+    cost_model: Option<Arc<dyn CostModel>>,
+    max_budget: Option<f64>,
+    tool_retry_policy: Option<ToolRetryPolicy>,
 }
 
 impl AgentBuilder {
@@ -29,13 +40,20 @@ impl AgentBuilder {
         Self {
             model: None,
             system_prompt: None,
+            prompt_template: None,
             tools: ToolRegistry::new(),
             memory: None,
             hooks: None,
+            middleware: MiddlewareStack::new(),
+            input_guardrails: Vec::new(),
+            output_guardrails: Vec::new(),
             max_iterations: 25,
             temperature: None,
             max_tokens: None,
             validate_tool_inputs: true,
+            cost_model: None,
+            max_budget: None,
+            tool_retry_policy: None,
         }
     }
 
@@ -112,8 +130,55 @@ impl AgentBuilder {
         self
     }
 
+    /// Adds a middleware layer to the agent's pipeline.
+    pub fn middleware<M: Middleware + 'static>(mut self, mw: M) -> Self {
+        self.middleware.push(mw);
+        self
+    }
+
+    /// Adds an input guardrail that validates user input before processing.
+    pub fn input_guardrail<G: InputGuardrail + 'static>(mut self, guard: G) -> Self {
+        self.input_guardrails.push(Arc::new(guard));
+        self
+    }
+
+    /// Adds an output guardrail that validates model output before returning.
+    pub fn output_guardrail<G: OutputGuardrail + 'static>(mut self, guard: G) -> Self {
+        self.output_guardrails.push(Arc::new(guard));
+        self
+    }
+
+    /// Sets a prompt template with variable interpolation instead of a static system prompt.
+    pub fn prompt_template(mut self, template: PromptTemplate) -> Self {
+        self.prompt_template = Some(template);
+        self
+    }
+
+    /// Sets a cost model for tracking token spend. Combine with [`max_budget`](Self::max_budget)
+    /// to enforce a spending limit.
+    pub fn cost_model<C: CostModel + 'static>(mut self, model: C) -> Self {
+        self.cost_model = Some(Arc::new(model));
+        self
+    }
+
+    /// Sets the maximum dollar budget for a single prompt call. The agent aborts
+    /// with [`DaimonError::BudgetExceeded`] once cumulative cost crosses this.
+    pub fn max_budget(mut self, dollars: f64) -> Self {
+        self.max_budget = Some(dollars);
+        self
+    }
+
+    /// Sets a retry policy for transient tool execution failures.
+    pub fn tool_retry_policy(mut self, policy: ToolRetryPolicy) -> Self {
+        self.tool_retry_policy = Some(policy);
+        self
+    }
+
     /// Builds the agent. Fails if model is not set.
-    pub fn build(self) -> Result<Agent> {
+    ///
+    /// Pre-compiles JSON Schema validators and caches tool specs so the
+    /// ReAct loop avoids per-iteration allocation.
+    pub fn build(mut self) -> Result<Agent> {
         let model = self
             .model
             .ok_or_else(|| DaimonError::Builder("model is required".into()))?;
@@ -124,16 +189,32 @@ impl AgentBuilder {
 
         let hooks = self.hooks.unwrap_or_else(|| Arc::new(NoOpHook));
 
+        self.tools.warm_cache();
+
+        let system_prompt = if let Some(ref tpl) = self.prompt_template {
+            Some(tpl.render_static())
+        } else {
+            self.system_prompt
+        };
+
+        let cost_tracker = self.cost_model.map(CostTracker::new);
+
         Ok(Agent {
             model,
-            system_prompt: self.system_prompt,
+            system_prompt,
             tools: self.tools,
             memory,
             hooks,
+            middleware: self.middleware,
+            input_guardrails: self.input_guardrails,
+            output_guardrails: self.output_guardrails,
             max_iterations: self.max_iterations,
             temperature: self.temperature,
             max_tokens: self.max_tokens,
             validate_tool_inputs: self.validate_tool_inputs,
+            cost_tracker,
+            max_budget: self.max_budget,
+            tool_retry_policy: self.tool_retry_policy,
         })
     }
 }

@@ -72,19 +72,88 @@
 
 ## v0.3.0 -- Multi-Agent
 
-- [ ] Agent-as-Tool pattern (wrap an `Agent` as a `Tool` for another agent)
-- [ ] Supervisor pattern (one agent delegates to specialized sub-agents)
-- [ ] Handoff pattern (agents transfer control to each other)
-- [ ] MCP server (expose Daimon tools as an MCP server)
-- [ ] `Retriever` trait + vector store integration (RAG)
-- [ ] Redis memory backend (`feature = "redis"`)
-- [ ] Structured output / extraction (typed responses via serde)
+- [x] Agent-as-Tool pattern (wrap an `Agent` as a `Tool` for another agent)
+- [x] Supervisor pattern (one agent delegates to specialized sub-agents)
+- [x] Handoff pattern (agents transfer control to each other)
+- [x] MCP server (expose Daimon tools as an MCP server)
+- [x] `Retriever` trait + vector store integration (RAG)
+- [x] Redis memory backend (`feature = "redis"`)
+- [x] Structured output / extraction (typed responses via serde)
 
 ## v0.4.0+ -- Production Hardening
 
-- [ ] Workflow orchestration (Eino-style DAG with field mapping)
-- [ ] Checkpointing and state persistence (resume interrupted agent runs)
-- [ ] A2A protocol support
-- [ ] OpenTelemetry export (bridge `tracing` spans to OTLP)
-- [ ] Benchmarking suite (latency, throughput, token efficiency)
-- [ ] Publish to crates.io as open source
+- [x] Workflow orchestration (Eino-style DAG with field mapping)
+- [x] Checkpointing and state persistence (resume interrupted agent runs)
+- [x] A2A protocol support
+- [x] OpenTelemetry export (bridge `tracing` spans to OTLP)
+- [x] Benchmarking suite (latency, throughput, token efficiency)
+- [x] Publish to crates.io as open source
+- [x] Performance optimizations: zero-copy ReAct loop, cached ToolRegistry, VecDeque-based memory, allocation-free token estimation
+- [x] Provider plugin interface: split AWS Bedrock, Google Gemini, Azure OpenAI into `daimon-provider-*` sub-crates with trait-based `Model` plugin system via `daimon-core`
+
+## v0.5.0 -- Core Primitives
+
+- [x] Middleware pipeline (`src/middleware/`): `Middleware` trait with `on_request`, `on_response`, `on_tool_call` hooks; `MiddlewareStack` with short-circuit support; object-safe `ErasedMiddleware`; wired into ReAct loop and tool execution
+- [x] Guardrails (`src/guardrails/`): `InputGuardrail` and `OutputGuardrail` traits with `Pass`/`Block`/`Transform` results; built-in `MaxTokenGuardrail` and `RegexFilterGuardrail`; integrated into `Agent::prompt()`
+- [x] Prompt templates (`src/prompt/`): `PromptTemplate` with `{variable}` interpolation; `PromptBuilder` for composing persona, instructions, constraints, examples; `AgentBuilder::prompt_template()`
+- [x] Cost tracking (`src/cost/`): `CostModel` trait; `CostTracker` with lock-free atomic accumulation; built-in `OpenAiCostModel` and `AnthropicCostModel`; `AgentBuilder::max_budget()` with `BudgetExceeded` error; `AgentResponse.cost` field
+- [x] Embeddings API (`daimon-core/src/embedding.rs`): `EmbeddingModel` trait with `embed()` and `dimensions()`; `ErasedEmbeddingModel` wrapper; `OpenAiEmbedding` and `OllamaEmbedding` provider implementations
+
+## v0.6.0 -- Ecosystem Integrations
+
+- [x] Vector store integrations: `InMemoryVectorStore` (brute-force cosine similarity); `QdrantRetriever` (`feature = "qdrant"`); all implement existing `Retriever` trait
+- [x] Self-healing tool retry (`src/tool/retry.rs`): `ToolRetryPolicy` with `BackoffStrategy` (Fixed, Exponential); retryable error patterns; `AgentBuilder::tool_retry_policy()`; integrated into parallel tool execution
+- [x] Deployment helpers (`src/server/`, `feature = "http-server"`): `AgentServer` wrapping agent behind axum; `POST /prompt`, `POST /prompt/stream` (SSE), `GET /health` endpoints
+
+## v0.7.0 -- Production Hardening
+
+- [x] Evaluation harness (`src/eval/`, `feature = "eval"`): `EvalScenario` with `Scorer` strategies (ExactMatch, Contains, Regex, Custom); `EvalRunner` with concurrency; `EvalResult` with pass/fail, latency, cost
+- [x] Time-travel debugging (`src/checkpoint/replay.rs`): `inspect_run()` to reconstruct `ExecutionTrace` from checkpoints; `list_runs()` for `RunSummary`; `TraceStep` captures per-iteration state
+
+## v0.8.0 -- Framework Polish
+
+- [x] `ContentPolicyGuardrail` — LLM-as-judge guardrail for content safety (input + output)
+- [x] `DynamicContext` trait for runtime prompt variable resolution with `render_dynamic()`
+- [x] `FewShotTemplate` for injecting example input/output pairs into prompts
+- [x] `SemanticSimilarity` scorer using `EmbeddingModel` for evaluation harness
+- [x] `LlmJudge` scorer — LLM-as-judge for evaluation harness
+- [x] `Agent::replay()` — re-run from a checkpoint with modified context (time-travel debugging)
+- [x] Per-tool retry policy override via `Tool::retry_policy()` (takes precedence over agent-level policy)
+- [x] API key authentication middleware for `AgentServer` (`Authorization: Bearer` / `X-API-Key`)
+- [x] Additional embedding providers: `GeminiEmbedding`, `AzureOpenAiEmbedding`, `BedrockEmbedding`
+- [x] Trait-based `VectorStore` plugin system with `upsert`/`query`/`delete`/`count` operations
+- [x] `KnowledgeBase` trait + `SimpleKnowledgeBase` composing `EmbeddingModel` + `VectorStore`
+- [x] `InMemoryVectorStoreBackend` implementing `VectorStore` for development/testing
+- [x] `SimpleKnowledgeBase` auto-implements `Retriever` for seamless agent integration
+
+## v0.9.0 -- Distribution & Runtime
+
+- [x] Streaming cost tracking: `StreamEvent::Usage { iteration, input_tokens, output_tokens, estimated_cost }` emitted after each ReAct iteration
+- [x] Agent cloning / forking: `Agent::fork()`, `Agent::fork_from_checkpoint()`, `Agent::fork_with_memory()` for independent branched agents sharing config
+- [x] Distributed execution: `TaskBroker` trait, `InProcessBroker` (tokio channels), `TaskWorker` with sequential and parallel execution, serializable `AgentTask`/`TaskResult`/`TaskStatus`
+- [x] WebSocket MCP transport: `WebSocketTransport` implementing `McpTransport` via `tokio-tungstenite` with `ws://`/`wss://` support
+
+## v0.10.0 -- Distributed & Ecosystem Polish
+
+- [x] Redis task broker (`RedisBroker`) for multi-process distributed execution (`feature = "redis"`)
+- [x] Builder-style fork (`ForkBuilder`): `Agent::fork_builder()` with system prompt, tool, model, memory, hooks, and guardrail mutation before forking
+- [x] WebSocket MCP server (`McpWsServer`): serve tools over WebSocket connections (`feature = "mcp"`)
+- [x] gRPC transport for distributed execution: `GrpcBrokerServer` / `GrpcBrokerClient` via `tonic` (`feature = "grpc"`)
+- [x] `ToolRegistry::unregister()` for removing tools by name
+
+## v0.11.0 -- Full Distribution Stack
+
+- [x] NATS JetStream task broker (`NatsBroker`) with durable pull consumers (`feature = "nats"`)
+- [x] RabbitMQ task broker (`AmqpBroker`) via AMQP 0-9-1 with manual ack (`feature = "amqp"`)
+- [x] gRPC MCP transport: `McpGrpcServer` and `McpGrpcTransport` for serving/consuming MCP tools over gRPC (`feature = "grpc"` + `feature = "mcp"`)
+- [x] Distributed checkpoint sync: `CheckpointSync` (write-through local+remote), `CheckpointReplicator` (background pull loop), `pull_all()` / `push_all()` for bulk sync
+
+## Future
+
+- [ ] ChromaDB vector store retriever (`feature = "chromadb"`)
+- [ ] Pinecone vector store plugin (`feature = "pinecone"`)
+- [ ] Weaviate vector store plugin (`feature = "weaviate"`)
+- [ ] NATS KV-based checkpoint backend
+- [ ] Redis checkpoint backend
+- [ ] Agent hot-reload (swap model/tools without restarting)
+- [ ] Streaming distributed execution (stream events across process boundaries)

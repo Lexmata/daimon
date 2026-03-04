@@ -6,15 +6,25 @@ use crate::model::types::ToolSpec;
 use crate::tool::traits::{SharedTool, Tool};
 
 /// A registry holding named tools that the agent can invoke.
+///
+/// Caches compiled JSON Schema validators and tool specs to avoid
+/// repeated allocations in the hot path.
 #[derive(Default, Clone)]
 pub struct ToolRegistry {
     tools: HashMap<String, SharedTool>,
+    cached_specs: Option<Arc<[ToolSpec]>>,
+    cached_validators: HashMap<String, Arc<jsonschema::Validator>>,
 }
 
 impl ToolRegistry {
     /// Creates an empty registry.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn invalidate_caches(&mut self) {
+        self.cached_specs = None;
+        self.cached_validators.clear();
     }
 
     /// Registers a tool by name. Returns an error if a tool with the same name already exists.
@@ -24,6 +34,7 @@ impl ToolRegistry {
             return Err(DaimonError::DuplicateTool(name));
         }
         self.tools.insert(name, Arc::new(tool));
+        self.invalidate_caches();
         Ok(())
     }
 
@@ -34,7 +45,17 @@ impl ToolRegistry {
             return Err(DaimonError::DuplicateTool(name));
         }
         self.tools.insert(name, tool);
+        self.invalidate_caches();
         Ok(())
+    }
+
+    /// Removes a tool by name. Returns `true` if the tool was present.
+    pub fn unregister(&mut self, name: &str) -> bool {
+        let removed = self.tools.remove(name).is_some();
+        if removed {
+            self.invalidate_caches();
+        }
+        removed
     }
 
     /// Returns the tool with the given name, or `None` if not found.
@@ -59,10 +80,13 @@ impl ToolRegistry {
 
     /// Validates tool input against the tool's declared JSON Schema.
     ///
-    /// Returns `Ok(())` if the input is valid, or a `ToolOutput::error` containing
-    /// the validation error details if it fails. This allows the model to see
-    /// the error and correct its arguments on the next iteration.
+    /// Uses a cached compiled validator when available. Returns `None` if
+    /// the input is valid, or a description of errors otherwise.
     pub fn validate_input(&self, tool_name: &str, input: &serde_json::Value) -> Option<String> {
+        if let Some(validator) = self.cached_validators.get(tool_name) {
+            return run_validator(validator, input);
+        }
+
         let tool = self.tools.get(tool_name)?;
         let schema = tool.parameters_schema();
 
@@ -73,35 +97,81 @@ impl ToolRegistry {
             }
         };
 
-        let result = validator.validate(input);
-        if result.is_ok() {
-            None
-        } else {
-            let errors: Vec<String> = validator
-                .iter_errors(input)
-                .map(|e| {
-                    let path = e.instance_path().to_string();
-                    if path.is_empty() {
-                        e.to_string()
-                    } else {
-                        format!("{path}: {e}")
-                    }
-                })
-                .collect();
-            Some(errors.join("; "))
+        run_validator(&validator, input)
+    }
+
+    /// Pre-compiles and caches JSON Schema validators for all registered tools.
+    ///
+    /// Call this after all tools are registered and before entering the agent
+    /// loop to avoid per-call validator compilation overhead.
+    pub fn compile_validators(&mut self) {
+        for (name, tool) in &self.tools {
+            if !self.cached_validators.contains_key(name) {
+                let schema = tool.parameters_schema();
+                if let Ok(v) = jsonschema::validator_for(&schema) {
+                    self.cached_validators.insert(name.clone(), Arc::new(v));
+                }
+            }
         }
     }
 
-    /// Returns tool specs for the model (name, description, parameters schema). Used when building chat requests.
-    pub fn tool_specs(&self) -> Vec<ToolSpec> {
-        self.tools
+    /// Returns tool specs for the model. The result is cached and shared via
+    /// `Arc`, so repeated calls return the same allocation.
+    pub fn tool_specs(&self) -> Arc<[ToolSpec]> {
+        if let Some(ref cached) = self.cached_specs {
+            return Arc::clone(cached);
+        }
+
+        let specs: Arc<[ToolSpec]> = self
+            .tools
             .values()
             .map(|tool| ToolSpec {
                 name: tool.name().to_string(),
                 description: tool.description().to_string(),
                 parameters: tool.parameters_schema(),
             })
-            .collect()
+            .collect::<Vec<_>>()
+            .into();
+
+        specs
+    }
+
+    /// Ensures the tool_specs cache is populated. Call after registration is complete.
+    pub fn warm_cache(&mut self) {
+        if self.cached_specs.is_none() {
+            let specs: Arc<[ToolSpec]> = self
+                .tools
+                .values()
+                .map(|tool| ToolSpec {
+                    name: tool.name().to_string(),
+                    description: tool.description().to_string(),
+                    parameters: tool.parameters_schema(),
+                })
+                .collect::<Vec<_>>()
+                .into();
+            self.cached_specs = Some(specs);
+        }
+        self.compile_validators();
+    }
+}
+
+fn run_validator(validator: &jsonschema::Validator, input: &serde_json::Value) -> Option<String> {
+    let result = validator.validate(input);
+    if result.is_ok() {
+        None
+    } else {
+        let errors: Vec<String> = validator
+            .iter_errors(input)
+            .map(|e| {
+                let path = e.instance_path().to_string();
+                if path.is_empty() {
+                    e.to_string()
+                } else {
+                    format!("{path}: {e}")
+                }
+            })
+            .collect();
+        Some(errors.join("; "))
     }
 }
 

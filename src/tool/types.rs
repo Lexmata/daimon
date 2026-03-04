@@ -1,17 +1,8 @@
 //! Types for tool calls, outputs, and configuration.
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
-/// A tool invocation requested by a model, containing the tool name and arguments.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolCall {
-    /// Provider-assigned identifier for this tool call.
-    pub id: String,
-    /// The name of the tool to invoke.
-    pub name: String,
-    /// JSON arguments to pass to the tool.
-    pub arguments: serde_json::Value,
-}
+pub use daimon_core::ToolCall;
 
 /// The result of executing a tool.
 #[derive(Debug, Clone)]

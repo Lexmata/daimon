@@ -1,19 +1,34 @@
-//! Azure OpenAI model provider.
+//! Azure OpenAI model provider for the [Daimon](https://docs.rs/daimon) agent framework.
 //!
-//! This module provides integration with the Azure OpenAI Service. The API wire
-//! format is identical to OpenAI but uses a different URL structure and supports
-//! both API key and Microsoft Entra ID (Azure AD) bearer token authentication.
+//! The API wire format is identical to OpenAI but uses a different URL
+//! structure and supports both API key and Microsoft Entra ID (Azure AD)
+//! bearer token authentication.
+//!
+//! # Example
+//!
+//! ```ignore
+//! use daimon_provider_azure::AzureOpenAi;
+//! use daimon_core::Model;
+//!
+//! let model = AzureOpenAi::new(
+//!     "https://my-resource.openai.azure.com",
+//!     "gpt-4o",
+//! );
+//! ```
 
 use std::time::Duration;
 
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-use crate::error::{DaimonError, Result};
-use crate::model::Model;
-use crate::model::types::{ChatRequest, ChatResponse, Message, Role, StopReason, ToolSpec, Usage};
-use crate::stream::{ResponseStream, StreamEvent};
-use crate::tool::ToolCall;
+mod embedding;
+
+pub use embedding::AzureOpenAiEmbedding;
+
+use daimon_core::{
+    ChatRequest, ChatResponse, DaimonError, Message, Model, ResponseStream, Result, Role,
+    StopReason, StreamEvent, ToolCall, ToolSpec, Usage,
+};
 
 const DEFAULT_API_VERSION: &str = "2024-10-21";
 const DEFAULT_MAX_RETRIES: u32 = 3;
@@ -30,17 +45,6 @@ fn build_client(timeout: Option<Duration>) -> Client {
 ///
 /// Connects to an Azure OpenAI deployment. Authentication is via API key
 /// (default, using the `api-key` header) or Microsoft Entra ID bearer token.
-///
-/// # Example
-///
-/// ```ignore
-/// use daimon::model::azure::AzureOpenAi;
-///
-/// let model = AzureOpenAi::new(
-///     "https://my-resource.openai.azure.com",
-///     "gpt-4o",
-/// );
-/// ```
 #[derive(Debug)]
 pub struct AzureOpenAi {
     client: Client,
@@ -55,10 +59,6 @@ pub struct AzureOpenAi {
 
 impl AzureOpenAi {
     /// Create a new Azure OpenAI client, reading `AZURE_OPENAI_API_KEY` from the environment.
-    ///
-    /// `resource_url` is the base URL of your Azure OpenAI resource
-    /// (e.g. `https://my-resource.openai.azure.com`).
-    /// `deployment_id` is the name of the model deployment.
     pub fn new(resource_url: impl Into<String>, deployment_id: impl Into<String>) -> Self {
         let api_key = std::env::var("AZURE_OPENAI_API_KEY").unwrap_or_default();
         Self::with_api_key(resource_url, deployment_id, api_key)
@@ -103,8 +103,7 @@ impl AzureOpenAi {
 
     /// Use `Authorization: Bearer <token>` instead of `api-key` header.
     ///
-    /// Required for Microsoft Entra ID (Azure AD) authentication. The API key
-    /// field will be treated as the bearer token.
+    /// Required for Microsoft Entra ID (Azure AD) authentication.
     pub fn with_bearer_token(mut self) -> Self {
         self.use_bearer_token = true;
         self
@@ -159,11 +158,19 @@ impl Model for AzureOpenAi {
             let req = self.apply_auth(req);
 
             tracing::debug!(attempt, "sending Azure OpenAI request");
-            let response = req.send().await.map_err(DaimonError::Http)?;
+            let response = req
+                .send()
+                .await
+                .map_err(|e| DaimonError::Model(format!("Azure OpenAI HTTP error: {e}")))?;
             let status = response.status();
 
             if status.is_success() {
-                let api_resp: AzureResponse = response.json().await.map_err(DaimonError::Http)?;
+                let api_resp: AzureResponse = response
+                    .json()
+                    .await
+                    .map_err(|e| {
+                        DaimonError::Model(format!("Azure OpenAI response parse error: {e}"))
+                    })?;
                 tracing::debug!("received successful Azure OpenAI response");
                 return parse_response(api_resp);
             }
@@ -198,7 +205,10 @@ impl Model for AzureOpenAi {
         let req = self.apply_auth(req);
 
         tracing::debug!("sending Azure OpenAI streaming request");
-        let response = req.send().await.map_err(DaimonError::Http)?;
+        let response = req
+            .send()
+            .await
+            .map_err(|e| DaimonError::Model(format!("Azure OpenAI HTTP error: {e}")))?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -218,7 +228,7 @@ impl Model for AzureOpenAi {
             let mut stream = Box::pin(byte_stream);
 
             while let Some(chunk) = stream.next().await {
-                let chunk = chunk.map_err(DaimonError::Http)?;
+                let chunk = chunk.map_err(|e| DaimonError::Model(format!("Azure OpenAI stream error: {e}")))?;
                 buffer.push_str(&String::from_utf8_lossy(&chunk));
 
                 while let Some(line_end) = buffer.find('\n') {
@@ -318,7 +328,6 @@ fn parse_response(response: AzureResponse) -> Result<ChatResponse> {
 }
 
 // --- Azure OpenAI API types ---
-// Wire format is identical to OpenAI but uses different auth and URL structure.
 
 #[derive(Serialize)]
 struct AzureRequest {
@@ -547,8 +556,8 @@ mod tests {
 
     #[test]
     fn test_with_bearer_token() {
-        let model = AzureOpenAi::new("https://x.openai.azure.com", "gpt-4o")
-            .with_bearer_token();
+        let model =
+            AzureOpenAi::new("https://x.openai.azure.com", "gpt-4o").with_bearer_token();
         assert!(model.use_bearer_token);
     }
 

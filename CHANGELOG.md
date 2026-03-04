@@ -7,6 +7,227 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-03-03
+
+### Added
+
+- **NATS JetStream task broker** (`src/distributed/nats_broker.rs`, `feature = "nats"`):
+  - `NatsBroker` implementing `TaskBroker` for durable, at-least-once task delivery via NATS JetStream.
+  - Uses a JetStream stream with `WorkQueue` retention and pull-based consumers with explicit ack.
+  - `NatsBroker::connect(url, stream_name)` auto-creates the stream and configures subjects.
+  - New `nats` feature flag adding `async-nats` dependency.
+  - Re-exported from `daimon::distributed::NatsBroker` and prelude.
+
+- **RabbitMQ task broker** (`src/distributed/amqp_broker.rs`, `feature = "amqp"`):
+  - `AmqpBroker` implementing `TaskBroker` via AMQP 0-9-1 (RabbitMQ).
+  - Durable queue with `delivery_mode = 2` (persistent messages) and manual acknowledgement.
+  - `AmqpBroker::connect(url, queue_name)` declares the queue and creates a channel.
+  - New `amqp` feature flag adding `lapin` dependency.
+  - Re-exported from `daimon::distributed::AmqpBroker` and prelude.
+
+- **gRPC MCP transport** (`src/mcp/grpc_transport.rs`, `feature = "grpc"` + `feature = "mcp"`):
+  - `McpGrpcServer` wraps an `McpServer` and serves MCP tools over gRPC with typed RPCs for Initialize, ToolsList, ToolsCall, plus a raw HandleRaw passthrough.
+  - `McpGrpcTransport` implements `McpTransport` by connecting to a remote gRPC MCP server, enabling transparent gRPC-backed MCP tool discovery and execution.
+  - Proto definition in `proto/daimon_mcp.proto`.
+  - Conditionally compiled when both `grpc` and `mcp` features are enabled.
+  - Re-exported from `daimon::mcp::{McpGrpcServer, McpGrpcTransport}` and prelude.
+
+- **Distributed checkpoint sync** (`src/checkpoint/sync.rs`):
+  - `CheckpointSync` — write-through checkpoint combining a local (fast) and remote (shared) backend. Saves write to both; loads prefer local with remote fallback and automatic backfill. `list_runs()` returns the union.
+  - `CheckpointSync::pull_all()` / `push_all()` for bulk bidirectional synchronization.
+  - `CheckpointReplicator` — background task that periodically pulls new checkpoints from remote to local at a configurable interval.
+  - Both implement/compose the existing `Checkpoint` trait; no new feature flag required.
+  - Re-exported from `daimon::checkpoint::{CheckpointSync, CheckpointReplicator}` and prelude.
+
+- **Redis task broker** (`src/distributed/redis_broker.rs`, `feature = "redis"`):
+  - `RedisBroker` implementing `TaskBroker` for multi-process distributed execution.
+  - Uses Redis Lists (`LPUSH`/`BRPOP`) for the task queue with 1-second blocking pop.
+  - Status tracked in a Redis Hash (`{prefix}:status`); results stored in `{prefix}:results`.
+  - Supports configurable key prefix for namespace isolation.
+  - Serializes `AgentTask` and `TaskResult` as JSON for cross-language interoperability.
+
+- **Builder-style agent fork** (`src/agent/fork.rs`):
+  - `Agent::fork_builder()` returns a `ForkBuilder` pre-populated with the parent agent's config.
+  - Mutate any field before building: `system_prompt()`, `no_system_prompt()`, `model()`, `tool()`, `remove_tool()`, `memory()`, `hooks()`, `middleware()`, `input_guardrail()`, `output_guardrail()`, `max_iterations()`, `temperature()`, `max_tokens()`, `validate_tool_inputs()`, `tool_retry_policy()`.
+  - `build()` produces an independent forked agent with the specified mutations applied.
+  - Enables patterns like A/B testing agent configurations, role specialization from a base agent, and checkpoint-based branching with modified tools.
+
+- **`ToolRegistry::unregister()`** (`src/tool/registry.rs`):
+  - Removes a tool by name. Returns `true` if the tool was present.
+  - Invalidates spec and validator caches on removal.
+
+- **WebSocket MCP server** (`src/mcp/ws_server.rs`, `feature = "mcp"`):
+  - `McpWsServer` listens on a TCP port and serves MCP tools over WebSocket connections.
+  - Each connection handled in a separate task for concurrent multi-client support.
+  - Reuses `McpServer::handle_request_raw()` for JSON-RPC dispatch (initialize, tools/list, tools/call).
+  - `McpWsServer::new(registry)` or `McpWsServer::from_server(server)` constructors.
+  - `serve(addr)` for production (runs indefinitely) and `serve_one(addr)` for testing.
+  - Re-exported from `daimon::mcp::McpWsServer` and `daimon::prelude::McpWsServer`.
+
+- **gRPC transport for distributed execution** (`src/distributed/grpc.rs`, `feature = "grpc"`):
+  - `GrpcBrokerServer` wraps any `TaskBroker` (or `ErasedTaskBroker`) and serves it as a gRPC service.
+  - `GrpcBrokerClient` connects to a remote gRPC broker and implements `TaskBroker` transparently.
+  - Proto service definition in `proto/daimon_distributed.proto` with Submit, GetStatus, Complete, and Fail RPCs.
+  - JSON encoding for task/result payloads ensures cross-language compatibility.
+  - New `grpc` feature flag adding `tonic` and `prost` dependencies.
+  - `tonic-build` compiles proto at build time (conditional on `grpc` feature).
+  - Re-exported from `daimon::distributed::{GrpcBrokerServer, GrpcBrokerClient}` and prelude.
+
+- **Streaming cost tracking** (`daimon-core/src/stream.rs`, `src/agent/runner.rs`):
+  - New `StreamEvent::Usage { iteration, input_tokens, output_tokens, estimated_cost }` variant emitted after each ReAct iteration in `prompt_stream()`.
+  - Token counts are estimated from character length (~4 chars/token) since streaming providers typically don't report usage inline.
+  - When a `CostModel` is configured on the agent, `estimated_cost` accumulates across iterations.
+  - Non-breaking addition to the existing streaming API (new enum variant).
+
+- **Agent cloning / forking** (`src/agent/fork.rs`):
+  - `Agent::fork()` — creates a new agent sharing the same model, tools, hooks, middleware, and guardrails but with independent (empty) memory.
+  - `Agent::fork_from_checkpoint(run_id, checkpoint)` — forks with memory pre-loaded from a saved checkpoint. Enables "what-if" branching: modify tools or system prompt on the fork and diverge from a historical run.
+  - `Agent::fork_with_memory(memory)` — forks with a custom memory backend (e.g. switch from in-memory to SQLite).
+  - All forked agents share model/tools via `Arc` — lightweight and memory-efficient.
+
+- **Distributed agent execution** (`src/distributed/`):
+  - `TaskBroker` trait with `submit`, `status`, `receive`, `complete`, and `fail` methods for distributing agent tasks across workers.
+  - `ErasedTaskBroker` object-safe wrapper for dynamic dispatch.
+  - `InProcessBroker` backed by tokio MPSC channels for single-process parallelism and testing.
+  - `AgentTask` — serializable unit of work with input, optional run ID, and metadata.
+  - `TaskResult` — serializable output with text, iterations, cost, and error fields.
+  - `TaskStatus` enum: `Pending`, `Running`, `Completed(TaskResult)`, `Failed(String)`.
+  - `TaskWorker` with `run_once()`, `run()` (continuous loop), and `run_parallel(concurrency)` for concurrent task processing.
+  - Agent factory pattern ensures each task gets independent memory.
+  - Implement `TaskBroker` for Redis, NATS, or RabbitMQ to enable multi-process/multi-machine execution.
+
+- **WebSocket transport for MCP** (`src/mcp/websocket.rs`):
+  - `WebSocketTransport` implementing `McpTransport` for persistent WebSocket connections.
+  - Supports `ws://` and `wss://` (TLS via rustls) connections.
+  - JSON-RPC messages sent as text frames; automatic ping/pong handling.
+  - Thread-safe via internal mutex on the WebSocket stream.
+  - New `tokio-tungstenite` dependency (optional, behind `mcp` feature).
+  - Re-exported from `daimon::mcp::WebSocketTransport`.
+
+- **Middleware pipeline** (`src/middleware/`):
+  - `Middleware` trait with `on_request(&mut ChatRequest)`, `on_response(&mut ChatResponse)`, and `on_tool_call(&mut ToolCall)` hooks.
+  - `MiddlewareAction` enum: `Continue` or `ShortCircuit(ChatResponse)` for early exit.
+  - `MiddlewareStack` chains layers in registration order; first non-`Continue` action short-circuits.
+  - Object-safe `ErasedMiddleware` wrapper for dynamic dispatch.
+  - `AgentBuilder::middleware()` to add layers.
+  - Wired into the ReAct loop (request/response mutation) and tool execution path.
+
+- **Guardrails** (`src/guardrails/`):
+  - `InputGuardrail` trait: validates user input before the model sees it.
+  - `OutputGuardrail` trait: validates model output before returning to caller.
+  - `GuardrailResult` enum: `Pass`, `Block(String)`, `Transform(String)`.
+  - Built-in `MaxTokenGuardrail` — rejects inputs exceeding an estimated token limit.
+  - Built-in `RegexFilterGuardrail` — block or redact text matching regex patterns (PII, profanity).
+  - `AgentBuilder::input_guardrail()` and `AgentBuilder::output_guardrail()` methods.
+  - `DaimonError::GuardrailBlocked` error variant.
+
+- **Prompt templates** (`src/prompt/`):
+  - `PromptTemplate` with `{variable}` placeholder interpolation via `render_static()` and `render_with()`.
+  - `PromptBuilder` for composing sections: persona, instructions, constraints, examples, and custom sections.
+  - `AgentBuilder::prompt_template()` as an alternative to `system_prompt()`.
+
+- **Cost tracking and budget limits** (`src/cost/`):
+  - `CostModel` trait mapping `(model_id, TokenDirection)` to per-token USD cost.
+  - Built-in `OpenAiCostModel` and `AnthropicCostModel` with approximate pricing.
+  - `CostTracker` with lock-free atomic accumulation (micro-dollar precision).
+  - `AgentBuilder::cost_model()` and `AgentBuilder::max_budget()` — aborts with `DaimonError::BudgetExceeded` when limit is crossed.
+  - `AgentResponse.cost` field for per-prompt cost in USD.
+
+- **Embeddings API** (`daimon-core/src/embedding.rs`):
+  - `EmbeddingModel` trait with `embed(&[&str]) -> Vec<Vec<f32>>` and `dimensions()`.
+  - `ErasedEmbeddingModel` object-safe wrapper and `SharedEmbeddingModel` type alias.
+  - `OpenAiEmbedding` provider (text-embedding-3-small/large) behind `openai` feature.
+  - `OllamaEmbedding` provider behind `ollama` feature.
+
+- **Vector store integrations** (`src/retriever/`):
+  - `InMemoryVectorStore` — brute-force cosine similarity for development and testing, no feature gate required.
+  - `QdrantRetriever` (`feature = "qdrant"`) — retriever backed by Qdrant vector database via `qdrant-client`.
+  - Both accept an `EmbeddingModel` and implement the existing `Retriever` trait.
+
+- **Self-healing tool retry** (`src/tool/retry.rs`):
+  - `ToolRetryPolicy` with `BackoffStrategy::Fixed` and `BackoffStrategy::Exponential`.
+  - Configurable retryable error patterns — only retry errors matching specified substrings.
+  - `AgentBuilder::tool_retry_policy()` applies to all tool calls.
+  - Integrated into `execute_tools_parallel()` with backoff delays between attempts.
+
+- **Deployment helpers** (`src/server/`, `feature = "http-server"`):
+  - `AgentServer` wrapping an `Agent` behind an `axum` router.
+  - `POST /prompt` — JSON request/response endpoint.
+  - `POST /prompt/stream` — Server-Sent Events streaming endpoint.
+  - `GET /health` — health check returning `"ok"`.
+  - `AgentServer::new(agent).bind("0.0.0.0:8080").serve().await`.
+
+- **Evaluation harness** (`src/eval/`, `feature = "eval"`):
+  - `EvalScenario` with configurable input, scorers, max iterations, and max cost.
+  - `Scorer` strategies: `ExactMatch`, `Contains`, `Regex`, and `Custom(Box<dyn Fn>)`.
+  - `EvalRunner` executes scenarios with configurable concurrency.
+  - `EvalResult` with pass/fail, output text, latency, cost, iteration count, and error details.
+
+- **Time-travel debugging** (`src/checkpoint/replay.rs`):
+  - `inspect_run()` reconstructs an `ExecutionTrace` from checkpoint message history.
+  - `list_runs()` returns `RunSummary` for all checkpointed runs.
+  - `TraceStep` captures per-iteration messages, tool calls, response text, and usage.
+  - `ExecutionTrace` with `final_text()` and `total_tool_calls()` helpers.
+
+- **`ContentPolicyGuardrail`** (`src/guardrails/content_policy.rs`):
+  - LLM-as-judge guardrail that evaluates content against a policy description.
+  - Implements both `InputGuardrail` and `OutputGuardrail` — usable on either side.
+  - Configurable with any `SharedModel` and custom policy string.
+
+- **`DynamicContext` trait** (`src/prompt/dynamic.rs`):
+  - `DynamicContext` trait with `key()` and async `resolve()` for runtime prompt variable injection.
+  - `ErasedDynamicContext` object-safe wrapper for dynamic dispatch.
+  - `PromptTemplate::render_dynamic(&[&dyn ErasedDynamicContext])` resolves async contexts at render time.
+
+- **`FewShotTemplate`** (`src/prompt/few_shot.rs`):
+  - Builder for composing example input/output pairs with configurable labels and prefix.
+  - `render()` produces a formatted string suitable for injection into prompts.
+
+- **`SemanticSimilarity` scorer** (`src/eval/scoring.rs`):
+  - New `Scorer::SemanticSimilarity` variant using `EmbeddingModel` for cosine similarity.
+  - `Scorer::semantic(expected, embedding_model, threshold)` constructor.
+  - `EvalScenario::expect_semantic()` convenience method.
+
+- **`LlmJudge` scorer** (`src/eval/scoring.rs`):
+  - New `Scorer::LlmJudge` variant using a `Model` to grade output against a rubric.
+  - `Scorer::llm_judge(rubric, model)` constructor.
+  - `EvalScenario::expect_llm_judge()` convenience method.
+  - All `Scorer::evaluate()` methods are now async to support these advanced scorers.
+
+- **`Agent::replay()`** (`src/agent/resumable.rs`):
+  - Re-run a previous agent execution from a checkpoint with optionally modified context.
+  - `from_iteration` parameter truncates to a specific iteration for "what-if" debugging.
+  - Useful for testing changes to tools, system prompts, or models against prior runs.
+
+- **Per-tool retry policy** (`src/tool/traits.rs`):
+  - `Tool::retry_policy() -> Option<ToolRetryPolicy>` with default `None`.
+  - Per-tool policy takes precedence over agent-level `tool_retry_policy` in the ReAct loop.
+  - `ErasedTool` object-safe wrapper updated to forward `retry_policy()`.
+
+- **API key authentication** (`src/server/mod.rs`):
+  - `AgentServer::api_key()` builder method enables request authentication.
+  - Supports `Authorization: Bearer <key>` and `X-API-Key: <key>` headers.
+  - Returns 401 Unauthorized for missing or invalid keys.
+
+- **Additional embedding providers**:
+  - `GeminiEmbedding` (`daimon-provider-gemini`) — Google batchEmbedContents API.
+  - `AzureOpenAiEmbedding` (`daimon-provider-azure`) — Azure OpenAI Embeddings API.
+  - `BedrockEmbedding` (`daimon-provider-bedrock`) — Amazon Titan Embeddings via InvokeModel.
+
+- **Vector Store plugin system** (`src/retriever/vector_store.rs`, `src/retriever/knowledge_base.rs`):
+  - `VectorStore` trait with `upsert()`, `query()`, `delete()`, `count()` operations.
+  - `ErasedVectorStore` object-safe wrapper and `SharedVectorStore` type alias.
+  - `ScoredDocument` struct pairing documents with similarity scores.
+  - `KnowledgeBase` trait for high-level ingest/search/remove/count operations.
+  - `SimpleKnowledgeBase<V: VectorStore>` composing `EmbeddingModel` + `VectorStore`.
+  - `SimpleKnowledgeBase` auto-implements `Retriever` for seamless agent integration.
+  - `InMemoryVectorStoreBackend` implementing `VectorStore` for development/testing.
+  - `ErasedKnowledgeBase` object-safe wrapper and `SharedKnowledgeBase` type alias.
+
+- New feature flags: `http-server`, `qdrant`, `eval`.
+- New dependencies: `regex-lite`, `axum` (optional), `tower-http` (optional), `qdrant-client` (optional).
+- Updated `prelude` module with all new types.
+
 ## [0.2.0] - 2026-03-03
 
 ### Added
@@ -65,6 +286,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `commitlint.toml` for Conventional Commits enforcement.
 - `rustfmt.toml` and `clippy.toml` for consistent code style.
 
-[Unreleased]: https://github.com/Lexmata/daimon/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Lexmata/daimon/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/Lexmata/daimon/compare/v0.2.0...v0.11.0
 [0.2.0]: https://github.com/Lexmata/daimon/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Lexmata/daimon/releases/tag/v0.1.0
