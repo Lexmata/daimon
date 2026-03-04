@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`daimon-plugin-opensearch` crate** — OpenSearch k-NN backed `VectorStore` implementation using the official `opensearch-rs` client. Supports cosine similarity, L2, and inner-product distance metrics with HNSW indexing via Lucene, NMSLIB, or FAISS engines. Auto-creates k-NN index by default; JSON exported in `index_settings` module for manual setups.
+- **`OpenSearchVectorStoreBuilder`** — builder pattern for configuring index name, space type, engine, HNSW `m` and `ef_construction` parameters, with `build_with_client()` for custom transport (AWS SigV4, etc.).
+- **`opensearch` feature flag** in the main `daimon` crate for opt-in OpenSearch support (included in `full`).
+- **`aws-auth` feature** on `daimon-plugin-opensearch` for Amazon OpenSearch Service SigV4 authentication.
+
 ## [0.15.0] - 2026-03-04
 
 ### Added

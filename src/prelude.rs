@@ -86,6 +86,12 @@ pub use crate::retriever::qdrant::QdrantRetriever;
 #[cfg(feature = "pgvector")]
 pub use daimon_plugin_pgvector::{DistanceMetric, PgVectorStore, PgVectorStoreBuilder};
 
+#[cfg(feature = "opensearch")]
+pub use daimon_plugin_opensearch::{
+    Engine as OpenSearchEngine, OpenSearchVectorStore, OpenSearchVectorStoreBuilder,
+    SpaceType as OpenSearchSpaceType,
+};
+
 #[cfg(feature = "eval")]
 pub use crate::eval::{EvalResult, EvalRunner, EvalScenario, Scorer};
 

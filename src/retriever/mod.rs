@@ -38,6 +38,12 @@ pub mod pgvector {
     pub use daimon_plugin_pgvector::*;
 }
 
+#[cfg(feature = "opensearch")]
+pub mod opensearch {
+    //! OpenSearch k-NN backed vector store — re-exported from `daimon-plugin-opensearch`.
+    pub use daimon_plugin_opensearch::*;
+}
+
 pub use in_memory::InMemoryVectorStore;
 pub use in_memory_store::InMemoryVectorStoreBackend;
 pub use knowledge_base::{
