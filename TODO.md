@@ -172,6 +172,16 @@
 - [x] Fixed unused assignment warning in runner.rs
 - [x] New benchmarks: HotSwapAgent, InProcessBroker, InProcessEventBus, InMemoryCheckpoint, SerializableStreamEvent serde
 
+## v0.15.0 -- Vector Store Plugins
+
+- [x] Moved `Document`, `ScoredDocument`, `VectorStore`, `ErasedVectorStore`, `SharedVectorStore` into `daimon-core` so plugin crates can implement the trait
+- [x] `daimon-plugin-pgvector` crate: pgvector-backed `VectorStore` via `tokio-postgres` + `deadpool-postgres` (`feature = "pgvector"`)
+  - `PgVectorStore` with UPSERT, cosine/L2/inner-product queries, HNSW indexing
+  - `PgVectorStoreBuilder` with connection pooling, auto-migration, configurable HNSW params
+  - `DistanceMetric` enum (Cosine, L2, InnerProduct) with operator class mapping
+  - `migrations` module exporting raw SQL for manual schema setup
+  - Composes with `SimpleKnowledgeBase` for full RAG pipeline
+
 ## Future
 
 - [ ] ChromaDB vector store retriever (`feature = "chromadb"`)

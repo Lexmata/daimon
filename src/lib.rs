@@ -43,8 +43,10 @@
 //! | `servicebus` | Azure Service Bus task broker (via `daimon-provider-azure`) |
 //! | `mcp` | Model Context Protocol client & server |
 //! | `otel` | OpenTelemetry OTLP span export |
+//! | `qdrant` | Qdrant vector store retriever |
+//! | `pgvector` | pgvector-backed vector store (via `daimon-plugin-pgvector`) |
 //! | `grpc` | gRPC transport for distributed execution |
-//! | `full` | All providers + macros + MCP + SQLite + Redis + NATS + AMQP + gRPC + OTel + SQS + Pub/Sub + Service Bus |
+//! | `full` | All providers + macros + MCP + SQLite + Redis + NATS + AMQP + gRPC + OTel + SQS + Pub/Sub + Service Bus + pgvector |
 //!
 //! The core framework compiles with no features; enable providers as needed.
 //!

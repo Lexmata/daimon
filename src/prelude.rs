@@ -83,6 +83,9 @@ pub use crate::mcp::{McpGrpcServer, McpGrpcTransport};
 #[cfg(feature = "qdrant")]
 pub use crate::retriever::qdrant::QdrantRetriever;
 
+#[cfg(feature = "pgvector")]
+pub use daimon_plugin_pgvector::{DistanceMetric, PgVectorStore, PgVectorStoreBuilder};
+
 #[cfg(feature = "eval")]
 pub use crate::eval::{EvalResult, EvalRunner, EvalScenario, Scorer};
 

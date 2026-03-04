@@ -28,17 +28,21 @@
 //! ```
 
 pub mod distributed;
+mod document;
 mod embedding;
 mod error;
 mod model;
 mod stream;
 mod tool_types;
 mod types;
+pub mod vector_store;
 
 pub use distributed::{AgentTask, ErasedTaskBroker, TaskBroker, TaskResult, TaskStatus};
+pub use document::{Document, ScoredDocument};
 pub use embedding::{EmbeddingModel, ErasedEmbeddingModel, SharedEmbeddingModel};
 pub use error::{DaimonError, Result};
 pub use model::{ErasedModel, Model, SharedModel};
 pub use stream::{ResponseStream, StreamEvent};
 pub use tool_types::ToolCall;
 pub use types::{ChatRequest, ChatResponse, Message, Role, StopReason, ToolSpec, Usage};
+pub use vector_store::{ErasedVectorStore, SharedVectorStore, VectorStore};
