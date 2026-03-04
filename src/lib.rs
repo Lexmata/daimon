@@ -45,6 +45,7 @@
 //! | `otel` | OpenTelemetry OTLP span export |
 //! | `qdrant` | Qdrant vector store retriever |
 //! | `pgvector` | pgvector-backed vector store (via `daimon-plugin-pgvector`) |
+//! | `opensearch` | OpenSearch k-NN vector store (via `daimon-plugin-opensearch`) |
 //! | `grpc` | gRPC transport for distributed execution |
 //! | `full` | All providers + macros + MCP + SQLite + Redis + NATS + AMQP + gRPC + OTel + SQS + Pub/Sub + Service Bus + pgvector |
 //!

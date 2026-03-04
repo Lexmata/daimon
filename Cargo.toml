@@ -6,11 +6,12 @@ members = [
     "daimon-provider-gemini",
     "daimon-provider-azure",
     "daimon-plugin-pgvector",
+    "daimon-plugin-opensearch",
 ]
 
 [package]
 name = "daimon"
-version = "0.15.0"
+version = "0.16.0"
 edition = "2024"
 rust-version = "1.85"
 description = "A Rust-native AI agent framework"
@@ -43,12 +44,13 @@ otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", 
 http-server = ["dep:axum", "dep:tower-http"]
 qdrant = ["dep:qdrant-client"]
 pgvector = ["dep:daimon-plugin-pgvector"]
+opensearch = ["dep:daimon-plugin-opensearch"]
 grpc = ["dep:tonic", "dep:prost"]
 eval = []
-full = ["openai", "anthropic", "gemini", "azure", "bedrock", "ollama", "macros", "mcp", "sqlite", "redis", "nats", "amqp", "otel", "http-server", "qdrant", "pgvector", "grpc", "eval", "sqs", "pubsub", "servicebus"]
+full = ["openai", "anthropic", "gemini", "azure", "bedrock", "ollama", "macros", "mcp", "sqlite", "redis", "nats", "amqp", "otel", "http-server", "qdrant", "pgvector", "opensearch", "grpc", "eval", "sqs", "pubsub", "servicebus"]
 
 [dependencies]
-daimon-core = { path = "daimon-core", version = "0.15.0" }
+daimon-core = { path = "daimon-core", version = "0.16.0" }
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
 serde = { version = "1", features = ["derive"] }
@@ -63,11 +65,12 @@ itoa = "1"
 ryu = "1"
 regex-lite = "0.1"
 
-daimon-macros = { path = "daimon-macros", version = "0.15.0", optional = true }
-daimon-provider-bedrock = { path = "daimon-provider-bedrock", version = "0.15.0", optional = true }
-daimon-provider-gemini = { path = "daimon-provider-gemini", version = "0.15.0", optional = true }
-daimon-provider-azure = { path = "daimon-provider-azure", version = "0.15.0", optional = true }
-daimon-plugin-pgvector = { path = "daimon-plugin-pgvector", version = "0.15.0", optional = true }
+daimon-macros = { path = "daimon-macros", version = "0.16.0", optional = true }
+daimon-provider-bedrock = { path = "daimon-provider-bedrock", version = "0.16.0", optional = true }
+daimon-provider-gemini = { path = "daimon-provider-gemini", version = "0.16.0", optional = true }
+daimon-provider-azure = { path = "daimon-provider-azure", version = "0.16.0", optional = true }
+daimon-plugin-pgvector = { path = "daimon-plugin-pgvector", version = "0.16.0", optional = true }
+daimon-plugin-opensearch = { path = "daimon-plugin-opensearch", version = "0.16.0", optional = true }
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"], default-features = false, optional = true }
 rusqlite = { version = "0.32", features = ["bundled"], optional = true }
 redis = { version = "1", features = ["tokio-comp", "aio"], optional = true }

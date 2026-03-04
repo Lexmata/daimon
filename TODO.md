@@ -181,6 +181,14 @@
   - `DistanceMetric` enum (Cosine, L2, InnerProduct) with operator class mapping
   - `migrations` module exporting raw SQL for manual schema setup
   - Composes with `SimpleKnowledgeBase` for full RAG pipeline
+- [x] `daimon-plugin-opensearch` crate: OpenSearch k-NN backed `VectorStore` via `opensearch-rs` (`feature = "opensearch"`)
+  - `OpenSearchVectorStore` with index/query/delete/count via k-NN queries
+  - `OpenSearchVectorStoreBuilder` with auto-index-creation, configurable HNSW params
+  - `SpaceType` enum (CosineSimilarity, L2, InnerProduct)
+  - `Engine` enum (Lucene, Nmslib, Faiss)
+  - `index_settings` module exporting index creation JSON for manual setup
+  - `build_with_client()` for custom transport (AWS SigV4, etc.)
+  - Optional `aws-auth` feature for Amazon OpenSearch Service
 
 ## Future
 
