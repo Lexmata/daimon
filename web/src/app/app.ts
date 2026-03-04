@@ -11,13 +11,14 @@ import { SidebarComponent } from './components/sidebar/sidebar';
       <div class="flex min-h-screen">
         <app-sidebar [isOpen]="sidebarOpen()" (closeSidebar)="sidebarOpen.set(false)" />
         <div class="flex-1 flex flex-col lg:ml-0">
-          <app-header (toggleSidebar)="sidebarOpen.set(!sidebarOpen())" />
+          <app-header [transparent]="false" [showMenuToggle]="true" (toggleSidebar)="sidebarOpen.set(!sidebarOpen())" />
           <main class="flex-1">
             <router-outlet />
           </main>
         </div>
       </div>
     } @else {
+      <app-header [transparent]="true" [showMenuToggle]="false" />
       <router-outlet />
     }
   `,
