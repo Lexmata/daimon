@@ -5,6 +5,7 @@
 //! - [`TokenWindowMemory`] — keeps messages within a token budget
 //! - [`SummaryMemory`] — summarizes old messages using an LLM
 //! - [`SqliteMemory`] — persists to SQLite (feature = "sqlite")
+//! - [`RedisMemory`] — persists to Redis (feature = "redis")
 
 mod sliding_window;
 mod summary;
@@ -21,3 +22,9 @@ mod sqlite;
 
 #[cfg(feature = "sqlite")]
 pub use sqlite::SqliteMemory;
+
+#[cfg(feature = "redis")]
+mod redis;
+
+#[cfg(feature = "redis")]
+pub use self::redis::RedisMemory;

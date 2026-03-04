@@ -3,6 +3,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::error::Result;
+use crate::tool::retry::ToolRetryPolicy;
 use crate::tool::types::ToolOutput;
 
 /// Trait for tools the agent can invoke. Tools must have unique names and declare a JSON Schema for parameters.
@@ -17,6 +18,12 @@ pub trait Tool: Send + Sync {
     /// Executes the tool with the given arguments. Arguments are validated by the model; implementors may still validate.
     fn execute(&self, input: &serde_json::Value)
     -> impl Future<Output = Result<ToolOutput>> + Send;
+
+    /// Per-tool retry policy. If `Some`, overrides the agent-level retry policy
+    /// for this tool. Return `None` to use the agent's default.
+    fn retry_policy(&self) -> Option<ToolRetryPolicy> {
+        None
+    }
 }
 
 /// Object-safe wrapper for the `Tool` trait, enabling dynamic dispatch via `Arc<dyn ErasedTool>`.
@@ -29,6 +36,8 @@ pub trait ErasedTool: Send + Sync {
         &'a self,
         input: &'a serde_json::Value,
     ) -> Pin<Box<dyn Future<Output = Result<ToolOutput>> + Send + 'a>>;
+
+    fn retry_policy(&self) -> Option<ToolRetryPolicy>;
 }
 
 impl<T: Tool> ErasedTool for T {
@@ -49,6 +58,10 @@ impl<T: Tool> ErasedTool for T {
         input: &'a serde_json::Value,
     ) -> Pin<Box<dyn Future<Output = Result<ToolOutput>> + Send + 'a>> {
         Box::pin(Tool::execute(self, input))
+    }
+
+    fn retry_policy(&self) -> Option<ToolRetryPolicy> {
+        Tool::retry_policy(self)
     }
 }
 

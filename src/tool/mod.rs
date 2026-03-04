@@ -5,9 +5,11 @@
 //! collect and look up tools by name.
 
 pub mod registry;
+pub mod retry;
 mod traits;
 pub mod types;
 
 pub use registry::ToolRegistry;
+pub use retry::ToolRetryPolicy;
 pub use traits::{ErasedTool, SharedTool, Tool};
 pub use types::{ToolCall, ToolChoice, ToolOutput};

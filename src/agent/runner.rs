@@ -6,8 +6,62 @@ use tracing::Instrument;
 use crate::agent::Agent;
 use crate::error::{DaimonError, Result};
 use crate::hooks::AgentState;
-use crate::model::types::{ChatRequest, Message, Usage};
+use crate::model::types::{ChatRequest, ChatResponse, Message, Usage};
 use crate::stream::ResponseStream;
+use crate::tool::{ToolRetryPolicy, ErasedTool};
+
+/// Executes a tool with optional retry policy.
+async fn execute_tool_with_retry(
+    tool: &std::sync::Arc<dyn ErasedTool>,
+    arguments: &serde_json::Value,
+    retry_policy: Option<&ToolRetryPolicy>,
+) -> crate::tool::ToolOutput {
+    let max_attempts = retry_policy.map_or(1, |p| 1 + p.max_retries);
+
+    for attempt in 0..max_attempts {
+        match tool.execute_erased(arguments).await {
+            Ok(output) if !output.is_error => return output,
+            Ok(output) => {
+                if attempt + 1 >= max_attempts {
+                    return output;
+                }
+                if let Some(policy) = retry_policy {
+                    if !policy.is_retryable(&output.content) {
+                        return output;
+                    }
+                    let delay = policy.backoff.delay_for(attempt);
+                    tracing::debug!(
+                        tool = tool.name(),
+                        attempt = attempt + 1,
+                        delay_ms = delay.as_millis() as u64,
+                        "retrying tool after error"
+                    );
+                    tokio::time::sleep(delay).await;
+                }
+            }
+            Err(e) => {
+                if attempt + 1 >= max_attempts {
+                    return crate::tool::ToolOutput::error(e.to_string());
+                }
+                if let Some(policy) = retry_policy {
+                    if !policy.is_retryable(&e.to_string()) {
+                        return crate::tool::ToolOutput::error(e.to_string());
+                    }
+                    let delay = policy.backoff.delay_for(attempt);
+                    tracing::debug!(
+                        tool = tool.name(),
+                        attempt = attempt + 1,
+                        delay_ms = delay.as_millis() as u64,
+                        "retrying tool after error"
+                    );
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        }
+    }
+
+    crate::tool::ToolOutput::error("max retries exhausted")
+}
 
 /// The result of an agent prompt, including the full message history,
 /// final text, iteration count, and aggregated token usage.
@@ -21,6 +75,8 @@ pub struct AgentResponse {
     pub iterations: usize,
     /// Aggregated token usage across all iterations (if providers reported it).
     pub usage: Usage,
+    /// Estimated cost in USD for this prompt (requires a CostModel on the agent).
+    pub cost: f64,
 }
 
 impl AgentResponse {
@@ -38,6 +94,7 @@ impl Agent {
     /// final text response or max iterations is reached.
     #[tracing::instrument(skip_all, fields(input_len = input.len()))]
     pub async fn prompt(&self, input: &str) -> Result<AgentResponse> {
+        let actual_input = self.run_input_guardrails(input).await?;
         let history = self.memory.get_messages_erased().await?;
 
         let mut messages = Vec::new();
@@ -45,12 +102,18 @@ impl Agent {
             messages.push(Message::system(system));
         }
         messages.extend(history);
-        messages.push(Message::user(input));
+        messages.push(Message::user(&actual_input));
 
-        self.memory.add_message_erased(Message::user(input)).await?;
+        self.memory
+            .add_message_erased(Message::user(&actual_input))
+            .await?;
 
-        self.run_react_loop(messages, &CancellationToken::new())
-            .await
+        let mut response = self
+            .run_react_loop(messages, &CancellationToken::new())
+            .await?;
+
+        self.run_output_guardrails(&mut response).await?;
+        Ok(response)
     }
 
     /// Send a text prompt with an explicit cancellation token.
@@ -89,18 +152,37 @@ impl Agent {
     }
 
     /// Core ReAct loop shared by all prompt methods.
-    async fn run_react_loop(
+    ///
+    /// Uses `std::mem::take` to move messages and tool specs in and out of
+    /// each `ChatRequest` without cloning, then moves them back after the
+    /// model call completes.
+    pub(crate) async fn run_react_loop(
         &self,
         mut messages: Vec<Message>,
         cancel: &CancellationToken,
     ) -> Result<AgentResponse> {
-        let tool_specs = self.tools.tool_specs();
+        use crate::middleware::MiddlewareAction;
+
+        let mut tool_specs_vec: Vec<crate::model::types::ToolSpec> =
+            self.tools.tool_specs().to_vec();
         let mut iteration = 0;
         let mut total_usage = Usage::default();
+        let mut total_cost = 0.0f64;
+
+        if let Some(ref tracker) = self.cost_tracker {
+            tracker.reset();
+        }
 
         loop {
             if cancel.is_cancelled() {
                 return Err(DaimonError::Cancelled);
+            }
+
+            if let (Some(tracker), Some(limit)) = (&self.cost_tracker, self.max_budget) {
+                let spent = tracker.cumulative_cost();
+                if spent >= limit {
+                    return Err(DaimonError::BudgetExceeded { spent, limit });
+                }
             }
 
             iteration += 1;
@@ -111,20 +193,42 @@ impl Agent {
 
             self.hooks.on_iteration_start_erased(&state).await?;
 
-            let request = ChatRequest {
-                messages: messages.clone(),
-                tools: tool_specs.clone(),
+            let mut request = ChatRequest {
+                messages: std::mem::take(&mut messages),
+                tools: std::mem::take(&mut tool_specs_vec),
                 temperature: self.temperature,
                 max_tokens: self.max_tokens,
             };
 
-            let response = {
+            match self.middleware.run_on_request(&mut request).await? {
+                MiddlewareAction::ShortCircuit(resp) => {
+                    messages = std::mem::take(&mut request.messages);
+                    tool_specs_vec = std::mem::take(&mut request.tools);
+                    let final_text = resp.text().to_string();
+                    messages.push(resp.message.clone());
+                    return Ok(AgentResponse {
+                        messages,
+                        final_text,
+                        iterations: iteration,
+                        usage: total_usage,
+                        cost: total_cost,
+                    });
+                }
+                MiddlewareAction::Continue => {}
+            }
+
+            let result = {
                 tracing::debug!(iteration, "calling model");
                 self.model
                     .generate_erased(&request)
                     .instrument(tracing::info_span!("model_generate", iteration))
-                    .await?
+                    .await
             };
+
+            messages = std::mem::take(&mut request.messages);
+            tool_specs_vec = std::mem::take(&mut request.tools);
+
+            let mut response = result?;
 
             if let Some(ref usage) = response.usage {
                 tracing::debug!(
@@ -133,6 +237,24 @@ impl Agent {
                     "model usage"
                 );
                 total_usage.accumulate(usage);
+                if let Some(ref tracker) = self.cost_tracker {
+                    total_cost += tracker.record("default", usage);
+                }
+            }
+
+            match self.middleware.run_on_response(&mut response).await? {
+                MiddlewareAction::ShortCircuit(replaced) => {
+                    let final_text = replaced.text().to_string();
+                    messages.push(replaced.message.clone());
+                    return Ok(AgentResponse {
+                        messages,
+                        final_text,
+                        iterations: iteration,
+                        usage: total_usage,
+                        cost: total_cost,
+                    });
+                }
+                MiddlewareAction::Continue => {}
             }
 
             self.hooks.on_model_response_erased(&response).await?;
@@ -172,6 +294,7 @@ impl Agent {
                 final_text,
                 iterations: iteration,
                 usage: total_usage,
+                cost: total_cost,
             });
         }
     }
@@ -181,7 +304,7 @@ impl Agent {
     /// When `validate_tool_inputs` is enabled, each call's arguments are
     /// validated against the tool's JSON Schema before execution. Invalid
     /// inputs are returned as error messages to the model.
-    async fn execute_tools_parallel(
+    pub(crate) async fn execute_tools_parallel(
         &self,
         tool_calls: &[crate::tool::ToolCall],
     ) -> Vec<crate::tool::ToolOutput> {
@@ -192,21 +315,41 @@ impl Agent {
         let validate = self.validate_tool_inputs;
 
         for (idx, call) in tool_calls.iter().enumerate() {
-            self.hooks.on_tool_call_erased(call).await.ok();
+            let mut call_mut = call.clone();
+
+            match self.middleware.run_on_tool_call(&mut call_mut).await {
+                Ok(crate::middleware::MiddlewareAction::ShortCircuit(_)) => {
+                    order.push(idx);
+                    let idx_copy = idx;
+                    let output = crate::tool::ToolOutput::text("skipped by middleware");
+                    join_set.spawn(async move { (idx_copy, output) });
+                    continue;
+                }
+                Ok(crate::middleware::MiddlewareAction::Continue) => {}
+                Err(e) => {
+                    order.push(idx);
+                    let idx_copy = idx;
+                    let output = crate::tool::ToolOutput::error(e.to_string());
+                    join_set.spawn(async move { (idx_copy, output) });
+                    continue;
+                }
+            }
+
+            self.hooks.on_tool_call_erased(&call_mut).await.ok();
 
             if validate {
-                if let Some(errors) = self.tools.validate_input(&call.name, &call.arguments) {
+                if let Some(errors) = self.tools.validate_input(&call_mut.name, &call_mut.arguments) {
                     tracing::warn!(
-                        tool = %call.name,
-                        id = %call.id,
+                        tool = %call_mut.name,
+                        id = %call_mut.id,
                         "tool input schema validation failed: {errors}"
                     );
                     let output = crate::tool::ToolOutput::error(format!(
                         "Invalid arguments for tool '{}': {errors}",
-                        call.name
+                        call_mut.name
                     ));
                     let err = DaimonError::SchemaValidation {
-                        tool: call.name.clone(),
+                        tool: call_mut.name.clone(),
                         errors: errors.clone(),
                     };
                     self.hooks.on_error_erased(&err).await.ok();
@@ -217,10 +360,12 @@ impl Agent {
                 }
             }
 
-            let call_clone = call.clone();
-            let tool_opt = self.tools.get(&call.name).cloned();
-            let call_name = call.name.clone();
-            let call_id = call.id.clone();
+            let tool_opt = self.tools.get(&call_mut.name).cloned();
+            let call_name = call_mut.name.clone();
+            let call_id = call_mut.id.clone();
+            let per_tool_policy = tool_opt.as_ref().and_then(|t| t.retry_policy());
+            let agent_policy = self.tool_retry_policy.clone();
+            let effective_policy = per_tool_policy.or(agent_policy);
 
             order.push(idx);
 
@@ -233,10 +378,10 @@ impl Agent {
             join_set.spawn(
                 async move {
                     let result = match tool_opt {
-                        Some(tool) => match tool.execute_erased(&call_clone.arguments).await {
-                            Ok(output) => output,
-                            Err(e) => crate::tool::ToolOutput::error(e.to_string()),
-                        },
+                        Some(tool) => {
+                            execute_tool_with_retry(&tool, &call_mut.arguments, effective_policy.as_ref())
+                                .await
+                        }
                         None => crate::tool::ToolOutput::error(format!(
                             "tool '{}' not found",
                             call_name
@@ -297,7 +442,8 @@ impl Agent {
             .add_message_erased(Message::user(input))
             .await?;
 
-        let tool_specs = self.tools.tool_specs();
+        let mut tool_specs_vec: Vec<crate::model::types::ToolSpec> =
+            self.tools.tool_specs().to_vec();
         let max_iterations = self.max_iterations;
 
         let model = self.model.clone();
@@ -305,6 +451,11 @@ impl Agent {
         let temperature = self.temperature;
         let max_tokens = self.max_tokens;
         let validate = self.validate_tool_inputs;
+        let cost_tracker = self.cost_tracker.as_ref().map(|t| {
+            std::sync::Arc::new(crate::cost::CostTracker::new(
+                std::sync::Arc::clone(&t.cost_model),
+            ))
+        });
 
         let out_stream = async_stream::try_stream! {
             let mut iteration = 0;
@@ -317,14 +468,21 @@ impl Agent {
                     break;
                 }
 
-                let request = ChatRequest {
-                    messages: messages.clone(),
-                    tools: tool_specs.clone(),
+                let input_chars: usize = messages.iter().map(|m| {
+                    m.content.as_ref().map_or(0, |c| c.len())
+                }).sum();
+
+                let mut request = ChatRequest {
+                    messages: std::mem::take(&mut messages),
+                    tools: std::mem::take(&mut tool_specs_vec),
                     temperature,
                     max_tokens,
                 };
 
-                let mut inner = model.generate_stream_erased(&request).await?;
+                let stream_result = model.generate_stream_erased(&request).await;
+                messages = std::mem::take(&mut request.messages);
+                tool_specs_vec = std::mem::take(&mut request.tools);
+                let mut inner = stream_result?;
 
                 let mut pending_tool_calls: HashMap<String, (String, String)> = HashMap::new();
                 let mut had_tool_calls = false;
@@ -359,6 +517,25 @@ impl Agent {
                         }
                     }
                 }
+
+                let est_input_tokens = (input_chars / 4).max(1) as u32;
+                let est_output_tokens = (text_buf.len() / 4).max(1) as u32;
+                let est_usage = Usage {
+                    input_tokens: est_input_tokens,
+                    output_tokens: est_output_tokens,
+                    cached_tokens: 0,
+                };
+                let estimated_cost = cost_tracker
+                    .as_ref()
+                    .map(|t| t.record("default", &est_usage))
+                    .unwrap_or(0.0);
+
+                yield StreamEvent::Usage {
+                    iteration,
+                    input_tokens: est_input_tokens,
+                    output_tokens: est_output_tokens,
+                    estimated_cost,
+                };
 
                 if !had_tool_calls {
                     if !text_buf.is_empty() {
@@ -425,6 +602,44 @@ impl Agent {
         };
 
         Ok(Box::pin(out_stream))
+    }
+
+    /// Runs input guardrails. Returns the (potentially transformed) input or an error.
+    async fn run_input_guardrails(&self, input: &str) -> Result<String> {
+        let mut current = input.to_string();
+        for guard in &self.input_guardrails {
+            match guard.check_erased(&current, &[]).await? {
+                crate::guardrails::GuardrailResult::Pass => {}
+                crate::guardrails::GuardrailResult::Block(msg) => {
+                    return Err(DaimonError::GuardrailBlocked(msg));
+                }
+                crate::guardrails::GuardrailResult::Transform(new_input) => {
+                    current = new_input;
+                }
+            }
+        }
+        Ok(current)
+    }
+
+    /// Runs output guardrails on the final response.
+    async fn run_output_guardrails(&self, response: &mut AgentResponse) -> Result<()> {
+        for guard in &self.output_guardrails {
+            let chat_resp = ChatResponse {
+                message: Message::assistant(&response.final_text),
+                stop_reason: crate::model::types::StopReason::EndTurn,
+                usage: Some(response.usage.clone()),
+            };
+            match guard.check_erased(&chat_resp).await? {
+                crate::guardrails::GuardrailResult::Pass => {}
+                crate::guardrails::GuardrailResult::Block(msg) => {
+                    return Err(DaimonError::GuardrailBlocked(msg));
+                }
+                crate::guardrails::GuardrailResult::Transform(new_text) => {
+                    response.final_text = new_text;
+                }
+            }
+        }
+        Ok(())
     }
 }
 

@@ -141,13 +141,14 @@ impl Model for OpenAi {
                 .json(&body)
                 .send()
                 .await
-                .map_err(DaimonError::Http)?;
+                .map_err(|e| DaimonError::Model(format!("OpenAI HTTP error: {e}")))?;
 
             let status = response.status();
 
             if status.is_success() {
                 tracing::debug!("received successful response");
-                let oai_response: OpenAiResponse = response.json().await?;
+                let oai_response: OpenAiResponse = response.json().await
+                    .map_err(|e| DaimonError::Model(format!("OpenAI response parse error: {e}")))?;
                 return parse_response(oai_response);
             }
 
@@ -187,7 +188,8 @@ impl Model for OpenAi {
             .header("Authorization", format!("Bearer {}", self.api_key))
             .json(&body)
             .send()
-            .await?;
+            .await
+            .map_err(|e| DaimonError::Model(format!("OpenAI HTTP error: {e}")))?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -207,7 +209,7 @@ impl Model for OpenAi {
             let mut stream = Box::pin(byte_stream);
 
             while let Some(chunk) = stream.next().await {
-                let chunk = chunk.map_err(DaimonError::Http)?;
+                let chunk = chunk.map_err(|e| DaimonError::Model(format!("OpenAI stream error: {e}")))?;
                 buffer.push_str(&String::from_utf8_lossy(&chunk));
 
                 while let Some(line_end) = buffer.find('\n') {

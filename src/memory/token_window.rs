@@ -1,10 +1,40 @@
 //! Token-budget-based conversation memory.
 
+use std::collections::VecDeque;
+
 use tokio::sync::Mutex;
 
 use crate::error::Result;
 use crate::memory::traits::Memory;
 use crate::model::types::Message;
+
+/// Estimates the byte-length of a JSON value without allocating a String.
+fn json_value_len(v: &serde_json::Value) -> usize {
+    match v {
+        serde_json::Value::Null => 4,
+        serde_json::Value::Bool(b) => if *b { 4 } else { 5 },
+        serde_json::Value::Number(n) => {
+            // fast path: count digits without allocation
+            let mut buf = itoa::Buffer::new();
+            if let Some(i) = n.as_i64() {
+                buf.format(i).len()
+            } else if let Some(u) = n.as_u64() {
+                buf.format(u).len()
+            } else {
+                // f64: use ryu for allocation-free formatting
+                let mut fbuf = ryu::Buffer::new();
+                fbuf.format(n.as_f64().unwrap_or(0.0)).len()
+            }
+        }
+        serde_json::Value::String(s) => s.len() + 2,
+        serde_json::Value::Array(arr) => {
+            2 + arr.iter().map(|v| json_value_len(v) + 1).sum::<usize>()
+        }
+        serde_json::Value::Object(map) => {
+            2 + map.iter().map(|(k, v)| k.len() + 3 + json_value_len(v) + 1).sum::<usize>()
+        }
+    }
+}
 
 /// Estimates the token count of a message using a simple heuristic.
 ///
@@ -20,17 +50,15 @@ fn default_estimate_tokens(msg: &Message) -> usize {
 
     for tc in &msg.tool_calls {
         chars += tc.name.len();
-        chars += tc.arguments.to_string().len();
+        chars += json_value_len(&tc.arguments);
     }
 
     if let Some(ref id) = msg.tool_call_id {
         chars += id.len();
     }
 
-    // role label overhead (~6 chars)
     chars += 6;
 
-    // ~4 chars per token
     chars.div_ceil(4)
 }
 
@@ -57,21 +85,27 @@ type TokenCounterFn = Box<dyn Fn(&Message) -> usize + Send + Sync>;
 /// let memory = TokenWindowMemory::new(4096);
 /// ```
 pub struct TokenWindowMemory {
-    messages: Mutex<Vec<Message>>,
-    token_counts: Mutex<Vec<usize>>,
+    inner: Mutex<TokenWindowInner>,
     max_tokens: usize,
-    total_tokens: Mutex<usize>,
     token_counter: TokenCounterFn,
+}
+
+struct TokenWindowInner {
+    messages: VecDeque<Message>,
+    token_counts: VecDeque<usize>,
+    total_tokens: usize,
 }
 
 impl TokenWindowMemory {
     /// Creates a new token window with the given maximum token budget.
     pub fn new(max_tokens: usize) -> Self {
         Self {
-            messages: Mutex::new(Vec::new()),
-            token_counts: Mutex::new(Vec::new()),
+            inner: Mutex::new(TokenWindowInner {
+                messages: VecDeque::new(),
+                token_counts: VecDeque::new(),
+                total_tokens: 0,
+            }),
             max_tokens,
-            total_tokens: Mutex::new(0),
             token_counter: Box::new(default_estimate_tokens),
         }
     }
@@ -96,43 +130,39 @@ impl TokenWindowMemory {
 
     /// Returns the current total estimated token count.
     pub async fn current_tokens(&self) -> usize {
-        *self.total_tokens.lock().await
+        self.inner.lock().await.total_tokens
     }
 }
 
 impl Memory for TokenWindowMemory {
     async fn add_message(&self, message: Message) -> Result<()> {
         let tokens = (self.token_counter)(&message);
+        let mut inner = self.inner.lock().await;
 
-        let mut messages = self.messages.lock().await;
-        let mut counts = self.token_counts.lock().await;
-        let mut total = self.total_tokens.lock().await;
+        inner.messages.push_back(message);
+        inner.token_counts.push_back(tokens);
+        inner.total_tokens += tokens;
 
-        messages.push(message);
-        counts.push(tokens);
-        *total += tokens;
-
-        while *total > self.max_tokens && messages.len() > 1 {
-            let removed_tokens = counts.remove(0);
-            messages.remove(0);
-            *total -= removed_tokens;
+        while inner.total_tokens > self.max_tokens && inner.messages.len() > 1 {
+            if let Some(removed_tokens) = inner.token_counts.pop_front() {
+                inner.messages.pop_front();
+                inner.total_tokens -= removed_tokens;
+            }
         }
 
         Ok(())
     }
 
     async fn get_messages(&self) -> Result<Vec<Message>> {
-        let messages = self.messages.lock().await;
-        Ok(messages.clone())
+        let inner = self.inner.lock().await;
+        Ok(inner.messages.iter().cloned().collect())
     }
 
     async fn clear(&self) -> Result<()> {
-        let mut messages = self.messages.lock().await;
-        let mut counts = self.token_counts.lock().await;
-        let mut total = self.total_tokens.lock().await;
-        messages.clear();
-        counts.clear();
-        *total = 0;
+        let mut inner = self.inner.lock().await;
+        inner.messages.clear();
+        inner.token_counts.clear();
+        inner.total_tokens = 0;
         Ok(())
     }
 }

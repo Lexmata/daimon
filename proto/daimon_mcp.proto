@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+package daimon.mcp;
+
+service McpService {
+    rpc Initialize(InitializeRequest) returns (JsonRpcResult);
+    rpc ToolsList(ToolsListRequest) returns (JsonRpcResult);
+    rpc ToolsCall(ToolsCallRequest) returns (JsonRpcResult);
+    rpc HandleRaw(RawJsonRpc) returns (RawJsonRpc);
+}
+
+message InitializeRequest {}
+
+message ToolsListRequest {}
+
+message ToolsCallRequest {
+    string name = 1;
+    string arguments_json = 2;
+}
+
+message RawJsonRpc {
+    string body = 1;
+}
+
+message JsonRpcResult {
+    string result_json = 1;
+}

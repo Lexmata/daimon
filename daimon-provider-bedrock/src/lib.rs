@@ -1,7 +1,18 @@
-//! Amazon Bedrock model provider for Daimon.
+//! Amazon Bedrock model provider for the [Daimon](https://docs.rs/daimon) agent framework.
 //!
 //! Supports the Bedrock Converse API for non-streaming and streaming inference,
-//! with optional guardrails and configurable retries.
+//! with optional guardrails, prompt caching, and configurable retries.
+//!
+//! # Example
+//!
+//! ```ignore
+//! use daimon_provider_bedrock::Bedrock;
+//! use daimon_core::Model;
+//!
+//! let model = Bedrock::new("us.anthropic.claude-sonnet-4-20250514")
+//!     .with_region("us-east-1")
+//!     .with_prompt_caching();
+//! ```
 
 use std::time::Duration;
 
@@ -13,11 +24,14 @@ use aws_sdk_bedrockruntime::types::{
     ToolResultContentBlock, ToolResultStatus, ToolSpecification, ToolUseBlock,
 };
 
-use crate::error::{DaimonError, Result};
-use crate::model::Model;
-use crate::model::types::{ChatRequest, ChatResponse, Message, Role, StopReason, Usage};
-use crate::stream::{ResponseStream, StreamEvent};
-use crate::tool::ToolCall;
+mod embedding;
+
+pub use embedding::BedrockEmbedding;
+
+use daimon_core::{
+    ChatRequest, ChatResponse, DaimonError, Message, Model, ResponseStream, Result, Role,
+    StopReason, StreamEvent, ToolCall, Usage,
+};
 
 /// Amazon Bedrock model provider using the Converse API.
 ///
@@ -77,9 +91,6 @@ impl Bedrock {
     ///
     /// When enabled, a `CachePoint` content block is appended after the
     /// system prompt and after the tool configuration in each request.
-    /// This allows the Bedrock Converse API to cache and reuse these
-    /// prefix segments across requests, reducing latency and cost for
-    /// models that support it (e.g. Anthropic models on Bedrock).
     pub fn with_prompt_caching(mut self) -> Self {
         self.use_prompt_caching = true;
         self
@@ -234,7 +245,8 @@ impl Bedrock {
         let mut text_content = String::new();
         let mut tool_calls = Vec::new();
 
-        if let Some(aws_sdk_bedrockruntime::types::ConverseOutput::Message(msg)) = output.output() {
+        if let Some(aws_sdk_bedrockruntime::types::ConverseOutput::Message(msg)) = output.output()
+        {
             for block in msg.content() {
                 match block {
                     ContentBlock::Text(t) => text_content.push_str(t),
@@ -280,7 +292,6 @@ impl Bedrock {
     }
 }
 
-/// Returns true if the error is retryable (throttling or server error).
 fn is_retryable_error(err: impl std::fmt::Display) -> bool {
     let s = err.to_string();
     let s_lower = s.to_lowercase();
@@ -297,8 +308,7 @@ impl Model for Bedrock {
         let client = self.get_client().await?;
         tracing::debug!("obtained Bedrock client");
 
-        let (system_blocks, messages) =
-            Self::build_messages(request, self.use_prompt_caching);
+        let (system_blocks, messages) = Self::build_messages(request, self.use_prompt_caching);
         let tool_config = Self::build_tool_config(request, self.use_prompt_caching);
         tracing::debug!(
             system_blocks = system_blocks.len(),
@@ -331,8 +341,7 @@ impl Model for Bedrock {
             }
             req_builder = req_builder.inference_config(inference_config.build());
 
-            if let (Some(id), Some(version)) = (&self.guardrail_id, &self.guardrail_version)
-            {
+            if let (Some(id), Some(version)) = (&self.guardrail_id, &self.guardrail_version) {
                 let guardrail_config = GuardrailConfiguration::builder()
                     .guardrail_identifier(id)
                     .guardrail_version(version)
@@ -379,8 +388,7 @@ impl Model for Bedrock {
         let client = self.get_client().await?;
         tracing::debug!("obtained Bedrock client for streaming");
 
-        let (system_blocks, messages) =
-            Self::build_messages(request, self.use_prompt_caching);
+        let (system_blocks, messages) = Self::build_messages(request, self.use_prompt_caching);
         let tool_config = Self::build_tool_config(request, self.use_prompt_caching);
         tracing::debug!(
             system_blocks = system_blocks.len(),
@@ -530,6 +538,7 @@ fn document_to_json(doc: &aws_smithy_types::Document) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use daimon_core::ToolSpec;
 
     #[test]
     fn test_bedrock_new() {
@@ -717,7 +726,7 @@ mod tests {
     fn test_build_tool_config_with_tools() {
         let request = ChatRequest {
             messages: vec![],
-            tools: vec![crate::model::types::ToolSpec {
+            tools: vec![ToolSpec {
                 name: "calc".into(),
                 description: "Calculator".into(),
                 parameters: serde_json::json!({"type": "object"}),
