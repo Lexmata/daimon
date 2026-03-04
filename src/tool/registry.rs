@@ -14,6 +14,8 @@ pub struct ToolRegistry {
     tools: HashMap<String, SharedTool>,
     cached_specs: Option<Arc<[ToolSpec]>>,
     cached_validators: HashMap<String, Arc<jsonschema::Validator>>,
+    generation: u64,
+    specs_generation: u64,
 }
 
 impl ToolRegistry {
@@ -25,6 +27,7 @@ impl ToolRegistry {
     fn invalidate_caches(&mut self) {
         self.cached_specs = None;
         self.cached_validators.clear();
+        self.generation = self.generation.wrapping_add(1);
     }
 
     /// Registers a tool by name. Returns an error if a tool with the same name already exists.
@@ -117,9 +120,16 @@ impl ToolRegistry {
 
     /// Returns tool specs for the model. The result is cached and shared via
     /// `Arc`, so repeated calls return the same allocation.
+    ///
+    /// The cache is lazily populated on first call and invalidated when
+    /// tools are registered/unregistered. For `&self` access without
+    /// interior mutability, call [`warm_cache`](Self::warm_cache) after
+    /// registration is complete to ensure the cache is pre-built.
     pub fn tool_specs(&self) -> Arc<[ToolSpec]> {
         if let Some(ref cached) = self.cached_specs {
-            return Arc::clone(cached);
+            if self.specs_generation == self.generation {
+                return Arc::clone(cached);
+            }
         }
 
         let specs: Arc<[ToolSpec]> = self
@@ -136,21 +146,33 @@ impl ToolRegistry {
         specs
     }
 
+    /// Mutable version of `tool_specs` that stores the result in the cache.
+    pub fn tool_specs_mut(&mut self) -> Arc<[ToolSpec]> {
+        if let Some(ref cached) = self.cached_specs {
+            if self.specs_generation == self.generation {
+                return Arc::clone(cached);
+            }
+        }
+
+        let specs: Arc<[ToolSpec]> = self
+            .tools
+            .values()
+            .map(|tool| ToolSpec {
+                name: tool.name().to_string(),
+                description: tool.description().to_string(),
+                parameters: tool.parameters_schema(),
+            })
+            .collect::<Vec<_>>()
+            .into();
+
+        self.cached_specs = Some(Arc::clone(&specs));
+        self.specs_generation = self.generation;
+        specs
+    }
+
     /// Ensures the tool_specs cache is populated. Call after registration is complete.
     pub fn warm_cache(&mut self) {
-        if self.cached_specs.is_none() {
-            let specs: Arc<[ToolSpec]> = self
-                .tools
-                .values()
-                .map(|tool| ToolSpec {
-                    name: tool.name().to_string(),
-                    description: tool.description().to_string(),
-                    parameters: tool.parameters_schema(),
-                })
-                .collect::<Vec<_>>()
-                .into();
-            self.cached_specs = Some(specs);
-        }
+        self.tool_specs_mut();
         self.compile_validators();
     }
 }

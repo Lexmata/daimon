@@ -35,17 +35,16 @@ impl Default for SlidingWindowMemory {
 impl Memory for SlidingWindowMemory {
     async fn add_message(&self, message: Message) -> Result<()> {
         let mut messages = self.messages.lock().await;
-        messages.push_back(message);
-
-        while messages.len() > self.max_messages {
+        if messages.len() >= self.max_messages {
             messages.pop_front();
         }
+        messages.push_back(message);
         Ok(())
     }
 
     async fn get_messages(&self) -> Result<Vec<Message>> {
-        let messages = self.messages.lock().await;
-        Ok(messages.iter().cloned().collect())
+        let mut messages = self.messages.lock().await;
+        Ok(messages.make_contiguous().to_vec())
     }
 
     async fn clear(&self) -> Result<()> {

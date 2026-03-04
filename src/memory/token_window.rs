@@ -154,8 +154,8 @@ impl Memory for TokenWindowMemory {
     }
 
     async fn get_messages(&self) -> Result<Vec<Message>> {
-        let inner = self.inner.lock().await;
-        Ok(inner.messages.iter().cloned().collect())
+        let mut inner = self.inner.lock().await;
+        Ok(inner.messages.make_contiguous().to_vec())
     }
 
     async fn clear(&self) -> Result<()> {
