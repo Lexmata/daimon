@@ -202,12 +202,11 @@ impl Agent {
 
             match self.middleware.run_on_request(&mut request).await? {
                 MiddlewareAction::ShortCircuit(resp) => {
-                    messages = std::mem::take(&mut request.messages);
-                    tool_specs_vec = std::mem::take(&mut request.tools);
+                    let mut msgs = std::mem::take(&mut request.messages);
                     let final_text = resp.text().to_string();
-                    messages.push(resp.message.clone());
+                    msgs.push(resp.message);
                     return Ok(AgentResponse {
-                        messages,
+                        messages: msgs,
                         final_text,
                         iterations: iteration,
                         usage: total_usage,
@@ -245,7 +244,7 @@ impl Agent {
             match self.middleware.run_on_response(&mut response).await? {
                 MiddlewareAction::ShortCircuit(replaced) => {
                     let final_text = replaced.text().to_string();
-                    messages.push(replaced.message.clone());
+                    messages.push(replaced.message);
                     return Ok(AgentResponse {
                         messages,
                         final_text,
@@ -260,18 +259,17 @@ impl Agent {
             self.hooks.on_model_response_erased(&response).await?;
 
             if response.has_tool_calls() {
-                let tool_calls = response.tool_calls().to_vec();
+                let tool_calls = std::mem::take(&mut response.message.tool_calls);
                 let assistant_msg = Message::assistant_with_tool_calls(tool_calls.clone());
-                messages.push(assistant_msg.clone());
-
-                self.memory.add_message_erased(assistant_msg).await?;
+                self.memory.add_message_erased(assistant_msg.clone()).await?;
+                messages.push(assistant_msg);
 
                 let tool_results = self.execute_tools_parallel(&tool_calls).await;
 
                 for (call, tool_result) in tool_calls.iter().zip(tool_results) {
                     let result_msg = Message::tool_result(&call.id, &tool_result.content);
-                    messages.push(result_msg.clone());
-                    self.memory.add_message_erased(result_msg).await?;
+                    self.memory.add_message_erased(result_msg.clone()).await?;
+                    messages.push(result_msg);
                 }
 
                 self.hooks.on_iteration_end_erased(&state).await?;
@@ -284,8 +282,8 @@ impl Agent {
             }
 
             let final_text = response.text().to_string();
-            messages.push(response.message.clone());
-            self.memory.add_message_erased(response.message).await?;
+            self.memory.add_message_erased(response.message.clone()).await?;
+            messages.push(response.message);
 
             self.hooks.on_iteration_end_erased(&state).await?;
 

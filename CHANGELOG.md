@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **ToolRegistry: generation-based cache invalidation** — `tool_specs()` now uses a generation counter to detect stale caches. Added `tool_specs_mut()` for callers with `&mut self` that need to persist the computed specs into the cache. `warm_cache()` now delegates to `tool_specs_mut()`, avoiding duplicate logic.
+- **SlidingWindowMemory & TokenWindowMemory: contiguous slice clone** — `get_messages()` now calls `make_contiguous().to_vec()` instead of `iter().cloned().collect()`, producing a single memcpy when the deque is already contiguous and avoiding per-element overhead.
+- **SlidingWindowMemory: single-pop eviction** — replaced `while messages.len() > max` loop with a single `if len >= max { pop_front() }` since at most one message is added at a time.
+- **ReAct loop: reduced cloning** — tool calls are now moved out with `std::mem::take` instead of `.to_vec()` when the response message is consumed. Middleware short-circuit paths move messages instead of cloning them.
+- **MiddlewareStack: early return when empty** — all three middleware pipeline methods (`run_on_request`, `run_on_response`, `run_on_tool_call`) now return `Continue` immediately when no middleware is registered, avoiding async iteration overhead on the hot path.
+- **Fixed unused assignment warning** in `runner.rs` short-circuit branch.
+
+### Added
+
+- **New benchmarks** for `HotSwapAgent` (prompt, swap_model), `InProcessBroker` (submit/receive/complete roundtrip), `InProcessEventBus` (publish/receive), `InMemoryCheckpoint` (save/load), and `SerializableStreamEvent` (serialize/deserialize).
+
 ## [0.13.0] - 2026-03-04
 
 ### Added

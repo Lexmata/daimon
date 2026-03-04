@@ -324,6 +324,165 @@ fn bench_token_estimation(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
+// Hot-swap agent benchmarks
+// ---------------------------------------------------------------------------
+
+fn bench_hot_swap_prompt(c: &mut Criterion) {
+    use daimon::agent::hot_swap::HotSwapAgent;
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+
+    let agent = Agent::builder()
+        .model(InstantModel)
+        .system_prompt("You are helpful.")
+        .build()
+        .unwrap();
+    let hot = HotSwapAgent::new(agent);
+
+    c.bench_function("hot_swap_prompt_simple", |b| {
+        b.iter(|| {
+            rt.block_on(async {
+                let _ = hot.prompt("hello").await.unwrap();
+            })
+        })
+    });
+}
+
+fn bench_hot_swap_swap_model(c: &mut Criterion) {
+    use daimon::agent::hot_swap::HotSwapAgent;
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+
+    let agent = Agent::builder()
+        .model(InstantModel)
+        .build()
+        .unwrap();
+    let hot = HotSwapAgent::new(agent);
+
+    c.bench_function("hot_swap_swap_model", |b| {
+        b.iter(|| {
+            rt.block_on(async {
+                hot.swap_model(InstantModel).await;
+            })
+        })
+    });
+}
+
+// ---------------------------------------------------------------------------
+// InProcessBroker benchmarks
+// ---------------------------------------------------------------------------
+
+fn bench_in_process_broker(c: &mut Criterion) {
+    use daimon::distributed::{InProcessBroker, TaskBroker, AgentTask, TaskResult};
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+
+    c.bench_function("broker_submit_receive_complete", |b| {
+        b.iter(|| {
+            rt.block_on(async {
+                let broker = InProcessBroker::new(64);
+                let task = AgentTask::new("bench input");
+                let id = broker.submit(task).await.unwrap();
+                let received = broker.receive().await.unwrap().unwrap();
+                assert_eq!(received.task_id, id);
+                let result = TaskResult {
+                    task_id: id,
+                    output: "done".into(),
+                    iterations: 1,
+                    cost: 0.0,
+                    error: None,
+                };
+                broker.complete(&received.task_id, result).await.unwrap();
+            })
+        })
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Streaming event bus benchmarks
+// ---------------------------------------------------------------------------
+
+fn bench_event_bus(c: &mut Criterion) {
+    use daimon::distributed::streaming::{
+        InProcessEventBus, SerializableStreamEvent, TaskEventBus, TaskStreamEvent,
+    };
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+
+    let bus = InProcessEventBus::new(1024);
+    let mut rx = bus.subscribe();
+
+    c.bench_function("event_bus_publish_receive", |b| {
+        b.iter(|| {
+            rt.block_on(async {
+                bus.publish(TaskStreamEvent {
+                    task_id: "t1".into(),
+                    event: SerializableStreamEvent::TextDelta("chunk".into()),
+                })
+                .await
+                .unwrap();
+                let _ = rx.recv().await.unwrap();
+            })
+        })
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Checkpoint benchmarks
+// ---------------------------------------------------------------------------
+
+fn bench_checkpoint_memory(c: &mut Criterion) {
+    use daimon::checkpoint::{Checkpoint, CheckpointState, InMemoryCheckpoint};
+    use daimon::model::types::Message;
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+
+    c.bench_function("checkpoint_save_load_memory", |b| {
+        b.iter(|| {
+            rt.block_on(async {
+                let cp = InMemoryCheckpoint::new();
+                let state = CheckpointState::new(
+                    "run1",
+                    vec![Message::user("hello"), Message::assistant("hi")],
+                    1,
+                );
+                cp.save(&state).await.unwrap();
+                let loaded = cp.load("run1").await.unwrap().unwrap();
+                assert_eq!(loaded.messages.len(), 2);
+            })
+        })
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Serialization benchmarks
+// ---------------------------------------------------------------------------
+
+fn bench_serializable_stream_event(c: &mut Criterion) {
+    use daimon::distributed::streaming::SerializableStreamEvent;
+
+    let event = SerializableStreamEvent::Usage {
+        iteration: 3,
+        input_tokens: 512,
+        output_tokens: 128,
+        estimated_cost: 0.0023,
+    };
+
+    c.bench_function("stream_event_serialize", |b| {
+        b.iter(|| {
+            let _ = serde_json::to_string(&event).unwrap();
+        })
+    });
+
+    let json = serde_json::to_string(&event).unwrap();
+    c.bench_function("stream_event_deserialize", |b| {
+        b.iter(|| {
+            let _: SerializableStreamEvent = serde_json::from_str(&json).unwrap();
+        })
+    });
+}
+
+// ---------------------------------------------------------------------------
 // Groups
 // ---------------------------------------------------------------------------
 
@@ -355,10 +514,21 @@ criterion_group!(
     bench_token_estimation,
 );
 
+criterion_group!(
+    new_component_benches,
+    bench_hot_swap_prompt,
+    bench_hot_swap_swap_model,
+    bench_in_process_broker,
+    bench_event_bus,
+    bench_checkpoint_memory,
+    bench_serializable_stream_event,
+);
+
 criterion_main!(
     agent_benches,
     memory_benches,
     tool_benches,
     orchestration_benches,
     misc_benches,
+    new_component_benches,
 );

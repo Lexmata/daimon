@@ -34,10 +34,14 @@ impl MiddlewareStack {
 
     /// Runs `on_request` through every layer in order. Returns the first
     /// non-`Continue` action, or `Continue` if all layers pass.
+    #[inline]
     pub async fn run_on_request(
         &self,
         request: &mut ChatRequest,
     ) -> Result<MiddlewareAction> {
+        if self.layers.is_empty() {
+            return Ok(MiddlewareAction::Continue);
+        }
         for layer in &self.layers {
             match layer.on_request_erased(request).await? {
                 MiddlewareAction::Continue => {}
@@ -48,10 +52,14 @@ impl MiddlewareStack {
     }
 
     /// Runs `on_response` through every layer in order.
+    #[inline]
     pub async fn run_on_response(
         &self,
         response: &mut ChatResponse,
     ) -> Result<MiddlewareAction> {
+        if self.layers.is_empty() {
+            return Ok(MiddlewareAction::Continue);
+        }
         for layer in &self.layers {
             match layer.on_response_erased(response).await? {
                 MiddlewareAction::Continue => {}
@@ -62,10 +70,14 @@ impl MiddlewareStack {
     }
 
     /// Runs `on_tool_call` through every layer in order.
+    #[inline]
     pub async fn run_on_tool_call(
         &self,
         call: &mut ToolCall,
     ) -> Result<MiddlewareAction> {
+        if self.layers.is_empty() {
+            return Ok(MiddlewareAction::Continue);
+        }
         for layer in &self.layers {
             match layer.on_tool_call_erased(call).await? {
                 MiddlewareAction::Continue => {}

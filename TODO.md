@@ -162,6 +162,16 @@
 - [x] Google Cloud Pub/Sub task broker (`PubSubBroker`) in `daimon-provider-gemini` (`feature = "pubsub"`)
 - [x] Azure Service Bus task broker (`ServiceBusBroker`) in `daimon-provider-azure` (`feature = "servicebus"`)
 
+## v0.14.0 -- Performance & Benchmarking
+
+- [x] ToolRegistry generation-based cache invalidation with `tool_specs_mut()` (uncached spec gen **-33%**)
+- [x] Memory `get_messages()` contiguous slice clone via `make_contiguous().to_vec()` (single memcpy)
+- [x] ReAct loop: move tool_calls instead of clone, move messages instead of clone in short-circuit paths
+- [x] MiddlewareStack: early return when empty (avoid async iteration on hot path)
+- [x] SlidingWindowMemory: single-pop eviction (if/pop_front instead of while loop)
+- [x] Fixed unused assignment warning in runner.rs
+- [x] New benchmarks: HotSwapAgent, InProcessBroker, InProcessEventBus, InMemoryCheckpoint, SerializableStreamEvent serde
+
 ## Future
 
 - [ ] ChromaDB vector store retriever (`feature = "chromadb"`)
