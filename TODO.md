@@ -155,6 +155,13 @@
 - [x] Agent hot-reload (`HotSwapAgent`): swap model, tools, system prompt, memory, hooks, middleware, guardrails at runtime without restarting
 - [x] Streaming distributed execution: `TaskEventBus` trait, `InProcessEventBus`, `StreamingTaskWorker`, serializable `TaskStreamEvent`/`SerializableStreamEvent`
 
+## v0.13.0 -- Cloud-Native Brokers
+
+- [x] Moved `TaskBroker` trait, `ErasedTaskBroker`, `AgentTask`, `TaskResult`, `TaskStatus` into `daimon-core` so provider crates can implement the trait
+- [x] AWS SQS task broker (`SqsBroker`) in `daimon-provider-bedrock` (`feature = "sqs"`)
+- [x] Google Cloud Pub/Sub task broker (`PubSubBroker`) in `daimon-provider-gemini` (`feature = "pubsub"`)
+- [x] Azure Service Bus task broker (`ServiceBusBroker`) in `daimon-provider-azure` (`feature = "servicebus"`)
+
 ## Future
 
 - [ ] ChromaDB vector store retriever (`feature = "chromadb"`)

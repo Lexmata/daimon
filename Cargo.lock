@@ -482,6 +482,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-sqs"
+version = "1.74.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "256b8f7caffe3240a543f60409be9bba23038ceef5933da63e09d89197fc2333"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand 2.3.0",
+ "http 0.2.12",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-sso"
 version = "1.90.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1305,7 +1327,7 @@ dependencies = [
 
 [[package]]
 name = "daimon"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "async-nats",
  "async-stream",
@@ -1349,7 +1371,7 @@ dependencies = [
 
 [[package]]
 name = "daimon-core"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "async-stream",
  "futures",
@@ -1363,7 +1385,7 @@ dependencies = [
 
 [[package]]
 name = "daimon-macros"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1372,7 +1394,7 @@ dependencies = [
 
 [[package]]
 name = "daimon-provider-azure"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "async-stream",
  "daimon-core",
@@ -1386,11 +1408,12 @@ dependencies = [
 
 [[package]]
 name = "daimon-provider-bedrock"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "async-stream",
  "aws-config",
  "aws-sdk-bedrockruntime",
+ "aws-sdk-sqs",
  "aws-smithy-types",
  "daimon-core",
  "serde_json",
@@ -1400,9 +1423,10 @@ dependencies = [
 
 [[package]]
 name = "daimon-provider-gemini"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "async-stream",
+ "base64 0.22.1",
  "daimon-core",
  "futures",
  "reqwest 0.12.28",

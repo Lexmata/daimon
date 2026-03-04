@@ -1,6 +1,6 @@
 [package]
 name = "daimon-provider-bedrock"
-version = "0.12.0"
+version = "0.13.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Amazon Bedrock provider for the Daimon AI agent framework"
@@ -11,12 +11,17 @@ documentation = "https://docs.rs/daimon-provider-bedrock"
 keywords = ["ai", "agent", "llm", "bedrock", "aws"]
 categories = ["asynchronous", "api-bindings"]
 
+[features]
+default = []
+sqs = ["dep:aws-sdk-sqs"]
+
 [dependencies]
-daimon-core = { path = "../daimon-core", version = "0.12.0" }
-tokio = { version = "1", features = ["rt", "time"] }
+daimon-core = { path = "../daimon-core", version = "0.13.0" }
+tokio = { version = "1", features = ["rt", "time", "sync"] }
 serde_json = "1"
 tracing = "0.1"
 async-stream = "0.3"
 aws-sdk-bedrockruntime = "1"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-smithy-types = "1"
+aws-sdk-sqs = { version = "1", optional = true }

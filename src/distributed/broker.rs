@@ -1,100 +1,18 @@
 //! Task broker trait and in-process implementation.
+//!
+//! The [`TaskBroker`] and [`ErasedTaskBroker`] traits are defined in
+//! [`daimon_core`] and re-exported here.
 
 use std::collections::HashMap;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use tokio::sync::{Mutex, mpsc};
 
 use crate::error::Result;
 
+pub use daimon_core::distributed::{ErasedTaskBroker, TaskBroker};
+
 use super::types::{AgentTask, TaskResult, TaskStatus};
-
-/// Trait for distributing agent tasks across workers.
-///
-/// Implement this for your message broker (Redis Streams, RabbitMQ,
-/// NATS JetStream, etc.) to enable multi-process agent execution.
-pub trait TaskBroker: Send + Sync {
-    /// Submits a task for execution. Returns the task ID.
-    fn submit(&self, task: AgentTask) -> impl Future<Output = Result<String>> + Send;
-
-    /// Queries the current status of a task.
-    fn status(&self, task_id: &str) -> impl Future<Output = Result<TaskStatus>> + Send;
-
-    /// Blocks until a task is available and returns it.
-    /// Returns `None` if the broker is closed.
-    fn receive(&self) -> impl Future<Output = Result<Option<AgentTask>>> + Send;
-
-    /// Marks a task as completed with the given result.
-    fn complete(&self, task_id: &str, result: TaskResult) -> impl Future<Output = Result<()>> + Send;
-
-    /// Marks a task as failed with an error message.
-    fn fail(&self, task_id: &str, error: String) -> impl Future<Output = Result<()>> + Send;
-}
-
-/// Object-safe wrapper for [`TaskBroker`].
-pub trait ErasedTaskBroker: Send + Sync {
-    fn submit_erased<'a>(
-        &'a self,
-        task: AgentTask,
-    ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>>;
-
-    fn status_erased<'a>(
-        &'a self,
-        task_id: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<TaskStatus>> + Send + 'a>>;
-
-    fn receive_erased(&self) -> Pin<Box<dyn Future<Output = Result<Option<AgentTask>>> + Send + '_>>;
-
-    fn complete_erased<'a>(
-        &'a self,
-        task_id: &'a str,
-        result: TaskResult,
-    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
-
-    fn fail_erased<'a>(
-        &'a self,
-        task_id: &'a str,
-        error: String,
-    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
-}
-
-impl<T: TaskBroker> ErasedTaskBroker for T {
-    fn submit_erased<'a>(
-        &'a self,
-        task: AgentTask,
-    ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>> {
-        Box::pin(self.submit(task))
-    }
-
-    fn status_erased<'a>(
-        &'a self,
-        task_id: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<TaskStatus>> + Send + 'a>> {
-        Box::pin(self.status(task_id))
-    }
-
-    fn receive_erased(&self) -> Pin<Box<dyn Future<Output = Result<Option<AgentTask>>> + Send + '_>> {
-        Box::pin(self.receive())
-    }
-
-    fn complete_erased<'a>(
-        &'a self,
-        task_id: &'a str,
-        result: TaskResult,
-    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
-        Box::pin(self.complete(task_id, result))
-    }
-
-    fn fail_erased<'a>(
-        &'a self,
-        task_id: &'a str,
-        error: String,
-    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
-        Box::pin(self.fail(task_id, error))
-    }
-}
 
 /// In-process task broker backed by tokio MPSC channels.
 ///

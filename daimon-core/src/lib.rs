@@ -27,6 +27,7 @@
 //! }
 //! ```
 
+pub mod distributed;
 mod embedding;
 mod error;
 mod model;
@@ -34,6 +35,7 @@ mod stream;
 mod tool_types;
 mod types;
 
+pub use distributed::{AgentTask, ErasedTaskBroker, TaskBroker, TaskResult, TaskStatus};
 pub use embedding::{EmbeddingModel, ErasedEmbeddingModel, SharedEmbeddingModel};
 pub use error::{DaimonError, Result};
 pub use model::{ErasedModel, Model, SharedModel};

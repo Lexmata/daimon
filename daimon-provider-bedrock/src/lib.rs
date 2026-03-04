@@ -26,7 +26,13 @@ use aws_sdk_bedrockruntime::types::{
 
 mod embedding;
 
+#[cfg(feature = "sqs")]
+pub mod sqs;
+
 pub use embedding::BedrockEmbedding;
+
+#[cfg(feature = "sqs")]
+pub use sqs::SqsBroker;
 
 use daimon_core::{
     ChatRequest, ChatResponse, DaimonError, Message, Model, ResponseStream, Result, Role,

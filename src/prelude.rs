@@ -88,3 +88,12 @@ pub use crate::eval::{EvalResult, EvalRunner, EvalScenario, Scorer};
 
 #[cfg(feature = "http-server")]
 pub use crate::server::AgentServer;
+
+#[cfg(feature = "sqs")]
+pub use daimon_provider_bedrock::SqsBroker;
+
+#[cfg(feature = "pubsub")]
+pub use daimon_provider_gemini::PubSubBroker;
+
+#[cfg(feature = "servicebus")]
+pub use daimon_provider_azure::ServiceBusBroker;
