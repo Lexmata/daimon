@@ -16,6 +16,7 @@ mod builder;
 pub mod fork;
 pub mod handoff;
 pub mod hitl;
+pub mod hot_swap;
 pub mod resumable;
 mod runner;
 pub mod structured;

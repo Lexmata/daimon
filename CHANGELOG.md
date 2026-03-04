@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-03-04
+
+### Added
+
+- **NATS KV checkpoint backend** (`src/checkpoint/nats_kv.rs`, `feature = "nats"`):
+  - `NatsKvCheckpoint` implementing `Checkpoint` using NATS JetStream key-value store.
+  - Distributed, replicated checkpoint storage with no external database.
+  - `connect()` creates or opens a KV bucket; `from_store()` wraps an existing handle.
+  - Keys prefixed with `cp.` for namespace isolation.
+
+- **Redis checkpoint backend** (`src/checkpoint/redis.rs`, `feature = "redis"`):
+  - `RedisCheckpoint` implementing `Checkpoint` using Redis hashes.
+  - Fast, shared checkpoint storage accessible from multiple processes.
+  - Uses `{prefix}:data` hash key for all checkpoint data.
+
+- **Agent hot-reload** (`src/agent/hot_swap.rs`):
+  - `HotSwapAgent` wraps an `Agent` behind a `RwLock` for runtime reconfiguration.
+  - `swap_model()`, `swap_system_prompt()`, `swap_memory()`, `swap_hooks()` for swapping core components.
+  - `add_tool()`, `remove_tool()` for dynamic tool management.
+  - `swap_middleware()`, `add_middleware()` for middleware stack changes.
+  - `add_input_guardrail()`, `add_output_guardrail()`, `clear_input_guardrails()`, `clear_output_guardrails()`.
+  - `set_max_iterations()`, `set_temperature()`, `set_max_tokens()`, `set_validate_tool_inputs()`, `set_tool_retry_policy()`.
+  - `replace()` for atomic full-agent swap.
+  - Clone-friendly: all clones share the same underlying agent.
+
+- **Streaming distributed execution** (`src/distributed/streaming.rs`):
+  - `TaskEventBus` trait for publishing stream events across process boundaries.
+  - `InProcessEventBus` backed by `tokio::sync::broadcast` for single-process use.
+  - `StreamingTaskWorker` uses `Agent::prompt_stream()` and publishes each `StreamEvent` through the event bus.
+  - `TaskStreamEvent` and `SerializableStreamEvent` for cross-process serializable stream events.
+  - All `StreamEvent` variants mapped to serializable equivalents with full round-trip support.
+
 ## [0.11.0] - 2026-03-03
 
 ### Added
@@ -286,7 +318,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `commitlint.toml` for Conventional Commits enforcement.
 - `rustfmt.toml` and `clippy.toml` for consistent code style.
 
-[Unreleased]: https://github.com/Lexmata/daimon/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/Lexmata/daimon/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/Lexmata/daimon/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/Lexmata/daimon/compare/v0.2.0...v0.11.0
 [0.2.0]: https://github.com/Lexmata/daimon/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Lexmata/daimon/releases/tag/v0.1.0

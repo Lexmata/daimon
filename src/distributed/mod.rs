@@ -41,6 +41,7 @@
 
 mod types;
 mod broker;
+pub mod streaming;
 mod worker;
 
 #[cfg(feature = "redis")]
@@ -57,6 +58,10 @@ pub mod grpc;
 
 pub use types::{AgentTask, TaskResult, TaskStatus};
 pub use broker::{TaskBroker, ErasedTaskBroker, InProcessBroker};
+pub use streaming::{
+    InProcessEventBus, SerializableStreamEvent, StreamingTaskWorker, TaskEventBus,
+    TaskStreamEvent,
+};
 pub use worker::TaskWorker;
 
 #[cfg(feature = "redis")]

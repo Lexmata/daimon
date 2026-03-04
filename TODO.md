@@ -148,12 +148,15 @@
 - [x] gRPC MCP transport: `McpGrpcServer` and `McpGrpcTransport` for serving/consuming MCP tools over gRPC (`feature = "grpc"` + `feature = "mcp"`)
 - [x] Distributed checkpoint sync: `CheckpointSync` (write-through local+remote), `CheckpointReplicator` (background pull loop), `pull_all()` / `push_all()` for bulk sync
 
+## v0.12.0 -- Runtime & Persistence
+
+- [x] NATS KV-based checkpoint backend (`NatsKvCheckpoint`) using JetStream key-value store (`feature = "nats"`)
+- [x] Redis checkpoint backend (`RedisCheckpoint`) using Redis hashes (`feature = "redis"`)
+- [x] Agent hot-reload (`HotSwapAgent`): swap model, tools, system prompt, memory, hooks, middleware, guardrails at runtime without restarting
+- [x] Streaming distributed execution: `TaskEventBus` trait, `InProcessEventBus`, `StreamingTaskWorker`, serializable `TaskStreamEvent`/`SerializableStreamEvent`
+
 ## Future
 
 - [ ] ChromaDB vector store retriever (`feature = "chromadb"`)
 - [ ] Pinecone vector store plugin (`feature = "pinecone"`)
 - [ ] Weaviate vector store plugin (`feature = "weaviate"`)
-- [ ] NATS KV-based checkpoint backend
-- [ ] Redis checkpoint backend
-- [ ] Agent hot-reload (swap model/tools without restarting)
-- [ ] Streaming distributed execution (stream events across process boundaries)
