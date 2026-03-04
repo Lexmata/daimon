@@ -32,6 +32,12 @@ pub mod vector_store;
 #[cfg(feature = "qdrant")]
 pub mod qdrant;
 
+#[cfg(feature = "pgvector")]
+pub mod pgvector {
+    //! pgvector-backed vector store — re-exported from `daimon-plugin-pgvector`.
+    pub use daimon_plugin_pgvector::*;
+}
+
 pub use in_memory::InMemoryVectorStore;
 pub use in_memory_store::InMemoryVectorStoreBackend;
 pub use knowledge_base::{

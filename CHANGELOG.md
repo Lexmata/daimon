@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`daimon-plugin-pgvector` crate** — pgvector-backed `VectorStore` implementation using `tokio-postgres` and `deadpool-postgres` for connection pooling. Supports cosine, L2, and inner-product distance metrics with HNSW indexing. Auto-migrates schema by default; raw SQL exported in `migrations` module for manual setups.
+- **`PgVectorStoreBuilder`** — builder pattern for configuring table name, distance metric, pool size, HNSW `m` and `ef_construction` parameters.
+- **`pgvector` feature flag** in the main `daimon` crate for opt-in pgvector support (included in `full`).
+
+### Changed
+
+- **Moved `Document`, `ScoredDocument`, `VectorStore`, `ErasedVectorStore`, `SharedVectorStore` to `daimon-core`** — plugin crates can now implement `VectorStore` by depending only on `daimon-core`. The main `daimon` crate re-exports everything; existing code is unaffected.
+
 ## [0.14.0] - 2026-03-04
 
 ### Changed
