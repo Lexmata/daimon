@@ -7,13 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-03-04
+
 ### Changed
 
-- **ToolRegistry: generation-based cache invalidation** — `tool_specs()` now uses a generation counter to detect stale caches. Added `tool_specs_mut()` for callers with `&mut self` that need to persist the computed specs into the cache. `warm_cache()` now delegates to `tool_specs_mut()`, avoiding duplicate logic.
+- **ToolRegistry: generation-based cache invalidation** — `tool_specs()` now uses a generation counter to detect stale caches. Added `tool_specs_mut()` for callers with `&mut self` that need to persist the computed specs into the cache. `warm_cache()` now delegates to `tool_specs_mut()`, avoiding duplicate logic. Uncached spec generation **-33%** (10.4us to 6.9us).
 - **SlidingWindowMemory & TokenWindowMemory: contiguous slice clone** — `get_messages()` now calls `make_contiguous().to_vec()` instead of `iter().cloned().collect()`, producing a single memcpy when the deque is already contiguous and avoiding per-element overhead.
 - **SlidingWindowMemory: single-pop eviction** — replaced `while messages.len() > max` loop with a single `if len >= max { pop_front() }` since at most one message is added at a time.
 - **ReAct loop: reduced cloning** — tool calls are now moved out with `std::mem::take` instead of `.to_vec()` when the response message is consumed. Middleware short-circuit paths move messages instead of cloning them.
-- **MiddlewareStack: early return when empty** — all three middleware pipeline methods (`run_on_request`, `run_on_response`, `run_on_tool_call`) now return `Continue` immediately when no middleware is registered, avoiding async iteration overhead on the hot path.
+- **MiddlewareStack: early return when empty** — all three middleware pipeline methods (`run_on_request`, `run_on_response`, `run_on_tool_call`) now return `Continue` immediately when no middleware is registered, avoiding async iteration overhead on the hot path. Chain transforms benchmark **-30%** (287ns to 210ns).
 - **Fixed unused assignment warning** in `runner.rs` short-circuit branch.
 
 ### Added
@@ -359,7 +361,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `commitlint.toml` for Conventional Commits enforcement.
 - `rustfmt.toml` and `clippy.toml` for consistent code style.
 
-[Unreleased]: https://github.com/Lexmata/daimon/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/Lexmata/daimon/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/Lexmata/daimon/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/Lexmata/daimon/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/Lexmata/daimon/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/Lexmata/daimon/compare/v0.2.0...v0.11.0
