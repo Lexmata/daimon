@@ -1,86 +1,8 @@
 //! Serializable task and result types for distributed execution.
+//!
+//! These types are defined in [`daimon_core::distributed`] and re-exported here.
 
-use std::collections::HashMap;
-
-use serde::{Deserialize, Serialize};
-
-/// A unit of work submitted to a [`TaskBroker`](super::TaskBroker).
-///
-/// Each task carries a unique ID and the input text for an agent prompt.
-/// Optional metadata lets callers tag tasks with routing hints, priority,
-/// or any application-specific data.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentTask {
-    /// Unique identifier for this task (generated on creation).
-    pub task_id: String,
-    /// The user input to prompt the agent with.
-    pub input: String,
-    /// Optional run ID for resumable execution via checkpoints.
-    pub run_id: Option<String>,
-    /// Arbitrary key-value metadata (routing hints, priority, etc.).
-    pub metadata: HashMap<String, serde_json::Value>,
-}
-
-impl AgentTask {
-    /// Creates a new task with a random UUID.
-    pub fn new(input: impl Into<String>) -> Self {
-        Self {
-            task_id: Self::generate_id(),
-            input: input.into(),
-            run_id: None,
-            metadata: HashMap::new(),
-        }
-    }
-
-    /// Assigns a checkpoint run ID for resumable execution.
-    pub fn with_run_id(mut self, run_id: impl Into<String>) -> Self {
-        self.run_id = Some(run_id.into());
-        self
-    }
-
-    /// Adds a metadata key-value pair.
-    pub fn with_metadata(mut self, key: impl Into<String>, value: serde_json::Value) -> Self {
-        self.metadata.insert(key.into(), value);
-        self
-    }
-
-    fn generate_id() -> String {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let ts = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        format!("task-{ts:x}")
-    }
-}
-
-/// The result of a completed agent task.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TaskResult {
-    /// The task ID this result corresponds to.
-    pub task_id: String,
-    /// The agent's final text output.
-    pub output: String,
-    /// Number of ReAct iterations the agent performed.
-    pub iterations: usize,
-    /// Estimated cost in USD (if a cost model was configured).
-    pub cost: f64,
-    /// Error message if the task failed.
-    pub error: Option<String>,
-}
-
-/// Current status of a distributed task.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum TaskStatus {
-    /// Submitted but not yet picked up by a worker.
-    Pending,
-    /// Currently being executed by a worker.
-    Running,
-    /// Completed successfully.
-    Completed(TaskResult),
-    /// Failed with an error.
-    Failed(String),
-}
+pub use daimon_core::distributed::{AgentTask, TaskResult, TaskStatus};
 
 #[cfg(test)]
 mod tests {

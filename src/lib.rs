@@ -38,10 +38,13 @@
 //! | `redis` | Redis memory backend + task broker |
 //! | `nats` | NATS JetStream task broker |
 //! | `amqp` | RabbitMQ (AMQP) task broker |
+//! | `sqs` | AWS SQS task broker (via `daimon-provider-bedrock`) |
+//! | `pubsub` | Google Cloud Pub/Sub task broker (via `daimon-provider-gemini`) |
+//! | `servicebus` | Azure Service Bus task broker (via `daimon-provider-azure`) |
 //! | `mcp` | Model Context Protocol client & server |
 //! | `otel` | OpenTelemetry OTLP span export |
 //! | `grpc` | gRPC transport for distributed execution |
-//! | `full` | All providers + macros + MCP + SQLite + Redis + NATS + AMQP + gRPC + OTel |
+//! | `full` | All providers + macros + MCP + SQLite + Redis + NATS + AMQP + gRPC + OTel + SQS + Pub/Sub + Service Bus |
 //!
 //! The core framework compiles with no features; enable providers as needed.
 //!

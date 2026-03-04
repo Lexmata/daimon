@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-03-04
+
+### Added
+
+- **TaskBroker trait moved to `daimon-core`**: `TaskBroker`, `ErasedTaskBroker`, `AgentTask`, `TaskResult`, and `TaskStatus` now live in `daimon-core::distributed`, enabling provider crates to implement cloud-native brokers. The main `daimon` crate re-exports everything — existing code is unaffected.
+
+- **AWS SQS task broker** (`daimon-provider-bedrock`, `feature = "sqs"`):
+  - `SqsBroker` implementing `TaskBroker` via `aws-sdk-sqs`.
+  - Uses SQS visibility timeout for in-flight task tracking, long polling for `receive()`.
+  - `new()` with default credentials, `with_region()`, `from_client()` constructors.
+  - Configurable visibility timeout via `with_visibility_timeout()`.
+  - Deletes messages on `complete()`, releases visibility on `fail()`.
+
+- **Google Cloud Pub/Sub task broker** (`daimon-provider-gemini`, `feature = "pubsub"`):
+  - `PubSubBroker` implementing `TaskBroker` via Pub/Sub REST API.
+  - Base64-encoded JSON message bodies for cross-platform compatibility.
+  - `with_api_key()` and `with_bearer_token()` authentication modes.
+  - Refreshable bearer token via `set_bearer_token()`.
+  - Acknowledges messages on `complete()`, drops ack on `fail()` for automatic retry.
+
+- **Azure Service Bus task broker** (`daimon-provider-azure`, `feature = "servicebus"`):
+  - `ServiceBusBroker` implementing `TaskBroker` via Service Bus REST API.
+  - Peek-lock receive with configurable lock duration.
+  - SAS token authentication.
+  - Deletes messages on `complete()`, releases lock on `fail()` for redelivery.
+
+- **New feature flags** in the main `daimon` crate: `sqs`, `pubsub`, `servicebus` (all included in `full`).
+
 ## [0.12.0] - 2026-03-04
 
 ### Added
@@ -318,7 +346,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `commitlint.toml` for Conventional Commits enforcement.
 - `rustfmt.toml` and `clippy.toml` for consistent code style.
 
-[Unreleased]: https://github.com/Lexmata/daimon/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/Lexmata/daimon/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/Lexmata/daimon/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/Lexmata/daimon/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/Lexmata/daimon/compare/v0.2.0...v0.11.0
 [0.2.0]: https://github.com/Lexmata/daimon/compare/v0.1.0...v0.2.0

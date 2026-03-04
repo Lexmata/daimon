@@ -19,7 +19,13 @@ use serde::{Deserialize, Serialize};
 
 mod embedding;
 
+#[cfg(feature = "pubsub")]
+pub mod pubsub;
+
 pub use embedding::GeminiEmbedding;
+
+#[cfg(feature = "pubsub")]
+pub use pubsub::PubSubBroker;
 
 use daimon_core::{
     ChatRequest, ChatResponse, DaimonError, Message, Model, ResponseStream, Result, Role,

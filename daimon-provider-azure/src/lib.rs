@@ -23,7 +23,13 @@ use serde::{Deserialize, Serialize};
 
 mod embedding;
 
+#[cfg(feature = "servicebus")]
+pub mod servicebus;
+
 pub use embedding::AzureOpenAiEmbedding;
+
+#[cfg(feature = "servicebus")]
+pub use servicebus::ServiceBusBroker;
 
 use daimon_core::{
     ChatRequest, ChatResponse, DaimonError, Message, Model, ResponseStream, Result, Role,
