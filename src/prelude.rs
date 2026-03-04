@@ -15,7 +15,11 @@ pub use crate::checkpoint::{
 };
 pub use crate::cost::{AnthropicCostModel, CostModel, CostTracker, OpenAiCostModel};
 pub use crate::agent::fork::ForkBuilder;
-pub use crate::distributed::{AgentTask, InProcessBroker, TaskBroker, TaskResult, TaskStatus, TaskWorker};
+pub use crate::agent::hot_swap::HotSwapAgent;
+pub use crate::distributed::{
+    AgentTask, InProcessBroker, InProcessEventBus, StreamingTaskWorker, TaskBroker, TaskEventBus,
+    TaskResult, TaskStatus, TaskStreamEvent, TaskWorker,
+};
 pub use crate::error::{DaimonError, Result};
 pub use crate::guardrails::{
     ContentPolicyGuardrail, GuardrailResult, InputGuardrail, MaxTokenGuardrail,
@@ -53,7 +57,13 @@ pub use crate::memory::SqliteMemory;
 pub use crate::memory::RedisMemory;
 
 #[cfg(feature = "redis")]
+pub use crate::checkpoint::RedisCheckpoint;
+
+#[cfg(feature = "redis")]
 pub use crate::distributed::RedisBroker;
+
+#[cfg(feature = "nats")]
+pub use crate::checkpoint::NatsKvCheckpoint;
 
 #[cfg(feature = "nats")]
 pub use crate::distributed::NatsBroker;
