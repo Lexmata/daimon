@@ -1383,7 +1383,7 @@ dependencies = [
 
 [[package]]
 name = "daimon"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "async-nats",
  "async-stream",
@@ -1429,7 +1429,7 @@ dependencies = [
 
 [[package]]
 name = "daimon-core"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "async-stream",
  "futures",
@@ -1443,7 +1443,7 @@ dependencies = [
 
 [[package]]
 name = "daimon-macros"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1452,7 +1452,7 @@ dependencies = [
 
 [[package]]
 name = "daimon-plugin-opensearch"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "daimon-core",
  "opensearch",
@@ -1464,7 +1464,7 @@ dependencies = [
 
 [[package]]
 name = "daimon-plugin-pgvector"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "daimon-core",
  "deadpool-postgres",
@@ -1478,7 +1478,7 @@ dependencies = [
 
 [[package]]
 name = "daimon-provider-azure"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "async-stream",
  "daimon-core",
@@ -1492,7 +1492,7 @@ dependencies = [
 
 [[package]]
 name = "daimon-provider-bedrock"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "async-stream",
  "aws-config",
@@ -1507,7 +1507,7 @@ dependencies = [
 
 [[package]]
 name = "daimon-provider-gemini"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "async-stream",
  "base64 0.22.1",
@@ -5034,9 +5034,9 @@ dependencies = [
 
 [[package]]
 name = "tokio-tungstenite"
-version = "0.26.2"
+version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a9daff607c6d2bf6c16fd681ccb7eecc83e4e2cdc1ca067ffaadfca5de7f084"
+checksum = "d25a406cddcc431a75d3d9afc6a7c0f7428d4891dd973e4d54c56b46127bf857"
 dependencies = [
  "futures-util",
  "log",
@@ -5329,9 +5329,9 @@ dependencies = [
 
 [[package]]
 name = "tungstenite"
-version = "0.26.2"
+version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4793cb5e56680ecbb1d843515b23b6de9a75eb04b66643e256a396d43be33c13"
+checksum = "8628dcc84e5a09eb3d8423d6cb682965dea9133204e8fb3efee74c2a0c259442"
 dependencies = [
  "bytes",
  "data-encoding",
