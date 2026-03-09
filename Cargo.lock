@@ -1383,7 +1383,7 @@ dependencies = [
 
 [[package]]
 name = "daimon"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "async-nats",
  "async-stream",
@@ -1429,7 +1429,7 @@ dependencies = [
 
 [[package]]
 name = "daimon-core"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "async-stream",
  "futures",
@@ -1443,7 +1443,7 @@ dependencies = [
 
 [[package]]
 name = "daimon-macros"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1452,7 +1452,7 @@ dependencies = [
 
 [[package]]
 name = "daimon-plugin-opensearch"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "daimon-core",
  "opensearch",
@@ -1464,7 +1464,7 @@ dependencies = [
 
 [[package]]
 name = "daimon-plugin-pgvector"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "daimon-core",
  "deadpool-postgres",
@@ -1478,7 +1478,7 @@ dependencies = [
 
 [[package]]
 name = "daimon-provider-azure"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "async-stream",
  "daimon-core",
@@ -1492,7 +1492,7 @@ dependencies = [
 
 [[package]]
 name = "daimon-provider-bedrock"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "async-stream",
  "aws-config",
@@ -1507,7 +1507,7 @@ dependencies = [
 
 [[package]]
 name = "daimon-provider-gemini"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "async-stream",
  "base64 0.22.1",
@@ -2753,9 +2753,9 @@ dependencies = [
 
 [[package]]
 name = "jsonschema"
-version = "0.43.0"
+version = "0.45.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2dcfbe6df48e0121219eefc8d6a30b872ac2769c7896454bda06f7b64129fa22"
+checksum = "6f29616f6e19415398eb186964fb7cbbeef572c79bede3622a8277667924bbe3"
 dependencies = [
  "ahash",
  "bytecount",
@@ -3963,9 +3963,9 @@ dependencies = [
 
 [[package]]
 name = "referencing"
-version = "0.43.0"
+version = "0.45.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "37add1aa1d619a975521d262d09f100f1f767791c9386c03679450f30acd78c1"
+checksum = "b8a618c14f8ba29d8193bb55e2bf13e4fb2b1115313ecb7ae94b43100c7ac7d5"
 dependencies = [
  "ahash",
  "fluent-uri",
