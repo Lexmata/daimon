@@ -101,9 +101,7 @@ impl Checkpoint for NatsKvCheckpoint {
         let prefix = "cp.";
         let runs = keys
             .into_iter()
-            .filter_map(|k| {
-                k.strip_prefix(prefix).map(String::from)
-            })
+            .filter_map(|k| k.strip_prefix(prefix).map(String::from))
             .collect();
 
         Ok(runs)

@@ -22,9 +22,8 @@ use crate::error::{DaimonError, Result};
 use crate::mcp::protocol::{JsonRpcNotification, JsonRpcRequest, JsonRpcResponse};
 use crate::mcp::transport::McpTransport;
 
-type WsStream = tokio_tungstenite::WebSocketStream<
-    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
->;
+type WsStream =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 /// WebSocket transport for MCP communication.
 ///
@@ -76,7 +75,9 @@ impl WebSocketTransport {
                     continue;
                 }
                 Some(Ok(WsMessage::Close(_))) => {
-                    return Err(DaimonError::Mcp("WebSocket server closed connection".into()));
+                    return Err(DaimonError::Mcp(
+                        "WebSocket server closed connection".into(),
+                    ));
                 }
                 Some(Ok(_)) => continue,
                 Some(Err(e)) => {

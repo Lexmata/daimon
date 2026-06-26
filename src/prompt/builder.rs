@@ -107,9 +107,7 @@ mod tests {
 
     #[test]
     fn test_builder_persona_only() {
-        let tpl = PromptBuilder::new()
-            .persona("You are a bot.")
-            .build();
+        let tpl = PromptBuilder::new().persona("You are a bot.").build();
         assert_eq!(tpl.render_static(), "You are a bot.");
     }
 

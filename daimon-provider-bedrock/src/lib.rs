@@ -251,8 +251,7 @@ impl Bedrock {
         let mut text_content = String::new();
         let mut tool_calls = Vec::new();
 
-        if let Some(aws_sdk_bedrockruntime::types::ConverseOutput::Message(msg)) = output.output()
-        {
+        if let Some(aws_sdk_bedrockruntime::types::ConverseOutput::Message(msg)) = output.output() {
             for block in msg.content() {
                 match block {
                     ContentBlock::Text(t) => text_content.push_str(t),

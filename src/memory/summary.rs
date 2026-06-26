@@ -106,9 +106,7 @@ impl SummaryMemory {
                 "Previous conversation summary:\n{prev}\n\nNew messages to incorporate:"
             )));
         } else {
-            summary_input.push(Message::user(
-                "Conversation to summarize:".to_string(),
-            ));
+            summary_input.push(Message::user("Conversation to summarize:".to_string()));
         }
 
         let mut conversation_text = String::new();
@@ -205,14 +203,11 @@ mod tests {
 
     impl Model for FakeSummarizerModel {
         async fn generate(&self, request: &ChatRequest) -> Result<ChatResponse> {
-            let has_previous = request
-                .messages
-                .iter()
-                .any(|m| {
-                    m.content
-                        .as_ref()
-                        .is_some_and(|c| c.contains("Previous conversation summary"))
-                });
+            let has_previous = request.messages.iter().any(|m| {
+                m.content
+                    .as_ref()
+                    .is_some_and(|c| c.contains("Previous conversation summary"))
+            });
 
             let msg_count = request
                 .messages
@@ -251,10 +246,7 @@ mod tests {
         let memory = make_memory(10, 5);
 
         memory.add_message(Message::user("hello")).await.unwrap();
-        memory
-            .add_message(Message::assistant("hi"))
-            .await
-            .unwrap();
+        memory.add_message(Message::assistant("hi")).await.unwrap();
 
         let msgs = memory.get_messages().await.unwrap();
         assert_eq!(msgs.len(), 2);
@@ -277,11 +269,7 @@ mod tests {
 
         let msgs = memory.get_messages().await.unwrap();
         assert_eq!(msgs[0].role, Role::System);
-        assert!(msgs[0]
-            .content
-            .as_ref()
-            .unwrap()
-            .contains("Summary"));
+        assert!(msgs[0].content.as_ref().unwrap().contains("Summary"));
     }
 
     #[tokio::test]

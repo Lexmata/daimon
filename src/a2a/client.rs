@@ -85,8 +85,11 @@ impl A2aClient {
         feature = "mcp",
     ))]
     pub async fn discover(&self) -> Result<AgentCard> {
-        let resp = self.rpc_call("agent/discover", serde_json::json!({})).await?;
-        serde_json::from_value(resp).map_err(|e| DaimonError::Other(format!("A2A parse error: {e}")))
+        let resp = self
+            .rpc_call("agent/discover", serde_json::json!({}))
+            .await?;
+        serde_json::from_value(resp)
+            .map_err(|e| DaimonError::Other(format!("A2A parse error: {e}")))
     }
 
     /// Sends a task to the remote agent.
@@ -99,8 +102,11 @@ impl A2aClient {
         feature = "mcp",
     ))]
     pub async fn send_task(&self, params: TaskSendParams) -> Result<A2aTask> {
-        let resp = self.rpc_call("tasks/send", serde_json::to_value(&params)?).await?;
-        serde_json::from_value(resp).map_err(|e| DaimonError::Other(format!("A2A parse error: {e}")))
+        let resp = self
+            .rpc_call("tasks/send", serde_json::to_value(&params)?)
+            .await?;
+        serde_json::from_value(resp)
+            .map_err(|e| DaimonError::Other(format!("A2A parse error: {e}")))
     }
 
     /// Gets the status of a task.
@@ -116,8 +122,11 @@ impl A2aClient {
         let params = TaskGetParams {
             id: task_id.to_string(),
         };
-        let resp = self.rpc_call("tasks/get", serde_json::to_value(&params)?).await?;
-        serde_json::from_value(resp).map_err(|e| DaimonError::Other(format!("A2A parse error: {e}")))
+        let resp = self
+            .rpc_call("tasks/get", serde_json::to_value(&params)?)
+            .await?;
+        serde_json::from_value(resp)
+            .map_err(|e| DaimonError::Other(format!("A2A parse error: {e}")))
     }
 
     /// Cancels a task.
@@ -133,8 +142,11 @@ impl A2aClient {
         let params = TaskCancelParams {
             id: task_id.to_string(),
         };
-        let resp = self.rpc_call("tasks/cancel", serde_json::to_value(&params)?).await?;
-        serde_json::from_value(resp).map_err(|e| DaimonError::Other(format!("A2A parse error: {e}")))
+        let resp = self
+            .rpc_call("tasks/cancel", serde_json::to_value(&params)?)
+            .await?;
+        serde_json::from_value(resp)
+            .map_err(|e| DaimonError::Other(format!("A2A parse error: {e}")))
     }
 
     /// Sends a simple text message as a task and returns the completed task.
@@ -171,11 +183,7 @@ impl A2aClient {
         feature = "ollama",
         feature = "mcp",
     ))]
-    async fn rpc_call(
-        &self,
-        method: &str,
-        params: serde_json::Value,
-    ) -> Result<serde_json::Value> {
+    async fn rpc_call(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
             id: serde_json::json!(1),
@@ -189,13 +197,15 @@ impl A2aClient {
             http_req = http_req.header("X-API-Key", key);
         }
 
-        let http_resp = http_req.send().await.map_err(|e| {
-            DaimonError::Other(format!("A2A HTTP error: {e}"))
-        })?;
+        let http_resp = http_req
+            .send()
+            .await
+            .map_err(|e| DaimonError::Other(format!("A2A HTTP error: {e}")))?;
 
-        let response: JsonRpcResponse = http_resp.json().await.map_err(|e| {
-            DaimonError::Other(format!("A2A response parse error: {e}"))
-        })?;
+        let response: JsonRpcResponse = http_resp
+            .json()
+            .await
+            .map_err(|e| DaimonError::Other(format!("A2A response parse error: {e}")))?;
 
         if let Some(err) = response.error {
             return Err(DaimonError::Other(format!(

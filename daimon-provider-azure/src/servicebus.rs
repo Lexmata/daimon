@@ -84,10 +84,7 @@ impl ServiceBusBroker {
     }
 
     fn send_url(&self) -> String {
-        format!(
-            "{}/{}/messages",
-            self.namespace_url, self.queue_name
-        )
+        format!("{}/{}/messages", self.namespace_url, self.queue_name)
     }
 
     fn receive_url(&self) -> String {
@@ -130,7 +127,7 @@ impl TaskBroker for ServiceBusBroker {
 
         let resp = self
             .client
-            .post(&self.send_url())
+            .post(self.send_url())
             .header("Authorization", self.auth_header())
             .header("Content-Type", "application/json")
             .body(json)
@@ -160,7 +157,7 @@ impl TaskBroker for ServiceBusBroker {
     async fn receive(&self) -> Result<Option<AgentTask>> {
         let resp = self
             .client
-            .post(&self.receive_url())
+            .post(self.receive_url())
             .header("Authorization", self.auth_header())
             .send()
             .await
@@ -184,8 +181,8 @@ impl TaskBroker for ServiceBusBroker {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("{}");
 
-        let broker_props: BrokerProperties = serde_json::from_str(broker_props_header)
-            .unwrap_or(BrokerProperties {
+        let broker_props: BrokerProperties =
+            serde_json::from_str(broker_props_header).unwrap_or(BrokerProperties {
                 message_id: None,
                 lock_token: None,
             });
@@ -282,11 +279,7 @@ mod tests {
 
     #[test]
     fn test_trailing_slash_stripped() {
-        let broker = ServiceBusBroker::new(
-            "https://my-ns.servicebus.windows.net/",
-            "q",
-            "token",
-        );
+        let broker = ServiceBusBroker::new("https://my-ns.servicebus.windows.net/", "q", "token");
         assert_eq!(
             broker.send_url(),
             "https://my-ns.servicebus.windows.net/q/messages"
@@ -295,8 +288,8 @@ mod tests {
 
     #[test]
     fn test_task_serialization_roundtrip() {
-        let task = AgentTask::new("servicebus test")
-            .with_metadata("region", serde_json::json!("eastus"));
+        let task =
+            AgentTask::new("servicebus test").with_metadata("region", serde_json::json!("eastus"));
 
         let json = serde_json::to_string(&task).unwrap();
         let deser: AgentTask = serde_json::from_str(&json).unwrap();
@@ -327,8 +320,7 @@ mod tests {
 
     #[test]
     fn test_message_url() {
-        let broker =
-            ServiceBusBroker::new("https://ns.servicebus.windows.net", "q", "tok");
+        let broker = ServiceBusBroker::new("https://ns.servicebus.windows.net", "q", "tok");
         let url = broker.message_url("msg-1", "lock-abc");
         assert_eq!(
             url,

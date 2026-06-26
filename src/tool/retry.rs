@@ -8,10 +8,7 @@ pub enum BackoffStrategy {
     /// Fixed delay between retries.
     Fixed(Duration),
     /// Exponential backoff: base * 2^attempt, capped at max.
-    Exponential {
-        base: Duration,
-        max: Duration,
-    },
+    Exponential { base: Duration, max: Duration },
 }
 
 impl BackoffStrategy {

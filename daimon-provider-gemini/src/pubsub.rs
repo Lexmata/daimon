@@ -307,8 +307,8 @@ mod tests {
 
     #[test]
     fn test_task_serialization_roundtrip() {
-        let task = AgentTask::new("pubsub test")
-            .with_metadata("region", serde_json::json!("us-central1"));
+        let task =
+            AgentTask::new("pubsub test").with_metadata("region", serde_json::json!("us-central1"));
 
         let json = serde_json::to_string(&task).unwrap();
         let deser: AgentTask = serde_json::from_str(&json).unwrap();

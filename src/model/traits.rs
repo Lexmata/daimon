@@ -2,5 +2,5 @@
 //!
 //! Defined in [`daimon_core`] and re-exported here.
 
-pub use daimon_core::{ErasedModel, Model, SharedModel};
 pub use daimon_core::{EmbeddingModel, ErasedEmbeddingModel, SharedEmbeddingModel};
+pub use daimon_core::{ErasedModel, Model, SharedModel};

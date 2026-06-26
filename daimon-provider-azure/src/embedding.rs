@@ -34,7 +34,11 @@ impl AzureOpenAiEmbedding {
     pub fn new(resource_url: impl Into<String>, deployment_id: impl Into<String>) -> Self {
         let api_key = std::env::var("AZURE_OPENAI_API_KEY").unwrap_or_default();
         let deployment = deployment_id.into();
-        let dimensions = if deployment.contains("large") { 3072 } else { 1536 };
+        let dimensions = if deployment.contains("large") {
+            3072
+        } else {
+            1536
+        };
         Self {
             client: reqwest::Client::new(),
             api_key,
@@ -138,8 +142,10 @@ mod tests {
 
     #[test]
     fn test_azure_embedding_new() {
-        let embed =
-            AzureOpenAiEmbedding::new("https://my-resource.openai.azure.com", "text-embedding-3-small");
+        let embed = AzureOpenAiEmbedding::new(
+            "https://my-resource.openai.azure.com",
+            "text-embedding-3-small",
+        );
         assert_eq!(embed.deployment_id, "text-embedding-3-small");
         assert_eq!(embed.dimensions, 1536);
     }

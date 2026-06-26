@@ -9,8 +9,8 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
-use crate::agent::runner::AgentResponse;
 use crate::agent::Agent;
+use crate::agent::runner::AgentResponse;
 use crate::checkpoint::{CheckpointState, ErasedCheckpoint};
 use crate::error::{DaimonError, Result};
 use crate::hooks::AgentState;
@@ -97,11 +97,7 @@ impl Agent {
         loop {
             if cancel.is_cancelled() {
                 checkpoint
-                    .save_erased(&CheckpointState::new(
-                        run_id,
-                        messages.clone(),
-                        iteration,
-                    ))
+                    .save_erased(&CheckpointState::new(run_id, messages.clone(), iteration))
                     .await?;
                 return Err(DaimonError::Cancelled);
             }
@@ -141,26 +137,20 @@ impl Agent {
 
             if response.has_tool_calls() {
                 let tool_calls = response.tool_calls().to_vec();
-                let assistant_msg =
-                    Message::assistant_with_tool_calls(tool_calls.clone());
+                let assistant_msg = Message::assistant_with_tool_calls(tool_calls.clone());
                 messages.push(assistant_msg.clone());
                 self.memory.add_message_erased(assistant_msg).await?;
 
                 let tool_results = self.execute_tools_parallel(&tool_calls).await;
 
                 for (call, tool_result) in tool_calls.iter().zip(tool_results) {
-                    let result_msg =
-                        Message::tool_result(&call.id, &tool_result.content);
+                    let result_msg = Message::tool_result(&call.id, &tool_result.content);
                     messages.push(result_msg.clone());
                     self.memory.add_message_erased(result_msg).await?;
                 }
 
                 checkpoint
-                    .save_erased(&CheckpointState::new(
-                        run_id,
-                        messages.clone(),
-                        iteration,
-                    ))
+                    .save_erased(&CheckpointState::new(run_id, messages.clone(), iteration))
                     .await?;
 
                 self.hooks.on_iteration_end_erased(&state).await?;
@@ -176,12 +166,8 @@ impl Agent {
             messages.push(response.message.clone());
             self.memory.add_message_erased(response.message).await?;
 
-            let completed_state = CheckpointState::new(
-                run_id,
-                messages.clone(),
-                iteration,
-            )
-            .mark_completed();
+            let completed_state =
+                CheckpointState::new(run_id, messages.clone(), iteration).mark_completed();
             checkpoint.save_erased(&completed_state).await?;
 
             self.hooks.on_iteration_end_erased(&state).await?;

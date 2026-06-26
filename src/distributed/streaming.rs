@@ -56,11 +56,28 @@ pub struct TaskStreamEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SerializableStreamEvent {
     TextDelta(String),
-    ToolCallStart { id: String, name: String },
-    ToolCallDelta { id: String, arguments_delta: String },
-    ToolCallEnd { id: String },
-    ToolResult { id: String, content: String, is_error: bool },
-    Usage { iteration: usize, input_tokens: u32, output_tokens: u32, estimated_cost: f64 },
+    ToolCallStart {
+        id: String,
+        name: String,
+    },
+    ToolCallDelta {
+        id: String,
+        arguments_delta: String,
+    },
+    ToolCallEnd {
+        id: String,
+    },
+    ToolResult {
+        id: String,
+        content: String,
+        is_error: bool,
+    },
+    Usage {
+        iteration: usize,
+        input_tokens: u32,
+        output_tokens: u32,
+        estimated_cost: f64,
+    },
     Error(String),
     Done,
 }
@@ -73,12 +90,19 @@ impl From<&StreamEvent> for SerializableStreamEvent {
                 id: id.clone(),
                 name: name.clone(),
             },
-            StreamEvent::ToolCallDelta { id, arguments_delta } => Self::ToolCallDelta {
+            StreamEvent::ToolCallDelta {
+                id,
+                arguments_delta,
+            } => Self::ToolCallDelta {
                 id: id.clone(),
                 arguments_delta: arguments_delta.clone(),
             },
             StreamEvent::ToolCallEnd { id } => Self::ToolCallEnd { id: id.clone() },
-            StreamEvent::ToolResult { id, content, is_error } => Self::ToolResult {
+            StreamEvent::ToolResult {
+                id,
+                content,
+                is_error,
+            } => Self::ToolResult {
                 id: id.clone(),
                 content: content.clone(),
                 is_error: *is_error,

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use crate::model::{SharedEmbeddingModel, SharedModel};
 use crate::model::types::{ChatRequest, Message};
+use crate::model::{SharedEmbeddingModel, SharedModel};
 
 /// A scoring strategy that evaluates agent output.
 pub enum Scorer {
@@ -20,10 +20,7 @@ pub enum Scorer {
         threshold: f64,
     },
     /// An LLM grades the output against a rubric.
-    LlmJudge {
-        rubric: String,
-        model: SharedModel,
-    },
+    LlmJudge { rubric: String, model: SharedModel },
 }
 
 impl Scorer {
@@ -111,7 +108,11 @@ impl std::fmt::Debug for Scorer {
             Scorer::Contains(s) => write!(f, "Contains({s:?})"),
             Scorer::Regex(s) => write!(f, "Regex({s:?})"),
             Scorer::Custom(_) => write!(f, "Custom(...)"),
-            Scorer::SemanticSimilarity { expected, threshold, .. } => {
+            Scorer::SemanticSimilarity {
+                expected,
+                threshold,
+                ..
+            } => {
                 write!(f, "SemanticSimilarity({expected:?}, threshold={threshold})")
             }
             Scorer::LlmJudge { rubric, .. } => write!(f, "LlmJudge({rubric:?})"),
@@ -126,13 +127,15 @@ impl Clone for Scorer {
             Scorer::Contains(s) => Scorer::Contains(s.clone()),
             Scorer::Regex(s) => Scorer::Regex(s.clone()),
             Scorer::Custom(f) => Scorer::Custom(Arc::clone(f)),
-            Scorer::SemanticSimilarity { expected, embedding_model, threshold } => {
-                Scorer::SemanticSimilarity {
-                    expected: expected.clone(),
-                    embedding_model: Arc::clone(embedding_model),
-                    threshold: *threshold,
-                }
-            }
+            Scorer::SemanticSimilarity {
+                expected,
+                embedding_model,
+                threshold,
+            } => Scorer::SemanticSimilarity {
+                expected: expected.clone(),
+                embedding_model: Arc::clone(embedding_model),
+                threshold: *threshold,
+            },
             Scorer::LlmJudge { rubric, model } => Scorer::LlmJudge {
                 rubric: rubric.clone(),
                 model: Arc::clone(model),
@@ -153,14 +156,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_contains() {
-        assert!(Scorer::Contains("world".into()).evaluate("hello world").await);
+        assert!(
+            Scorer::Contains("world".into())
+                .evaluate("hello world")
+                .await
+        );
         assert!(!Scorer::Contains("xyz".into()).evaluate("hello world").await);
     }
 
     #[tokio::test]
     async fn test_regex() {
         assert!(Scorer::Regex(r"\d+".into()).evaluate("answer is 42").await);
-        assert!(!Scorer::Regex(r"^\d+$".into()).evaluate("answer is 42").await);
+        assert!(
+            !Scorer::Regex(r"^\d+$".into())
+                .evaluate("answer is 42")
+                .await
+        );
     }
 
     #[tokio::test]

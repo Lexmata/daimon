@@ -35,10 +35,7 @@ impl MiddlewareStack {
     /// Runs `on_request` through every layer in order. Returns the first
     /// non-`Continue` action, or `Continue` if all layers pass.
     #[inline]
-    pub async fn run_on_request(
-        &self,
-        request: &mut ChatRequest,
-    ) -> Result<MiddlewareAction> {
+    pub async fn run_on_request(&self, request: &mut ChatRequest) -> Result<MiddlewareAction> {
         if self.layers.is_empty() {
             return Ok(MiddlewareAction::Continue);
         }
@@ -53,10 +50,7 @@ impl MiddlewareStack {
 
     /// Runs `on_response` through every layer in order.
     #[inline]
-    pub async fn run_on_response(
-        &self,
-        response: &mut ChatResponse,
-    ) -> Result<MiddlewareAction> {
+    pub async fn run_on_response(&self, response: &mut ChatResponse) -> Result<MiddlewareAction> {
         if self.layers.is_empty() {
             return Ok(MiddlewareAction::Continue);
         }
@@ -71,10 +65,7 @@ impl MiddlewareStack {
 
     /// Runs `on_tool_call` through every layer in order.
     #[inline]
-    pub async fn run_on_tool_call(
-        &self,
-        call: &mut ToolCall,
-    ) -> Result<MiddlewareAction> {
+    pub async fn run_on_tool_call(&self, call: &mut ToolCall) -> Result<MiddlewareAction> {
         if self.layers.is_empty() {
             return Ok(MiddlewareAction::Continue);
         }
@@ -96,11 +87,10 @@ mod tests {
     struct AppendSystemMiddleware;
 
     impl Middleware for AppendSystemMiddleware {
-        async fn on_request(
-            &self,
-            request: &mut ChatRequest,
-        ) -> Result<MiddlewareAction> {
-            request.messages.push(Message::system("injected by middleware"));
+        async fn on_request(&self, request: &mut ChatRequest) -> Result<MiddlewareAction> {
+            request
+                .messages
+                .push(Message::system("injected by middleware"));
             Ok(MiddlewareAction::Continue)
         }
     }
@@ -108,10 +98,7 @@ mod tests {
     struct ShortCircuitMiddleware;
 
     impl Middleware for ShortCircuitMiddleware {
-        async fn on_response(
-            &self,
-            _response: &mut ChatResponse,
-        ) -> Result<MiddlewareAction> {
+        async fn on_response(&self, _response: &mut ChatResponse) -> Result<MiddlewareAction> {
             Ok(MiddlewareAction::ShortCircuit(ChatResponse {
                 message: Message::assistant("short-circuited"),
                 stop_reason: StopReason::EndTurn,
@@ -138,7 +125,10 @@ mod tests {
 
         stack.run_on_request(&mut req).await.unwrap();
         assert_eq!(req.messages.len(), 2);
-        assert_eq!(req.messages[1].content.as_deref(), Some("injected by middleware"));
+        assert_eq!(
+            req.messages[1].content.as_deref(),
+            Some("injected by middleware")
+        );
     }
 
     #[tokio::test]
@@ -167,20 +157,14 @@ mod tests {
         struct Second;
 
         impl Middleware for First {
-            async fn on_request(
-                &self,
-                request: &mut ChatRequest,
-            ) -> Result<MiddlewareAction> {
+            async fn on_request(&self, request: &mut ChatRequest) -> Result<MiddlewareAction> {
                 request.messages.push(Message::system("first"));
                 Ok(MiddlewareAction::Continue)
             }
         }
 
         impl Middleware for Second {
-            async fn on_request(
-                &self,
-                request: &mut ChatRequest,
-            ) -> Result<MiddlewareAction> {
+            async fn on_request(&self, request: &mut ChatRequest) -> Result<MiddlewareAction> {
                 request.messages.push(Message::system("second"));
                 Ok(MiddlewareAction::Continue)
             }

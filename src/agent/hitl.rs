@@ -137,7 +137,10 @@ impl Tool for AskHumanTool {
             })
             .unwrap_or_default();
 
-        let context = input.get("context").and_then(|v| v.as_str()).map(String::from);
+        let context = input
+            .get("context")
+            .and_then(|v| v.as_str())
+            .map(String::from);
 
         let request = HumanInputRequest {
             prompt: question,
@@ -201,7 +204,12 @@ mod tests {
         let schema = tool.parameters_schema();
         assert_eq!(schema["type"], "object");
         assert!(schema["properties"]["question"].is_object());
-        assert!(schema["required"].as_array().unwrap().contains(&serde_json::json!("question")));
+        assert!(
+            schema["required"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("question"))
+        );
     }
 
     struct ContextCapturingHandler {

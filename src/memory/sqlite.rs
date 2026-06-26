@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use tokio::sync::Mutex;
 
 use crate::error::{DaimonError, Result};
@@ -36,12 +36,10 @@ impl SqliteMemory {
     pub async fn open(path: impl Into<String>) -> Result<Self> {
         let path = path.into();
         let conn = tokio::task::spawn_blocking(move || {
-            Connection::open(&path)
-                .map_err(|e| DaimonError::Other(format!("sqlite open: {e}")))
+            Connection::open(&path).map_err(|e| DaimonError::Other(format!("sqlite open: {e}")))
         })
         .await
-        .map_err(|e| DaimonError::Other(format!("spawn_blocking: {e}")))?
-        ?;
+        .map_err(|e| DaimonError::Other(format!("spawn_blocking: {e}")))??;
 
         let mem = Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -294,9 +292,7 @@ mod tests {
         assert_eq!(mem1.get_messages().await.unwrap().len(), 1);
         assert_eq!(mem2.get_messages().await.unwrap().len(), 1);
         assert_eq!(
-            mem1.get_messages().await.unwrap()[0]
-                .content
-                .as_deref(),
+            mem1.get_messages().await.unwrap()[0].content.as_deref(),
             Some("session1")
         );
     }

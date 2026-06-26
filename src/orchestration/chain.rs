@@ -81,8 +81,11 @@ impl ChainStep for AgentStep {
     }
 }
 
-type BoxedTransformFn =
-    Arc<dyn Fn(ChainContext) -> Pin<Box<dyn Future<Output = Result<ChainContext>> + Send>> + Send + Sync>;
+type BoxedTransformFn = Arc<
+    dyn Fn(ChainContext) -> Pin<Box<dyn Future<Output = Result<ChainContext>> + Send>>
+        + Send
+        + Sync,
+>;
 
 /// A [`ChainStep`] built from an async closure.
 pub struct TransformStep {
@@ -244,10 +247,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_chain_single_step() {
-        let chain = Chain::builder()
-            .step(UppercaseStep)
-            .build()
-            .unwrap();
+        let chain = Chain::builder().step(UppercaseStep).build().unwrap();
 
         let result = chain.run("hello").await.unwrap();
         assert_eq!(result.text, "HELLO");
@@ -257,9 +257,7 @@ mod tests {
     async fn test_chain_multiple_steps() {
         let chain = Chain::builder()
             .step(UppercaseStep)
-            .step(AppendStep {
-                suffix: "!".into(),
-            })
+            .step(AppendStep { suffix: "!".into() })
             .build()
             .unwrap();
 
@@ -285,8 +283,7 @@ mod tests {
     async fn test_chain_metadata_propagation() {
         let chain = Chain::builder()
             .transform(|mut ctx| async move {
-                ctx.metadata
-                    .insert("step1".into(), serde_json::json!(true));
+                ctx.metadata.insert("step1".into(), serde_json::json!(true));
                 Ok(ctx)
             })
             .transform(|ctx| async move {
@@ -317,18 +314,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_chain_run_with_context() {
-        let chain = Chain::builder()
-            .step(UppercaseStep)
-            .build()
-            .unwrap();
+        let chain = Chain::builder().step(UppercaseStep).build().unwrap();
 
         let ctx = ChainContext::new("hello").with_metadata("key", serde_json::json!("val"));
         let result = chain.run_with_context(ctx).await.unwrap();
         assert_eq!(result.text, "HELLO");
-        assert_eq!(
-            result.metadata.get("key"),
-            Some(&serde_json::json!("val"))
-        );
+        assert_eq!(result.metadata.get("key"), Some(&serde_json::json!("val")));
     }
 
     #[tokio::test]

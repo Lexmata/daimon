@@ -200,14 +200,14 @@ mod tests {
     #[tokio::test]
     async fn test_structured_output_basic() {
         let agent = Agent::builder()
-            .model(JsonModel::new(r#"{"label": "positive", "confidence": 0.95}"#))
+            .model(JsonModel::new(
+                r#"{"label": "positive", "confidence": 0.95}"#,
+            ))
             .build()
             .unwrap();
 
-        let result: StructuredOutput<Sentiment> = agent
-            .prompt_structured("test", "Sentiment")
-            .await
-            .unwrap();
+        let result: StructuredOutput<Sentiment> =
+            agent.prompt_structured("test", "Sentiment").await.unwrap();
 
         assert_eq!(result.data.label, "positive");
         assert_eq!(result.data.confidence, 0.95);
@@ -244,33 +244,21 @@ mod tests {
 
     #[test]
     fn test_extract_json_plain() {
-        assert_eq!(
-            extract_json(r#"{"a": 1}"#),
-            r#"{"a": 1}"#
-        );
+        assert_eq!(extract_json(r#"{"a": 1}"#), r#"{"a": 1}"#);
     }
 
     #[test]
     fn test_extract_json_code_fence() {
-        assert_eq!(
-            extract_json("```json\n{\"a\": 1}\n```"),
-            "{\"a\": 1}"
-        );
+        assert_eq!(extract_json("```json\n{\"a\": 1}\n```"), "{\"a\": 1}");
     }
 
     #[test]
     fn test_extract_json_generic_fence() {
-        assert_eq!(
-            extract_json("```\n{\"a\": 1}\n```"),
-            "{\"a\": 1}"
-        );
+        assert_eq!(extract_json("```\n{\"a\": 1}\n```"), "{\"a\": 1}");
     }
 
     #[test]
     fn test_extract_json_whitespace() {
-        assert_eq!(
-            extract_json("  \n  {\"a\": 1}  \n  "),
-            "{\"a\": 1}"
-        );
+        assert_eq!(extract_json("  \n  {\"a\": 1}  \n  "), "{\"a\": 1}");
     }
 }

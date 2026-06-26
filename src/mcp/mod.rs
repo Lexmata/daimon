@@ -23,19 +23,19 @@
 //! McpServer::new(registry).serve_stdio().await?;
 //! ```
 
-pub mod protocol;
-pub mod transport;
-pub mod client;
 pub mod bridge;
+pub mod client;
+pub mod protocol;
 pub mod server;
+pub mod transport;
 pub mod websocket;
 pub mod ws_server;
 
 #[cfg(feature = "grpc")]
 pub mod grpc_transport;
 
-pub use client::McpClient;
 pub use bridge::McpToolBridge;
+pub use client::McpClient;
 pub use server::McpServer;
 pub use transport::{HttpTransport, McpTransport, StdioTransport};
 pub use websocket::WebSocketTransport;

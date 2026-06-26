@@ -345,9 +345,7 @@ mod tests {
         let hot = HotSwapAgent::new(agent);
         let clone = hot.clone();
 
-        clone
-            .swap_system_prompt(Some("from-clone".into()))
-            .await;
+        clone.swap_system_prompt(Some("from-clone".into())).await;
         assert_eq!(hot.system_prompt().await.as_deref(), Some("from-clone"));
     }
 

@@ -55,9 +55,10 @@ pub use builder::OpenSearchVectorStoreBuilder;
 pub use store::OpenSearchVectorStore;
 
 /// Distance metric / space type for k-NN vector search.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SpaceType {
     /// Cosine similarity. Best for normalized embeddings.
+    #[default]
     CosineSimilarity,
     /// Euclidean (L2) distance. Best for absolute spatial similarity.
     L2,
@@ -76,16 +77,11 @@ impl SpaceType {
     }
 }
 
-impl Default for SpaceType {
-    fn default() -> Self {
-        Self::CosineSimilarity
-    }
-}
-
 /// k-NN engine used for approximate nearest neighbor search.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Engine {
     /// Apache Lucene engine. Good default, supports all space types.
+    #[default]
     Lucene,
     /// NMSLIB engine. High performance for cosine and L2.
     Nmslib,
@@ -101,12 +97,6 @@ impl Engine {
             Self::Nmslib => "nmslib",
             Self::Faiss => "faiss",
         }
-    }
-}
-
-impl Default for Engine {
-    fn default() -> Self {
-        Self::Lucene
     }
 }
 

@@ -121,15 +121,14 @@ fn check_api_key(
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-        .or_else(|| {
-            headers
-                .get("x-api-key")
-                .and_then(|v| v.to_str().ok())
-        });
+        .or_else(|| headers.get("x-api-key").and_then(|v| v.to_str().ok()));
 
     match provided {
         Some(key) if key == expected.as_str() => Ok(()),
-        _ => Err((StatusCode::UNAUTHORIZED, "invalid or missing API key".to_string())),
+        _ => Err((
+            StatusCode::UNAUTHORIZED,
+            "invalid or missing API key".to_string(),
+        )),
     }
 }
 
@@ -176,7 +175,7 @@ async fn prompt_stream_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let sse_stream = stream.map(|event| {
-        let event = event.map_err(|e| axum::Error::new(e))?;
+        let event = event.map_err(axum::Error::new)?;
         let data = serde_json::to_string(&format!("{event:?}")).unwrap_or_default();
         Ok(Event::default().data(data))
     });

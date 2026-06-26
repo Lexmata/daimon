@@ -1,7 +1,7 @@
 //! WebSocket MCP server: expose Daimon tools over WebSocket connections.
 //!
 //! [`McpWsServer`] listens on a TCP port and accepts WebSocket connections,
-//! serving JSON-RPC 2.0 requests the same way [`McpServer`](super::McpServer)
+//! serving JSON-RPC 2.0 requests the same way [`McpServer`]
 //! does over stdio.
 //!
 //! ```ignore
@@ -112,10 +112,8 @@ async fn handle_connection(server: Arc<McpServer>, stream: TcpStream) -> Result<
 
         let body = match &msg {
             WsMessage::Text(text) => text.to_string(),
-            WsMessage::Binary(data) => {
-                String::from_utf8(data.to_vec())
-                    .map_err(|e| DaimonError::Mcp(format!("invalid utf-8: {e}")))?
-            }
+            WsMessage::Binary(data) => String::from_utf8(data.to_vec())
+                .map_err(|e| DaimonError::Mcp(format!("invalid utf-8: {e}")))?,
             WsMessage::Close(_) => break,
             WsMessage::Ping(_) | WsMessage::Pong(_) | WsMessage::Frame(_) => continue,
         };
@@ -200,8 +198,7 @@ mod tests {
             .unwrap();
 
         let resp = source.next().await.unwrap().unwrap();
-        let body: serde_json::Value =
-            serde_json::from_str(&resp.into_text().unwrap()).unwrap();
+        let body: serde_json::Value = serde_json::from_str(&resp.into_text().unwrap()).unwrap();
         assert!(body["result"]["capabilities"]["tools"].is_object());
 
         let call_req = serde_json::json!({
@@ -215,8 +212,7 @@ mod tests {
             .unwrap();
 
         let resp = source.next().await.unwrap().unwrap();
-        let body: serde_json::Value =
-            serde_json::from_str(&resp.into_text().unwrap()).unwrap();
+        let body: serde_json::Value = serde_json::from_str(&resp.into_text().unwrap()).unwrap();
         assert_eq!(body["result"]["content"][0]["text"], "pong");
 
         sink.send(WsMsg::Close(None)).await.unwrap();
@@ -255,8 +251,7 @@ mod tests {
             .unwrap();
 
         let resp = source.next().await.unwrap().unwrap();
-        let body: serde_json::Value =
-            serde_json::from_str(&resp.into_text().unwrap()).unwrap();
+        let body: serde_json::Value = serde_json::from_str(&resp.into_text().unwrap()).unwrap();
         let tools = body["result"]["tools"].as_array().unwrap();
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0]["name"], "ping");

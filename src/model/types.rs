@@ -3,6 +3,4 @@
 //! These types are defined in [`daimon_core`] and re-exported here for
 //! backward compatibility.
 
-pub use daimon_core::{
-    ChatRequest, ChatResponse, Message, Role, StopReason, ToolSpec, Usage,
-};
+pub use daimon_core::{ChatRequest, ChatResponse, Message, Role, StopReason, ToolSpec, Usage};

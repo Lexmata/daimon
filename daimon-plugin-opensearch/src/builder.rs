@@ -125,7 +125,9 @@ impl OpenSearchVectorStoreBuilder {
     async fn ensure_index(&self, client: &OpenSearch) -> Result<()> {
         let exists = client
             .indices()
-            .exists(opensearch::indices::IndicesExistsParts::Index(&[&self.index]))
+            .exists(opensearch::indices::IndicesExistsParts::Index(&[
+                &self.index
+            ]))
             .send()
             .await
             .map_err(|e| DaimonError::Other(format!("opensearch index check error: {e}")))?;

@@ -68,9 +68,7 @@ pub trait WorkflowNode: Send + Sync {
 // ---------------------------------------------------------------------------
 
 type BoxedWorkflowFn = Arc<
-    dyn Fn(
-            serde_json::Value,
-        ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value>> + Send>>
+    dyn Fn(serde_json::Value) -> Pin<Box<dyn Future<Output = Result<serde_json::Value>> + Send>>
         + Send
         + Sync,
 >;
@@ -84,9 +82,7 @@ impl FnWorkflowNode {
     /// Creates a workflow node from a closure.
     pub fn new<F>(func: F) -> Self
     where
-        F: Fn(
-                serde_json::Value,
-            ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value>> + Send>>
+        F: Fn(serde_json::Value) -> Pin<Box<dyn Future<Output = Result<serde_json::Value>> + Send>>
             + Send
             + Sync
             + 'static,
@@ -137,10 +133,7 @@ impl WorkflowNode for AgentWorkflowNode {
         input: serde_json::Value,
     ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value>> + Send + 'a>> {
         Box::pin(async move {
-            let prompt = input[&self.input_field]
-                .as_str()
-                .unwrap_or("")
-                .to_string();
+            let prompt = input[&self.input_field].as_str().unwrap_or("").to_string();
             let response = self.agent.prompt(&prompt).await?;
             Ok(serde_json::json!({ "text": response.final_text }))
         })
@@ -279,14 +272,10 @@ impl WorkflowBuilder {
         }
 
         if !successors.contains_key(START) {
-            return Err(DaimonError::Orchestration(
-                "no edges from START".into(),
-            ));
+            return Err(DaimonError::Orchestration("no edges from START".into()));
         }
         if !predecessors.contains_key(END) {
-            return Err(DaimonError::Orchestration(
-                "no edges into END".into(),
-            ));
+            return Err(DaimonError::Orchestration("no edges into END".into()));
         }
 
         let levels = topological_levels(&all_nodes, &successors, &predecessors)?;
@@ -323,7 +312,10 @@ impl std::fmt::Debug for Workflow {
         f.debug_struct("Workflow")
             .field("levels", &self.levels)
             .field("node_count", &self.nodes.len())
-            .field("edge_count", &self.successors.values().map(|v| v.len()).sum::<usize>())
+            .field(
+                "edge_count",
+                &self.successors.values().map(|v| v.len()).sum::<usize>(),
+            )
             .finish()
     }
 }
@@ -354,9 +346,7 @@ impl Workflow {
                 None => continue,
             };
 
-            let mappings = self
-                .edge_mappings
-                .get(&(pred.clone(), node.to_string()));
+            let mappings = self.edge_mappings.get(&(pred.clone(), node.to_string()));
 
             match mappings {
                 Some(maps) if !maps.is_empty() => {
@@ -560,10 +550,7 @@ mod tests {
                 "combine",
                 FnWorkflowNode::new(|input| {
                     Box::pin(async move {
-                        let upper = input["upper_text"]
-                            .as_str()
-                            .unwrap_or("")
-                            .to_string();
+                        let upper = input["upper_text"].as_str().unwrap_or("").to_string();
                         let len = input["text_len"].as_i64().unwrap_or(0);
                         Ok(json!({ "summary": format!("{upper} ({len} chars)") }))
                     })
@@ -586,9 +573,7 @@ mod tests {
         let wf = Workflow::builder()
             .node(
                 "echo",
-                FnWorkflowNode::new(|input| {
-                    Box::pin(async move { Ok(input) })
-                }),
+                FnWorkflowNode::new(|input| Box::pin(async move { Ok(input) })),
             )
             .edge_passthrough(START, "echo")
             .edge_passthrough("echo", END)
@@ -690,9 +675,7 @@ mod tests {
         let wf = Workflow::builder()
             .node(
                 "producer",
-                FnWorkflowNode::new(|_| {
-                    Box::pin(async { Ok(json!({ "a": 1, "b": 2, "c": 3 })) })
-                }),
+                FnWorkflowNode::new(|_| Box::pin(async { Ok(json!({ "a": 1, "b": 2, "c": 3 })) })),
             )
             .node(
                 "consumer",

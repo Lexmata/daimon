@@ -4,8 +4,8 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::error::Result;
-use crate::retriever::types::Document;
 use crate::retriever::traits::Retriever;
+use crate::retriever::types::Document;
 
 /// A stored document with its precomputed embedding vector.
 struct StoredEntry {
@@ -50,7 +50,10 @@ impl InMemoryVectorStore {
 
         let mut entries = self.entries.write().await;
         for (doc, embedding) in docs.into_iter().zip(embeddings) {
-            entries.push(StoredEntry { document: doc, embedding });
+            entries.push(StoredEntry {
+                document: doc,
+                embedding,
+            });
         }
         Ok(())
     }

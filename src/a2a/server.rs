@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
-use crate::agent::Agent;
 use super::types::*;
+use crate::agent::Agent;
 
 /// A2A server that routes JSON-RPC requests to an agent.
 ///
@@ -66,11 +66,9 @@ impl A2aHandler {
             "tasks/send" => self.handle_task_send(&request).await,
             "tasks/get" => self.handle_task_get(&request).await,
             "tasks/cancel" => self.handle_task_cancel(&request).await,
-            other => JsonRpcResponse::error(
-                request.id,
-                -32601,
-                format!("Method not found: {other}"),
-            ),
+            other => {
+                JsonRpcResponse::error(request.id, -32601, format!("Method not found: {other}"))
+            }
         };
 
         serde_json::to_string(&response).unwrap_or_default()
@@ -267,8 +265,8 @@ fn generate_id() -> String {
 mod tests {
     use super::*;
     use crate::error::Result;
-    use crate::model::types::{ChatRequest, ChatResponse, Message, StopReason, Usage};
     use crate::model::Model;
+    use crate::model::types::{ChatRequest, ChatResponse, Message, StopReason, Usage};
     use crate::stream::ResponseStream;
 
     struct EchoModel;
@@ -293,12 +291,7 @@ mod tests {
     }
 
     fn test_handler() -> A2aHandler {
-        let agent = Arc::new(
-            Agent::builder()
-                .model(EchoModel)
-                .build()
-                .unwrap(),
-        );
+        let agent = Arc::new(Agent::builder().model(EchoModel).build().unwrap());
         let card = AgentCard {
             name: "TestAgent".to_string(),
             description: "Test".to_string(),
@@ -387,8 +380,7 @@ mod tests {
         let cancel_resp_str = handler.handle_request(&cancel_req.to_string()).await;
         let cancel_resp: JsonRpcResponse = serde_json::from_str(&cancel_resp_str).unwrap();
         assert!(cancel_resp.error.is_none());
-        let cancelled: A2aTask =
-            serde_json::from_value(cancel_resp.result.unwrap()).unwrap();
+        let cancelled: A2aTask = serde_json::from_value(cancel_resp.result.unwrap()).unwrap();
         assert_eq!(cancelled.status.state, TaskState::Canceled);
     }
 

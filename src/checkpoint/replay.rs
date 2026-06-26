@@ -36,9 +36,7 @@ pub struct ExecutionTrace {
 impl ExecutionTrace {
     /// Returns the final response text, if the run completed.
     pub fn final_text(&self) -> Option<&str> {
-        self.steps
-            .last()
-            .and_then(|s| s.response_text.as_deref())
+        self.steps.last().and_then(|s| s.response_text.as_deref())
     }
 
     /// Returns the total number of tool calls across all steps.
@@ -63,9 +61,7 @@ pub async fn inspect_run(
 }
 
 /// Lists all checkpointed runs with their metadata.
-pub async fn list_runs(
-    checkpoint: &dyn ErasedCheckpoint,
-) -> Result<Vec<RunSummary>> {
+pub async fn list_runs(checkpoint: &dyn ErasedCheckpoint) -> Result<Vec<RunSummary>> {
     let run_ids = checkpoint.list_runs_erased().await?;
     let mut summaries = Vec::with_capacity(run_ids.len());
 
@@ -102,21 +98,18 @@ fn reconstruct_trace(state: &CheckpointState) -> ExecutionTrace {
     for msg in &state.messages {
         current_messages.push(msg.clone());
 
-        match msg.role {
-            crate::model::types::Role::Assistant => {
-                iteration += 1;
-                let tool_calls = msg.tool_calls.clone();
-                let response_text = msg.content.clone();
+        if msg.role == crate::model::types::Role::Assistant {
+            iteration += 1;
+            let tool_calls = msg.tool_calls.clone();
+            let response_text = msg.content.clone();
 
-                steps.push(TraceStep {
-                    iteration,
-                    messages: current_messages.clone(),
-                    tool_calls,
-                    response_text,
-                    usage: Usage::default(),
-                });
-            }
-            _ => {}
+            steps.push(TraceStep {
+                iteration,
+                messages: current_messages.clone(),
+                tool_calls,
+                response_text,
+                usage: Usage::default(),
+            });
         }
     }
 
@@ -131,8 +124,8 @@ fn reconstruct_trace(state: &CheckpointState) -> ExecutionTrace {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::checkpoint::InMemoryCheckpoint;
     use crate::checkpoint::Checkpoint;
+    use crate::checkpoint::InMemoryCheckpoint;
     use crate::model::types::Message;
 
     #[tokio::test]
@@ -140,12 +133,10 @@ mod tests {
         let cp = InMemoryCheckpoint::new();
         let state = CheckpointState::new(
             "run-1",
-            vec![
-                Message::user("hello"),
-                Message::assistant("hi there"),
-            ],
+            vec![Message::user("hello"), Message::assistant("hi there")],
             1,
-        ).mark_completed();
+        )
+        .mark_completed();
         cp.save(&state).await.unwrap();
 
         let trace = inspect_run(&cp, "run-1").await.unwrap();
@@ -158,8 +149,12 @@ mod tests {
     #[tokio::test]
     async fn test_list_runs() {
         let cp = InMemoryCheckpoint::new();
-        cp.save(&CheckpointState::new("a", vec![], 1)).await.unwrap();
-        cp.save(&CheckpointState::new("b", vec![], 2)).await.unwrap();
+        cp.save(&CheckpointState::new("a", vec![], 1))
+            .await
+            .unwrap();
+        cp.save(&CheckpointState::new("b", vec![], 2))
+            .await
+            .unwrap();
 
         let runs = list_runs(&cp).await.unwrap();
         assert_eq!(runs.len(), 2);

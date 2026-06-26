@@ -171,12 +171,9 @@ impl Model for AzureOpenAi {
             let status = response.status();
 
             if status.is_success() {
-                let api_resp: AzureResponse = response
-                    .json()
-                    .await
-                    .map_err(|e| {
-                        DaimonError::Model(format!("Azure OpenAI response parse error: {e}"))
-                    })?;
+                let api_resp: AzureResponse = response.json().await.map_err(|e| {
+                    DaimonError::Model(format!("Azure OpenAI response parse error: {e}"))
+                })?;
                 tracing::debug!("received successful Azure OpenAI response");
                 return parse_response(api_resp);
             }
@@ -248,14 +245,13 @@ impl Model for AzureOpenAi {
                         continue;
                     }
 
-                    if let Some(data) = line.strip_prefix("data: ") {
-                        if let Ok(chunk) = serde_json::from_str::<AzureStreamChunk>(data) {
+                    if let Some(data) = line.strip_prefix("data: ")
+                        && let Ok(chunk) = serde_json::from_str::<AzureStreamChunk>(data) {
                             for choice in &chunk.choices {
-                                if let Some(ref content) = choice.delta.content {
-                                    if !content.is_empty() {
+                                if let Some(ref content) = choice.delta.content
+                                    && !content.is_empty() {
                                         yield StreamEvent::TextDelta(content.clone());
                                     }
-                                }
                                 if let Some(ref tool_calls) = choice.delta.tool_calls {
                                     for tc in tool_calls {
                                         if let Some(ref func) = tc.function {
@@ -265,20 +261,18 @@ impl Model for AzureOpenAi {
                                                     name: name.clone(),
                                                 };
                                             }
-                                            if let Some(ref args) = func.arguments {
-                                                if !args.is_empty() {
+                                            if let Some(ref args) = func.arguments
+                                                && !args.is_empty() {
                                                     yield StreamEvent::ToolCallDelta {
                                                         id: tc.index.to_string(),
                                                         arguments_delta: args.clone(),
                                                     };
                                                 }
-                                            }
                                         }
                                     }
                                 }
                             }
                         }
-                    }
                 }
             }
         };
@@ -508,10 +502,7 @@ mod tests {
     fn test_azure_new_default() {
         let model = AzureOpenAi::new("https://my-resource.openai.azure.com", "gpt-4o");
         assert_eq!(model.deployment_id, "gpt-4o");
-        assert_eq!(
-            model.resource_url,
-            "https://my-resource.openai.azure.com"
-        );
+        assert_eq!(model.resource_url, "https://my-resource.openai.azure.com");
         assert_eq!(model.api_version, DEFAULT_API_VERSION);
         assert_eq!(model.max_retries, DEFAULT_MAX_RETRIES);
         assert!(!model.use_bearer_token);
@@ -520,19 +511,13 @@ mod tests {
     #[test]
     fn test_resource_url_trailing_slash_stripped() {
         let model = AzureOpenAi::new("https://my-resource.openai.azure.com/", "gpt-4o");
-        assert_eq!(
-            model.resource_url,
-            "https://my-resource.openai.azure.com"
-        );
+        assert_eq!(model.resource_url, "https://my-resource.openai.azure.com");
     }
 
     #[test]
     fn test_endpoint_url() {
-        let model = AzureOpenAi::with_api_key(
-            "https://my-resource.openai.azure.com",
-            "gpt-4o",
-            "key",
-        );
+        let model =
+            AzureOpenAi::with_api_key("https://my-resource.openai.azure.com", "gpt-4o", "key");
         assert_eq!(
             model.endpoint_url(),
             "https://my-resource.openai.azure.com/openai/deployments/gpt-4o/chat/completions"
@@ -541,8 +526,8 @@ mod tests {
 
     #[test]
     fn test_with_api_version() {
-        let model = AzureOpenAi::new("https://x.openai.azure.com", "gpt-4o")
-            .with_api_version("2025-01-01");
+        let model =
+            AzureOpenAi::new("https://x.openai.azure.com", "gpt-4o").with_api_version("2025-01-01");
         assert_eq!(model.api_version, "2025-01-01");
     }
 
@@ -555,15 +540,13 @@ mod tests {
 
     #[test]
     fn test_with_max_retries() {
-        let model = AzureOpenAi::new("https://x.openai.azure.com", "gpt-4o")
-            .with_max_retries(10);
+        let model = AzureOpenAi::new("https://x.openai.azure.com", "gpt-4o").with_max_retries(10);
         assert_eq!(model.max_retries, 10);
     }
 
     #[test]
     fn test_with_bearer_token() {
-        let model =
-            AzureOpenAi::new("https://x.openai.azure.com", "gpt-4o").with_bearer_token();
+        let model = AzureOpenAi::new("https://x.openai.azure.com", "gpt-4o").with_bearer_token();
         assert!(model.use_bearer_token);
     }
 

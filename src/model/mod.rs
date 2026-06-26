@@ -7,7 +7,9 @@
 mod traits;
 pub mod types;
 
-pub use traits::{EmbeddingModel, ErasedEmbeddingModel, ErasedModel, Model, SharedEmbeddingModel, SharedModel};
+pub use traits::{
+    EmbeddingModel, ErasedEmbeddingModel, ErasedModel, Model, SharedEmbeddingModel, SharedModel,
+};
 
 #[cfg(feature = "openai")]
 pub mod openai;

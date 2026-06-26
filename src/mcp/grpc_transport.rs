@@ -1,6 +1,6 @@
 //! gRPC transport for MCP: serve and consume MCP tools over gRPC.
 //!
-//! [`McpGrpcServer`] wraps an [`McpServer`](super::McpServer) and exposes
+//! [`McpGrpcServer`] wraps an [`McpServer`] and exposes
 //! it as a gRPC service. [`McpGrpcTransport`] implements [`McpTransport`]
 //! by connecting to a remote gRPC MCP server.
 //!
@@ -61,9 +61,7 @@ impl McpGrpcServer {
             .parse()
             .map_err(|e| DaimonError::Mcp(format!("invalid address: {e}")))?;
 
-        let svc = McpGrpcSvc {
-            server: self.inner,
-        };
+        let svc = McpGrpcSvc { server: self.inner };
 
         tonic::transport::Server::builder()
             .add_service(McpServiceServer::new(svc))
@@ -97,7 +95,7 @@ impl McpService for McpGrpcSvc {
             .server
             .handle_request_raw(&body)
             .await
-            .map_err(|e| Status::internal(e))?;
+            .map_err(Status::internal)?;
 
         Ok(Response::new(proto::JsonRpcResult {
             result_json: result,
@@ -119,7 +117,7 @@ impl McpService for McpGrpcSvc {
             .server
             .handle_request_raw(&body)
             .await
-            .map_err(|e| Status::internal(e))?;
+            .map_err(Status::internal)?;
 
         Ok(Response::new(proto::JsonRpcResult {
             result_json: result,
@@ -150,7 +148,7 @@ impl McpService for McpGrpcSvc {
             .server
             .handle_request_raw(&body)
             .await
-            .map_err(|e| Status::internal(e))?;
+            .map_err(Status::internal)?;
 
         Ok(Response::new(proto::JsonRpcResult {
             result_json: result,
@@ -167,7 +165,7 @@ impl McpService for McpGrpcSvc {
             .server
             .handle_request_raw(&body)
             .await
-            .map_err(|e| Status::internal(e))?;
+            .map_err(Status::internal)?;
 
         Ok(Response::new(proto::RawJsonRpc { body: result }))
     }
@@ -211,9 +209,8 @@ impl McpTransport for McpGrpcTransport {
                 .await
                 .map_err(|e| DaimonError::Mcp(format!("grpc send: {e}")))?;
 
-            let response: JsonRpcResponse =
-                serde_json::from_str(&resp.into_inner().body)
-                    .map_err(|e| DaimonError::Mcp(format!("deserialize response: {e}")))?;
+            let response: JsonRpcResponse = serde_json::from_str(&resp.into_inner().body)
+                .map_err(|e| DaimonError::Mcp(format!("deserialize response: {e}")))?;
 
             Ok(response)
         })
@@ -226,9 +223,7 @@ impl McpTransport for McpGrpcTransport {
         Box::pin(async { Ok(()) })
     }
 
-    fn close<'a>(
-        &'a self,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+    fn close<'a>(&'a self) -> Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
         Box::pin(async { Ok(()) })
     }
 }
@@ -254,10 +249,7 @@ mod tests {
             })
         }
         async fn execute(&self, input: &serde_json::Value) -> crate::error::Result<ToolOutput> {
-            let text = input
-                .get("text")
-                .and_then(|v| v.as_str())
-                .unwrap_or("?");
+            let text = input.get("text").and_then(|v| v.as_str()).unwrap_or("?");
             Ok(ToolOutput::text(text))
         }
     }
@@ -323,9 +315,7 @@ mod tests {
             name: "test".into(),
             arguments_json: "{}".into(),
         };
-        let _ = proto::RawJsonRpc {
-            body: "{}".into(),
-        };
+        let _ = proto::RawJsonRpc { body: "{}".into() };
         let _ = proto::JsonRpcResult {
             result_json: "{}".into(),
         };

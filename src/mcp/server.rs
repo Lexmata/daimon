@@ -124,10 +124,7 @@ impl McpServer {
                     jsonrpc: "2.0".into(),
                     id,
                     result: None,
-                    error: Some(RpcError {
-                        code,
-                        message: msg,
-                    }),
+                    error: Some(RpcError { code, message: msg }),
                 },
             };
 
@@ -143,10 +140,7 @@ impl McpServer {
     }
 
     /// Process a synchronous request from an in-memory buffer (for testing or embedding).
-    pub async fn handle_request_raw(
-        &self,
-        body: &str,
-    ) -> std::result::Result<String, String> {
+    pub async fn handle_request_raw(&self, body: &str) -> std::result::Result<String, String> {
         let request: IncomingRequest =
             serde_json::from_str(body).map_err(|e| format!("parse error: {e}"))?;
 
@@ -163,10 +157,7 @@ impl McpServer {
                 jsonrpc: "2.0".into(),
                 id,
                 result: None,
-                error: Some(RpcError {
-                    code,
-                    message: msg,
-                }),
+                error: Some(RpcError { code, message: msg }),
             },
         };
 

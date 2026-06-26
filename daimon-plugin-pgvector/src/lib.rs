@@ -49,9 +49,10 @@ pub use builder::PgVectorStoreBuilder;
 pub use store::PgVectorStore;
 
 /// Distance metric used for vector similarity search.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DistanceMetric {
     /// Cosine similarity (1 - cosine distance). Best for normalized embeddings.
+    #[default]
     Cosine,
     /// Euclidean (L2) distance. Best for absolute spatial similarity.
     L2,
@@ -67,12 +68,6 @@ impl DistanceMetric {
             Self::L2 => "vector_l2_ops",
             Self::InnerProduct => "vector_ip_ops",
         }
-    }
-}
-
-impl Default for DistanceMetric {
-    fn default() -> Self {
-        Self::Cosine
     }
 }
 

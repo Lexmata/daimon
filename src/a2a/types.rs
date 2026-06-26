@@ -378,19 +378,13 @@ mod tests {
 
     #[test]
     fn test_json_rpc_response() {
-        let resp = JsonRpcResponse::success(
-            serde_json::json!(1),
-            serde_json::json!({"status": "ok"}),
-        );
+        let resp =
+            JsonRpcResponse::success(serde_json::json!(1), serde_json::json!({"status": "ok"}));
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("\"jsonrpc\":\"2.0\""));
         assert!(json.contains("\"result\""));
 
-        let err_resp = JsonRpcResponse::error(
-            serde_json::json!(2),
-            -32600,
-            "Invalid request",
-        );
+        let err_resp = JsonRpcResponse::error(serde_json::json!(2), -32600, "Invalid request");
         let err_json = serde_json::to_string(&err_resp).unwrap();
         assert!(err_json.contains("\"error\""));
     }

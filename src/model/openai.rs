@@ -147,7 +147,9 @@ impl Model for OpenAi {
 
             if status.is_success() {
                 tracing::debug!("received successful response");
-                let oai_response: OpenAiResponse = response.json().await
+                let oai_response: OpenAiResponse = response
+                    .json()
+                    .await
                     .map_err(|e| DaimonError::Model(format!("OpenAI response parse error: {e}")))?;
                 return parse_response(oai_response);
             }
@@ -223,14 +225,13 @@ impl Model for OpenAi {
                         continue;
                     }
 
-                    if let Some(data) = line.strip_prefix("data: ") {
-                        if let Ok(chunk) = serde_json::from_str::<OpenAiStreamChunk>(data) {
+                    if let Some(data) = line.strip_prefix("data: ")
+                        && let Ok(chunk) = serde_json::from_str::<OpenAiStreamChunk>(data) {
                             for choice in &chunk.choices {
-                                if let Some(ref content) = choice.delta.content {
-                                    if !content.is_empty() {
+                                if let Some(ref content) = choice.delta.content
+                                    && !content.is_empty() {
                                         yield StreamEvent::TextDelta(content.clone());
                                     }
-                                }
                                 if let Some(ref tool_calls) = choice.delta.tool_calls {
                                     for tc in tool_calls {
                                         if let Some(ref func) = tc.function {
@@ -240,20 +241,18 @@ impl Model for OpenAi {
                                                     name: name.clone(),
                                                 };
                                             }
-                                            if let Some(ref args) = func.arguments {
-                                                if !args.is_empty() {
+                                            if let Some(ref args) = func.arguments
+                                                && !args.is_empty() {
                                                     yield StreamEvent::ToolCallDelta {
                                                         id: tc.index.to_string(),
                                                         arguments_delta: args.clone(),
                                                     };
                                                 }
-                                            }
                                         }
                                     }
                                 }
                             }
                         }
-                    }
                 }
             }
         };

@@ -20,7 +20,11 @@ impl OpenAiEmbedding {
     /// Reads `OPENAI_API_KEY` from the environment if `api_key` is not provided.
     pub fn new(model_id: impl Into<String>) -> Self {
         let model_id = model_id.into();
-        let dimensions = if model_id.contains("large") { 3072 } else { 1536 };
+        let dimensions = if model_id.contains("large") {
+            3072
+        } else {
+            1536
+        };
         Self {
             client: reqwest::Client::new(),
             api_key: std::env::var("OPENAI_API_KEY").unwrap_or_default(),

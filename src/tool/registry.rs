@@ -126,10 +126,10 @@ impl ToolRegistry {
     /// interior mutability, call [`warm_cache`](Self::warm_cache) after
     /// registration is complete to ensure the cache is pre-built.
     pub fn tool_specs(&self) -> Arc<[ToolSpec]> {
-        if let Some(ref cached) = self.cached_specs {
-            if self.specs_generation == self.generation {
-                return Arc::clone(cached);
-            }
+        if let Some(ref cached) = self.cached_specs
+            && self.specs_generation == self.generation
+        {
+            return Arc::clone(cached);
         }
 
         let specs: Arc<[ToolSpec]> = self
@@ -148,10 +148,10 @@ impl ToolRegistry {
 
     /// Mutable version of `tool_specs` that stores the result in the cache.
     pub fn tool_specs_mut(&mut self) -> Arc<[ToolSpec]> {
-        if let Some(ref cached) = self.cached_specs {
-            if self.specs_generation == self.generation {
-                return Arc::clone(cached);
-            }
+        if let Some(ref cached) = self.cached_specs
+            && self.specs_generation == self.generation
+        {
+            return Arc::clone(cached);
         }
 
         let specs: Arc<[ToolSpec]> = self
@@ -404,7 +404,11 @@ mod tests {
     #[test]
     fn test_validate_input_nonexistent_tool() {
         let registry = ToolRegistry::new();
-        assert!(registry.validate_input("missing", &serde_json::json!({})).is_none());
+        assert!(
+            registry
+                .validate_input("missing", &serde_json::json!({}))
+                .is_none()
+        );
     }
 
     #[test]
