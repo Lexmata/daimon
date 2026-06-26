@@ -53,7 +53,7 @@
 //!
 //! ## Plugin Interface
 //!
-//! The [`Model`] trait (from [`daimon_core`]) is the plugin interface. To create
+//! The [`Model`](daimon_core::Model) trait (from [`daimon_core`]) is the plugin interface. To create
 //! a new LLM provider, depend on `daimon-core` and implement `Model`. See the
 //! `daimon-provider-*` crates for examples.
 //!

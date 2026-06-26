@@ -2,7 +2,7 @@
 //!
 //! Implement [`VectorStore`] for your storage backend (pgvector, Qdrant,
 //! Pinecone, Chroma, Weaviate, Milvus, etc.), then compose with
-//! [`SimpleKnowledgeBase`] for a complete embedding-backed retrieval pipeline.
+//! [`SimpleKnowledgeBase`](super::SimpleKnowledgeBase) for a complete embedding-backed retrieval pipeline.
 //!
 //! ```ignore
 //! use daimon::retriever::{VectorStore, ScoredDocument, Document};

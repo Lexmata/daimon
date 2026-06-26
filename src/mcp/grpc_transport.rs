@@ -1,6 +1,6 @@
 //! gRPC transport for MCP: serve and consume MCP tools over gRPC.
 //!
-//! [`McpGrpcServer`] wraps an [`McpServer`](super::McpServer) and exposes
+//! [`McpGrpcServer`] wraps an [`McpServer`] and exposes
 //! it as a gRPC service. [`McpGrpcTransport`] implements [`McpTransport`]
 //! by connecting to a remote gRPC MCP server.
 //!

@@ -2,7 +2,7 @@
 //!
 //! [`KnowledgeBase`] combines document ingestion with semantic search.
 //! [`SimpleKnowledgeBase`] provides a concrete implementation that pairs
-//! any [`VectorStore`](super::VectorStore) with an
+//! any [`VectorStore`] with an
 //! [`EmbeddingModel`](crate::model::EmbeddingModel).
 //!
 //! ```ignore

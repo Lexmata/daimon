@@ -1,7 +1,7 @@
 //! WebSocket MCP server: expose Daimon tools over WebSocket connections.
 //!
 //! [`McpWsServer`] listens on a TCP port and accepts WebSocket connections,
-//! serving JSON-RPC 2.0 requests the same way [`McpServer`](super::McpServer)
+//! serving JSON-RPC 2.0 requests the same way [`McpServer`]
 //! does over stdio.
 //!
 //! ```ignore

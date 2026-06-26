@@ -1,4 +1,4 @@
-//! Wraps a [`Retriever`] as a [`Tool`] for agent use.
+//! Wraps a [`Retriever`](super::Retriever) as a [`Tool`] for agent use.
 
 use std::sync::Arc;
 

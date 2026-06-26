@@ -1,6 +1,6 @@
 //! Supervisor pattern: one coordinating agent delegates tasks to specialized sub-agents.
 //!
-//! The supervisor wraps each sub-agent as an [`AgentTool`](super::as_tool::AgentTool),
+//! The supervisor wraps each sub-agent as an [`AgentTool`],
 //! then uses a coordinator agent whose tools *are* the sub-agents. The LLM decides
 //! which sub-agent to invoke based on the task.
 //!
