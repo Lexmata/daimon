@@ -1,11 +1,33 @@
+[graph]
+all-features = true
+
 [advisories]
 unmaintained = "workspace"
+ignore = [
+    # All remaining advisories below are old rustls-webpki lines pinned by
+    # transitive dependencies, not by first-party code. We already updated
+    # the first-party rustls-webpki to 0.103.13 (patched); these instances
+    # can only move once the pinning dependency moves.
+    #
+    # rustls-webpki 0.101.7 via the AWS SDK (aws-smithy-http-client ->
+    # rustls 0.21). No fixed release in that chain; revisit when the AWS
+    # SDK migrates to rustls 0.23.
+    "RUSTSEC-2026-0098",
+    "RUSTSEC-2026-0099",
+    # rustls-webpki 0.101.7 (AWS) and 0.102.8 (async-nats 0.38). The
+    # real fix for the async-nats path is the 0.38 -> 0.46 upgrade
+    # (tracked by Dependabot), which pulls rustls 0.23 / webpki 0.103.
+    "RUSTSEC-2026-0104",
+    # rustls-webpki 0.102.8 via async-nats 0.38 (see above).
+    "RUSTSEC-2026-0049",
+]
 
 [licenses]
 allow = [
     "MIT",
     "MIT-0",
     "Apache-2.0",
+    "BSL-1.0",
     "CDLA-Permissive-2.0",
     "BSD-2-Clause",
     "BSD-3-Clause",
