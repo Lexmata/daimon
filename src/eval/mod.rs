@@ -18,10 +18,10 @@
 //! }
 //! ```
 
-mod scenario;
 mod runner;
+mod scenario;
 mod scoring;
 
-pub use scenario::EvalScenario;
 pub use runner::{EvalResult, EvalRunner};
+pub use scenario::EvalScenario;
 pub use scoring::Scorer;

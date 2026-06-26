@@ -97,7 +97,7 @@ impl TaskBroker for RedisBroker {
         let mut conn = self.conn().await?;
 
         let status_str: Option<String> = conn
-            .hget(&self.status_key(), task_id)
+            .hget(self.status_key(), task_id)
             .await
             .map_err(|e| DaimonError::Other(format!("redis hget status: {e}")))?;
 
@@ -106,7 +106,7 @@ impl TaskBroker for RedisBroker {
             Some("running") => Ok(TaskStatus::Running),
             Some("completed") => {
                 let result_json: Option<String> = conn
-                    .hget(&self.result_key(), task_id)
+                    .hget(self.result_key(), task_id)
                     .await
                     .map_err(|e| DaimonError::Other(format!("redis hget result: {e}")))?;
 
@@ -125,9 +125,7 @@ impl TaskBroker for RedisBroker {
                     })),
                 }
             }
-            Some(s) if s.starts_with("failed:") => {
-                Ok(TaskStatus::Failed(s[7..].to_string()))
-            }
+            Some(s) if s.starts_with("failed:") => Ok(TaskStatus::Failed(s[7..].to_string())),
             _ => Ok(TaskStatus::Pending),
         }
     }
@@ -136,7 +134,7 @@ impl TaskBroker for RedisBroker {
         let mut conn = self.conn().await?;
 
         let result: Option<(String, String)> = redis::cmd("BRPOP")
-            .arg(&self.queue_key())
+            .arg(self.queue_key())
             .arg(1)
             .query_async(&mut conn)
             .await

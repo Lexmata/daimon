@@ -2,9 +2,9 @@
 
 use std::collections::HashMap;
 
-use deadpool_postgres::Pool;
 use daimon_core::vector_store::VectorStore;
 use daimon_core::{DaimonError, Document, Result, ScoredDocument};
+use deadpool_postgres::Pool;
 use pgvector::Vector;
 
 use crate::DistanceMetric;
@@ -55,9 +55,11 @@ impl VectorStore for PgVectorStore {
             )));
         }
 
-        let client = self.pool.get().await.map_err(|e| {
-            DaimonError::Other(format!("pgvector pool error: {e}"))
-        })?;
+        let client = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| DaimonError::Other(format!("pgvector pool error: {e}")))?;
 
         let vec = Vector::from(embedding);
         let metadata = serde_json::to_value(&document.metadata)
@@ -87,9 +89,11 @@ impl VectorStore for PgVectorStore {
             )));
         }
 
-        let client = self.pool.get().await.map_err(|e| {
-            DaimonError::Other(format!("pgvector pool error: {e}"))
-        })?;
+        let client = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| DaimonError::Other(format!("pgvector pool error: {e}")))?;
 
         let vec = Vector::from(embedding);
         let op = self.distance_operator();
@@ -137,9 +141,11 @@ impl VectorStore for PgVectorStore {
     }
 
     async fn delete(&self, id: &str) -> Result<bool> {
-        let client = self.pool.get().await.map_err(|e| {
-            DaimonError::Other(format!("pgvector pool error: {e}"))
-        })?;
+        let client = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| DaimonError::Other(format!("pgvector pool error: {e}")))?;
 
         let sql = format!("DELETE FROM {} WHERE id = $1", self.table);
         let deleted = client
@@ -151,9 +157,11 @@ impl VectorStore for PgVectorStore {
     }
 
     async fn count(&self) -> Result<usize> {
-        let client = self.pool.get().await.map_err(|e| {
-            DaimonError::Other(format!("pgvector pool error: {e}"))
-        })?;
+        let client = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| DaimonError::Other(format!("pgvector pool error: {e}")))?;
 
         let sql = format!("SELECT COUNT(*) AS cnt FROM {}", self.table);
         let row = client

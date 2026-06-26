@@ -25,8 +25,7 @@ mod tests {
 
     #[test]
     fn test_task_with_metadata() {
-        let task = AgentTask::new("test")
-            .with_metadata("priority", serde_json::json!(1));
+        let task = AgentTask::new("test").with_metadata("priority", serde_json::json!(1));
         assert_eq!(task.metadata["priority"], serde_json::json!(1));
     }
 

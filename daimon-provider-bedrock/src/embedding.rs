@@ -92,10 +92,8 @@ impl EmbeddingModel for BedrockEmbedding {
                 .map_err(|e| DaimonError::Model(format!("Bedrock embedding error: {e}")))?;
 
             let output_bytes = resp.body().as_ref();
-            let parsed: serde_json::Value =
-                serde_json::from_slice(output_bytes).map_err(|e| {
-                    DaimonError::Model(format!("Bedrock embedding parse error: {e}"))
-                })?;
+            let parsed: serde_json::Value = serde_json::from_slice(output_bytes)
+                .map_err(|e| DaimonError::Model(format!("Bedrock embedding parse error: {e}")))?;
 
             let embedding = parsed
                 .get("embedding")

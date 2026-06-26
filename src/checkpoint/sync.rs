@@ -41,10 +41,7 @@ pub struct CheckpointSync {
 
 impl CheckpointSync {
     /// Creates a new synced checkpoint from a local and remote backend.
-    pub fn new<L: Checkpoint + 'static, R: Checkpoint + 'static>(
-        local: L,
-        remote: R,
-    ) -> Self {
+    pub fn new<L: Checkpoint + 'static, R: Checkpoint + 'static>(local: L, remote: R) -> Self {
         Self {
             local: Arc::new(local),
             remote: Arc::new(remote),
@@ -71,11 +68,11 @@ impl CheckpointSync {
 
         let mut synced = 0;
         for run_id in &remote_runs {
-            if !local_set.contains(run_id.as_str()) {
-                if let Some(state) = self.remote.load_erased(run_id).await? {
-                    self.local.save_erased(&state).await?;
-                    synced += 1;
-                }
+            if !local_set.contains(run_id.as_str())
+                && let Some(state) = self.remote.load_erased(run_id).await?
+            {
+                self.local.save_erased(&state).await?;
+                synced += 1;
             }
         }
 
@@ -94,11 +91,11 @@ impl CheckpointSync {
 
         let mut pushed = 0;
         for run_id in &local_runs {
-            if !remote_set.contains(run_id.as_str()) {
-                if let Some(state) = self.local.load_erased(run_id).await? {
-                    self.remote.save_erased(&state).await?;
-                    pushed += 1;
-                }
+            if !remote_set.contains(run_id.as_str())
+                && let Some(state) = self.local.load_erased(run_id).await?
+            {
+                self.remote.save_erased(&state).await?;
+                pushed += 1;
             }
         }
 
@@ -130,8 +127,7 @@ impl Checkpoint for CheckpointSync {
         let mut local_runs = self.local.list_runs_erased().await?;
         let remote_runs = self.remote.list_runs_erased().await?;
 
-        let local_set: std::collections::HashSet<String> =
-            local_runs.iter().cloned().collect();
+        let local_set: std::collections::HashSet<String> = local_runs.iter().cloned().collect();
 
         for run_id in remote_runs {
             if !local_set.contains(&run_id) {
@@ -217,16 +213,15 @@ impl CheckpointReplicator {
         let remote_runs = self.remote.list_runs_erased().await?;
         let local_runs = self.local.list_runs_erased().await?;
 
-        let local_set: std::collections::HashSet<String> =
-            local_runs.into_iter().collect();
+        let local_set: std::collections::HashSet<String> = local_runs.into_iter().collect();
 
         let mut synced = 0;
         for run_id in &remote_runs {
-            if !local_set.contains(run_id) {
-                if let Some(state) = self.remote.load_erased(run_id).await? {
-                    self.local.save_erased(&state).await?;
-                    synced += 1;
-                }
+            if !local_set.contains(run_id)
+                && let Some(state) = self.remote.load_erased(run_id).await?
+            {
+                self.local.save_erased(&state).await?;
+                synced += 1;
             }
         }
 
@@ -392,11 +387,8 @@ mod tests {
             .await
             .unwrap();
 
-        let replicator = CheckpointReplicator::new(
-            local.clone(),
-            remote,
-            std::time::Duration::from_secs(60),
-        );
+        let replicator =
+            CheckpointReplicator::new(local.clone(), remote, std::time::Duration::from_secs(60));
 
         let synced = replicator.pull_once().await.unwrap();
         assert_eq!(synced, 1);
@@ -413,11 +405,8 @@ mod tests {
         local.save(&state).await.unwrap();
         remote.save(&state).await.unwrap();
 
-        let replicator = CheckpointReplicator::new(
-            local,
-            remote,
-            std::time::Duration::from_secs(60),
-        );
+        let replicator =
+            CheckpointReplicator::new(local, remote, std::time::Duration::from_secs(60));
 
         let synced = replicator.pull_once().await.unwrap();
         assert_eq!(synced, 0);

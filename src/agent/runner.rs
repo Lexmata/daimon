@@ -8,7 +8,7 @@ use crate::error::{DaimonError, Result};
 use crate::hooks::AgentState;
 use crate::model::types::{ChatRequest, ChatResponse, Message, Usage};
 use crate::stream::ResponseStream;
-use crate::tool::{ToolRetryPolicy, ErasedTool};
+use crate::tool::{ErasedTool, ToolRetryPolicy};
 
 /// Executes a tool with optional retry policy.
 async fn execute_tool_with_retry(
@@ -261,7 +261,9 @@ impl Agent {
             if response.has_tool_calls() {
                 let tool_calls = std::mem::take(&mut response.message.tool_calls);
                 let assistant_msg = Message::assistant_with_tool_calls(tool_calls.clone());
-                self.memory.add_message_erased(assistant_msg.clone()).await?;
+                self.memory
+                    .add_message_erased(assistant_msg.clone())
+                    .await?;
                 messages.push(assistant_msg);
 
                 let tool_results = self.execute_tools_parallel(&tool_calls).await;
@@ -282,7 +284,9 @@ impl Agent {
             }
 
             let final_text = response.text().to_string();
-            self.memory.add_message_erased(response.message.clone()).await?;
+            self.memory
+                .add_message_erased(response.message.clone())
+                .await?;
             messages.push(response.message);
 
             self.hooks.on_iteration_end_erased(&state).await?;
@@ -335,27 +339,29 @@ impl Agent {
 
             self.hooks.on_tool_call_erased(&call_mut).await.ok();
 
-            if validate {
-                if let Some(errors) = self.tools.validate_input(&call_mut.name, &call_mut.arguments) {
-                    tracing::warn!(
-                        tool = %call_mut.name,
-                        id = %call_mut.id,
-                        "tool input schema validation failed: {errors}"
-                    );
-                    let output = crate::tool::ToolOutput::error(format!(
-                        "Invalid arguments for tool '{}': {errors}",
-                        call_mut.name
-                    ));
-                    let err = DaimonError::SchemaValidation {
-                        tool: call_mut.name.clone(),
-                        errors: errors.clone(),
-                    };
-                    self.hooks.on_error_erased(&err).await.ok();
-                    order.push(idx);
-                    let idx_copy = idx;
-                    join_set.spawn(async move { (idx_copy, output) });
-                    continue;
-                }
+            if validate
+                && let Some(errors) = self
+                    .tools
+                    .validate_input(&call_mut.name, &call_mut.arguments)
+            {
+                tracing::warn!(
+                    tool = %call_mut.name,
+                    id = %call_mut.id,
+                    "tool input schema validation failed: {errors}"
+                );
+                let output = crate::tool::ToolOutput::error(format!(
+                    "Invalid arguments for tool '{}': {errors}",
+                    call_mut.name
+                ));
+                let err = DaimonError::SchemaValidation {
+                    tool: call_mut.name.clone(),
+                    errors: errors.clone(),
+                };
+                self.hooks.on_error_erased(&err).await.ok();
+                order.push(idx);
+                let idx_copy = idx;
+                join_set.spawn(async move { (idx_copy, output) });
+                continue;
             }
 
             let tool_opt = self.tools.get(&call_mut.name).cloned();
@@ -377,8 +383,12 @@ impl Agent {
                 async move {
                     let result = match tool_opt {
                         Some(tool) => {
-                            execute_tool_with_retry(&tool, &call_mut.arguments, effective_policy.as_ref())
-                                .await
+                            execute_tool_with_retry(
+                                &tool,
+                                &call_mut.arguments,
+                                effective_policy.as_ref(),
+                            )
+                            .await
                         }
                         None => crate::tool::ToolOutput::error(format!(
                             "tool '{}' not found",
@@ -436,9 +446,7 @@ impl Agent {
         messages.extend(history);
         messages.push(Message::user(input));
 
-        self.memory
-            .add_message_erased(Message::user(input))
-            .await?;
+        self.memory.add_message_erased(Message::user(input)).await?;
 
         let mut tool_specs_vec: Vec<crate::model::types::ToolSpec> =
             self.tools.tool_specs().to_vec();
@@ -450,9 +458,9 @@ impl Agent {
         let max_tokens = self.max_tokens;
         let validate = self.validate_tool_inputs;
         let cost_tracker = self.cost_tracker.as_ref().map(|t| {
-            std::sync::Arc::new(crate::cost::CostTracker::new(
-                std::sync::Arc::clone(&t.cost_model),
-            ))
+            std::sync::Arc::new(crate::cost::CostTracker::new(std::sync::Arc::clone(
+                &t.cost_model,
+            )))
         });
 
         let out_stream = async_stream::try_stream! {
@@ -1012,8 +1020,15 @@ mod tests {
                     usage: None,
                 })
             } else if count == 1 {
-                let last = request.messages.last().and_then(|m| m.content.as_deref()).unwrap_or("");
-                assert!(last.contains("Invalid arguments"), "model should see validation error: {last}");
+                let last = request
+                    .messages
+                    .last()
+                    .and_then(|m| m.content.as_deref())
+                    .unwrap_or("");
+                assert!(
+                    last.contains("Invalid arguments"),
+                    "model should see validation error: {last}"
+                );
                 Ok(ChatResponse {
                     message: Message::assistant_with_tool_calls(vec![crate::tool::ToolCall {
                         id: "call_2".into(),
@@ -1081,6 +1096,9 @@ mod tests {
 
         let result = agent.prompt("test").await;
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), crate::error::DaimonError::MaxIterations(1)));
+        assert!(matches!(
+            result.unwrap_err(),
+            crate::error::DaimonError::MaxIterations(1)
+        ));
     }
 }

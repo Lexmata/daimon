@@ -14,8 +14,8 @@
 //!     .build()?;
 //! ```
 
-mod tracker;
 mod models;
+mod tracker;
 
+pub use models::{AnthropicCostModel, CostModel, OpenAiCostModel, TokenDirection};
 pub use tracker::CostTracker;
-pub use models::{CostModel, TokenDirection, OpenAiCostModel, AnthropicCostModel};

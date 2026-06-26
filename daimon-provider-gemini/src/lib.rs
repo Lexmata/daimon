@@ -118,10 +118,7 @@ impl Gemini {
     }
 
     fn endpoint_url(&self, method: &str) -> String {
-        format!(
-            "{}/models/{}:{}",
-            self.base_url, self.model_id, method
-        )
+        format!("{}/models/{}:{}", self.base_url, self.model_id, method)
     }
 
     fn apply_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
@@ -142,9 +139,7 @@ impl Gemini {
                     if let Some(text) = &msg.content {
                         system_instruction = Some(GeminiContent {
                             role: "user".to_string(),
-                            parts: vec![GeminiPart::Text {
-                                text: text.clone(),
-                            }],
+                            parts: vec![GeminiPart::Text { text: text.clone() }],
                         });
                     }
                 }
@@ -152,9 +147,7 @@ impl Gemini {
                     if let Some(text) = &msg.content {
                         contents.push(GeminiContent {
                             role: "user".to_string(),
-                            parts: vec![GeminiPart::Text {
-                                text: text.clone(),
-                            }],
+                            parts: vec![GeminiPart::Text { text: text.clone() }],
                         });
                     }
                 }
@@ -177,19 +170,15 @@ impl Gemini {
                     } else if let Some(text) = &msg.content {
                         contents.push(GeminiContent {
                             role: "model".to_string(),
-                            parts: vec![GeminiPart::Text {
-                                text: text.clone(),
-                            }],
+                            parts: vec![GeminiPart::Text { text: text.clone() }],
                         });
                     }
                 }
                 Role::Tool => {
                     let name = msg.tool_call_id.clone().unwrap_or_default();
                     let content = msg.content.clone().unwrap_or_default();
-                    let response_value: serde_json::Value =
-                        serde_json::from_str(&content).unwrap_or_else(|_| {
-                            serde_json::json!({ "result": content })
-                        });
+                    let response_value: serde_json::Value = serde_json::from_str(&content)
+                        .unwrap_or_else(|_| serde_json::json!({ "result": content }));
                     contents.push(GeminiContent {
                         role: "user".to_string(),
                         parts: vec![GeminiPart::FunctionResponse {
@@ -276,11 +265,7 @@ impl Model for Gemini {
         let body = self.build_request_body(request);
         let url = self.endpoint_url("streamGenerateContent");
 
-        let req = self
-            .client
-            .post(&url)
-            .query(&[("alt", "sse")])
-            .json(&body);
+        let req = self.client.post(&url).query(&[("alt", "sse")]).json(&body);
         let req = self.apply_auth(req);
 
         tracing::debug!("sending Gemini streaming request");
@@ -318,8 +303,8 @@ impl Model for Gemini {
                         continue;
                     }
 
-                    if let Some(data) = line.strip_prefix("data: ") {
-                        if let Ok(chunk_resp) = serde_json::from_str::<GeminiResponse>(data) {
+                    if let Some(data) = line.strip_prefix("data: ")
+                        && let Ok(chunk_resp) = serde_json::from_str::<GeminiResponse>(data) {
                             for candidate in &chunk_resp.candidates {
                                 for part in &candidate.content.parts {
                                     match part {
@@ -354,7 +339,6 @@ impl Model for Gemini {
                                 yield StreamEvent::Done;
                             }
                         }
-                    }
                 }
             }
         };

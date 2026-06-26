@@ -7,8 +7,9 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::{
+    Attribute, Expr, FnArg, Ident, ItemFn, Lit, Meta, Pat, PatType, Token, Type,
     parse::{Parse, ParseStream},
-    parse_macro_input, Attribute, Expr, FnArg, Ident, ItemFn, Lit, Meta, Pat, PatType, Token, Type,
+    parse_macro_input,
 };
 
 struct ToolFnArgs {
@@ -47,7 +48,10 @@ impl Parse for ToolFnArgs {
                     }
                 }
                 other => {
-                    return Err(syn::Error::new(key.span(), format!("unknown attribute `{other}`")));
+                    return Err(syn::Error::new(
+                        key.span(),
+                        format!("unknown attribute `{other}`"),
+                    ));
                 }
             }
 
@@ -180,14 +184,12 @@ fn expand_tool_fn(args: ToolFnArgs, func: ItemFn) -> syn::Result<TokenStream2> {
 fn extract_doc_comments(attrs: &[Attribute]) -> String {
     let mut lines = Vec::new();
     for attr in attrs {
-        if attr.path().is_ident("doc") {
-            if let Meta::NameValue(nv) = &attr.meta {
-                if let Expr::Lit(lit) = &nv.value {
-                    if let Lit::Str(s) = &lit.lit {
-                        lines.push(s.value().trim().to_string());
-                    }
-                }
-            }
+        if attr.path().is_ident("doc")
+            && let Meta::NameValue(nv) = &attr.meta
+            && let Expr::Lit(lit) = &nv.value
+            && let Lit::Str(s) = &lit.lit
+        {
+            lines.push(s.value().trim().to_string());
         }
     }
     lines.join(" ").trim().to_string()
@@ -224,44 +226,41 @@ fn extract_params(func: &ItemFn) -> syn::Result<Vec<ParamInfo>> {
 }
 
 fn unwrap_option(ty: &Type) -> (bool, Option<Type>) {
-    if let Type::Path(tp) = ty {
-        if let Some(seg) = tp.path.segments.last() {
-            if seg.ident == "Option" {
-                if let syn::PathArguments::AngleBracketed(ab) = &seg.arguments {
-                    if let Some(syn::GenericArgument::Type(inner)) = ab.args.first() {
-                        return (true, Some(inner.clone()));
-                    }
-                }
-            }
-        }
+    if let Type::Path(tp) = ty
+        && let Some(seg) = tp.path.segments.last()
+        && seg.ident == "Option"
+        && let syn::PathArguments::AngleBracketed(ab) = &seg.arguments
+        && let Some(syn::GenericArgument::Type(inner)) = ab.args.first()
+    {
+        return (true, Some(inner.clone()));
     }
     (false, None)
 }
 
 fn type_to_json_schema(ty: &Type) -> TokenStream2 {
-    if let Type::Path(tp) = ty {
-        if let Some(seg) = tp.path.segments.last() {
-            let name = seg.ident.to_string();
-            match name.as_str() {
-                "String" | "str" => return quote!(::serde_json::json!({"type": "string"})),
-                "bool" => return quote!(::serde_json::json!({"type": "boolean"})),
-                "f32" | "f64" => return quote!(::serde_json::json!({"type": "number"})),
-                "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32"
-                | "u64" | "u128" | "usize" => {
-                    return quote!(::serde_json::json!({"type": "integer"}));
-                }
-                "Vec" => {
-                    if let syn::PathArguments::AngleBracketed(ab) = &seg.arguments {
-                        if let Some(syn::GenericArgument::Type(inner)) = ab.args.first() {
-                            let inner_schema = type_to_json_schema(inner);
-                            return quote!(::serde_json::json!({"type": "array", "items": #inner_schema}));
-                        }
-                    }
-                    return quote!(::serde_json::json!({"type": "array"}));
-                }
-                "Value" => return quote!(::serde_json::json!({})),
-                _ => {}
+    if let Type::Path(tp) = ty
+        && let Some(seg) = tp.path.segments.last()
+    {
+        let name = seg.ident.to_string();
+        match name.as_str() {
+            "String" | "str" => return quote!(::serde_json::json!({"type": "string"})),
+            "bool" => return quote!(::serde_json::json!({"type": "boolean"})),
+            "f32" | "f64" => return quote!(::serde_json::json!({"type": "number"})),
+            "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64"
+            | "u128" | "usize" => {
+                return quote!(::serde_json::json!({"type": "integer"}));
             }
+            "Vec" => {
+                if let syn::PathArguments::AngleBracketed(ab) = &seg.arguments
+                    && let Some(syn::GenericArgument::Type(inner)) = ab.args.first()
+                {
+                    let inner_schema = type_to_json_schema(inner);
+                    return quote!(::serde_json::json!({"type": "array", "items": #inner_schema}));
+                }
+                return quote!(::serde_json::json!({"type": "array"}));
+            }
+            "Value" => return quote!(::serde_json::json!({})),
+            _ => {}
         }
     }
     quote!(::serde_json::json!({}))

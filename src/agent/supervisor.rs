@@ -19,9 +19,9 @@
 
 use std::sync::Arc;
 
+use crate::agent::Agent;
 use crate::agent::as_tool::AgentTool;
 use crate::agent::runner::AgentResponse;
-use crate::agent::Agent;
 use crate::error::{DaimonError, Result};
 use crate::model::{Model, SharedModel};
 use crate::tool::{Tool, ToolRegistry};
@@ -103,8 +103,7 @@ impl SupervisorBuilder {
         agent: Arc<Agent>,
         description: impl Into<String>,
     ) -> Self {
-        self.agents
-            .push((name.into(), agent, description.into()));
+        self.agents.push((name.into(), agent, description.into()));
         self
     }
 
@@ -156,7 +155,9 @@ impl SupervisorBuilder {
         }
 
         let mut builder = Agent::builder();
-        builder = builder.shared_model(model).max_iterations(self.max_iterations);
+        builder = builder
+            .shared_model(model)
+            .max_iterations(self.max_iterations);
 
         if let Some(prompt) = self.system_prompt {
             builder = builder.system_prompt(prompt);

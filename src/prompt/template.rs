@@ -64,10 +64,7 @@ impl PromptTemplate {
 
     /// Renders the template, resolving [`DynamicContext`](super::DynamicContext) providers
     /// for any remaining `{variable}` placeholders.
-    pub async fn render_dynamic(
-        &self,
-        contexts: &[&dyn super::ErasedDynamicContext],
-    ) -> String {
+    pub async fn render_dynamic(&self, contexts: &[&dyn super::ErasedDynamicContext]) -> String {
         let mut overrides = HashMap::new();
         for ctx in contexts {
             let value = ctx.resolve_erased().await;
@@ -91,8 +88,7 @@ mod tests {
 
     #[test]
     fn test_missing_variable_preserved() {
-        let tpl = PromptTemplate::new("Hello {name}, {unknown}.")
-            .var("name", "Bob");
+        let tpl = PromptTemplate::new("Hello {name}, {unknown}.").var("name", "Bob");
         assert_eq!(tpl.render_static(), "Hello Bob, {unknown}.");
     }
 
@@ -122,8 +118,7 @@ mod tests {
 
     #[test]
     fn test_vars_bulk() {
-        let tpl = PromptTemplate::new("{a} {b}")
-            .vars([("a", "1"), ("b", "2")]);
+        let tpl = PromptTemplate::new("{a} {b}").vars([("a", "1"), ("b", "2")]);
         assert_eq!(tpl.render_static(), "1 2");
     }
 }

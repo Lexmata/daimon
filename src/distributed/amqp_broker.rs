@@ -214,6 +214,6 @@ mod tests {
     #[test]
     fn test_status_tracking_in_memory() {
         let statuses: HashMap<String, TaskStatus> = HashMap::new();
-        assert!(statuses.get("unknown").is_none());
+        assert!(!statuses.contains_key("unknown"));
     }
 }

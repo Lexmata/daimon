@@ -12,7 +12,13 @@ use crate::model::types::Message;
 fn json_value_len(v: &serde_json::Value) -> usize {
     match v {
         serde_json::Value::Null => 4,
-        serde_json::Value::Bool(b) => if *b { 4 } else { 5 },
+        serde_json::Value::Bool(b) => {
+            if *b {
+                4
+            } else {
+                5
+            }
+        }
         serde_json::Value::Number(n) => {
             // fast path: count digits without allocation
             let mut buf = itoa::Buffer::new();
@@ -31,7 +37,10 @@ fn json_value_len(v: &serde_json::Value) -> usize {
             2 + arr.iter().map(|v| json_value_len(v) + 1).sum::<usize>()
         }
         serde_json::Value::Object(map) => {
-            2 + map.iter().map(|(k, v)| k.len() + 3 + json_value_len(v) + 1).sum::<usize>()
+            2 + map
+                .iter()
+                .map(|(k, v)| k.len() + 3 + json_value_len(v) + 1)
+                .sum::<usize>()
         }
     }
 }
@@ -177,10 +186,7 @@ mod tests {
     async fn test_add_and_get_messages() {
         let memory = TokenWindowMemory::new(10_000);
         memory.add_message(Message::user("hello")).await.unwrap();
-        memory
-            .add_message(Message::assistant("hi"))
-            .await
-            .unwrap();
+        memory.add_message(Message::assistant("hi")).await.unwrap();
 
         let msgs = memory.get_messages().await.unwrap();
         assert_eq!(msgs.len(), 2);
@@ -191,9 +197,8 @@ mod tests {
     #[tokio::test]
     async fn test_evicts_old_messages_when_over_budget() {
         // Use a custom counter: 1 token per character for predictability
-        let memory = TokenWindowMemory::new(20).with_token_counter(|msg| {
-            msg.content.as_ref().map_or(0, |c| c.len())
-        });
+        let memory = TokenWindowMemory::new(20)
+            .with_token_counter(|msg| msg.content.as_ref().map_or(0, |c| c.len()));
 
         // "aaaaaaaaaa" = 10 tokens
         memory
@@ -221,19 +226,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_evicts_multiple_to_fit() {
-        let memory = TokenWindowMemory::new(15).with_token_counter(|msg| {
-            msg.content.as_ref().map_or(0, |c| c.len())
-        });
+        let memory = TokenWindowMemory::new(15)
+            .with_token_counter(|msg| msg.content.as_ref().map_or(0, |c| c.len()));
 
         memory.add_message(Message::user("aaa")).await.unwrap(); // 3
         memory.add_message(Message::user("bbb")).await.unwrap(); // 3
         memory.add_message(Message::user("ccc")).await.unwrap(); // 3, total 9
 
         // Adding 8 tokens: total would be 17 > 15, evict "aaa" (3) -> 14, fits
-        memory
-            .add_message(Message::user("dddddddd"))
-            .await
-            .unwrap();
+        memory.add_message(Message::user("dddddddd")).await.unwrap();
 
         let msgs = memory.get_messages().await.unwrap();
         assert_eq!(msgs.len(), 3);
@@ -286,14 +287,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_single_message_exceeds_budget() {
-        let memory = TokenWindowMemory::new(5).with_token_counter(|msg| {
-            msg.content.as_ref().map_or(0, |c| c.len())
-        });
+        let memory = TokenWindowMemory::new(5)
+            .with_token_counter(|msg| msg.content.as_ref().map_or(0, |c| c.len()));
 
-        memory
-            .add_message(Message::user("short"))
-            .await
-            .unwrap();
+        memory.add_message(Message::user("short")).await.unwrap();
         // "this is a very long message" = 27 tokens, exceeds budget but still kept as last msg
         memory
             .add_message(Message::user("this is a very long message"))

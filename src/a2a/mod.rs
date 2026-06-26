@@ -17,4 +17,4 @@ pub mod types;
 
 pub use client::A2aClient;
 pub use server::A2aHandler;
-pub use types::{AgentCard, A2aTask, A2aMessage};
+pub use types::{A2aMessage, A2aTask, AgentCard};

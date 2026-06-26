@@ -8,11 +8,9 @@ use daimon::agent::Agent;
 use daimon::error::Result;
 use daimon::memory::{SlidingWindowMemory, TokenWindowMemory};
 use daimon::model::Model;
-use daimon::model::types::{
-    ChatRequest, ChatResponse, Message, Role, StopReason, Usage,
-};
-use daimon::orchestration::dag::{Dag, DagContext, FnDagNode, END, START};
+use daimon::model::types::{ChatRequest, ChatResponse, Message, Role, StopReason, Usage};
 use daimon::orchestration::chain::{Chain, TransformStep};
+use daimon::orchestration::dag::{Dag, DagContext, END, FnDagNode, START};
 use daimon::stream::ResponseStream;
 use daimon::tool::{Tool, ToolOutput, ToolRegistry};
 
@@ -25,7 +23,10 @@ struct InstantModel;
 impl Model for InstantModel {
     async fn generate(&self, request: &ChatRequest) -> Result<ChatResponse> {
         let reply = if !request.tools.is_empty()
-            && request.messages.last().is_some_and(|m| m.role == Role::User)
+            && request
+                .messages
+                .last()
+                .is_some_and(|m| m.role == Role::User)
         {
             ChatResponse {
                 message: Message::assistant("done"),
@@ -125,7 +126,9 @@ fn bench_sliding_window_memory(c: &mut Criterion) {
                 use daimon::memory::Memory;
                 let mem = SlidingWindowMemory::new(50);
                 for i in 0..100 {
-                    mem.add_message(Message::user(format!("msg {i}"))).await.unwrap();
+                    mem.add_message(Message::user(format!("msg {i}")))
+                        .await
+                        .unwrap();
                 }
                 let msgs = mem.get_messages().await.unwrap();
                 assert_eq!(msgs.len(), 50);
@@ -143,9 +146,11 @@ fn bench_token_window_memory(c: &mut Criterion) {
                 use daimon::memory::Memory;
                 let mem = TokenWindowMemory::new(1000);
                 for i in 0..100 {
-                    mem.add_message(Message::user(format!("message number {i} with some content")))
-                        .await
-                        .unwrap();
+                    mem.add_message(Message::user(format!(
+                        "message number {i} with some content"
+                    )))
+                    .await
+                    .unwrap();
                 }
                 let msgs = mem.get_messages().await.unwrap();
                 assert!(msgs.len() <= 100);
@@ -281,19 +286,22 @@ fn bench_chain_3_steps(c: &mut Criterion) {
     let chain = Chain::builder()
         .step(TransformStep::new(|mut ctx| {
             Box::pin(async move {
-                ctx.metadata.insert("step1".to_string(), serde_json::json!(true));
+                ctx.metadata
+                    .insert("step1".to_string(), serde_json::json!(true));
                 Ok(ctx)
             })
         }))
         .step(TransformStep::new(|mut ctx| {
             Box::pin(async move {
-                ctx.metadata.insert("step2".to_string(), serde_json::json!(true));
+                ctx.metadata
+                    .insert("step2".to_string(), serde_json::json!(true));
                 Ok(ctx)
             })
         }))
         .step(TransformStep::new(|mut ctx| {
             Box::pin(async move {
-                ctx.metadata.insert("step3".to_string(), serde_json::json!(true));
+                ctx.metadata
+                    .insert("step3".to_string(), serde_json::json!(true));
                 Ok(ctx)
             })
         }))
@@ -353,10 +361,7 @@ fn bench_hot_swap_swap_model(c: &mut Criterion) {
 
     let rt = tokio::runtime::Runtime::new().unwrap();
 
-    let agent = Agent::builder()
-        .model(InstantModel)
-        .build()
-        .unwrap();
+    let agent = Agent::builder().model(InstantModel).build().unwrap();
     let hot = HotSwapAgent::new(agent);
 
     c.bench_function("hot_swap_swap_model", |b| {
@@ -373,7 +378,7 @@ fn bench_hot_swap_swap_model(c: &mut Criterion) {
 // ---------------------------------------------------------------------------
 
 fn bench_in_process_broker(c: &mut Criterion) {
-    use daimon::distributed::{InProcessBroker, TaskBroker, AgentTask, TaskResult};
+    use daimon::distributed::{AgentTask, InProcessBroker, TaskBroker, TaskResult};
 
     let rt = tokio::runtime::Runtime::new().unwrap();
 
@@ -486,11 +491,7 @@ fn bench_serializable_stream_event(c: &mut Criterion) {
 // Groups
 // ---------------------------------------------------------------------------
 
-criterion_group!(
-    agent_benches,
-    bench_agent_prompt,
-    bench_agent_with_tools,
-);
+criterion_group!(agent_benches, bench_agent_prompt, bench_agent_with_tools,);
 
 criterion_group!(
     memory_benches,
@@ -498,10 +499,7 @@ criterion_group!(
     bench_token_window_memory,
 );
 
-criterion_group!(
-    tool_benches,
-    bench_tool_registry,
-);
+criterion_group!(tool_benches, bench_tool_registry,);
 
 criterion_group!(
     orchestration_benches,
@@ -509,10 +507,7 @@ criterion_group!(
     bench_chain_3_steps,
 );
 
-criterion_group!(
-    misc_benches,
-    bench_token_estimation,
-);
+criterion_group!(misc_benches, bench_token_estimation,);
 
 criterion_group!(
     new_component_benches,

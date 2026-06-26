@@ -152,13 +152,11 @@ impl Anthropic {
         let tools: Option<Vec<AnthropicTool>> = if request.tools.is_empty() {
             None
         } else {
-            let mut tool_list: Vec<AnthropicTool> =
-                request.tools.iter().map(Into::into).collect();
-            if self.use_prompt_caching {
-                if let Some(last) = tool_list.last_mut() {
-                    last.cache_control =
-                        Some(serde_json::json!({"type": "ephemeral"}));
-                }
+            let mut tool_list: Vec<AnthropicTool> = request.tools.iter().map(Into::into).collect();
+            if self.use_prompt_caching
+                && let Some(last) = tool_list.last_mut()
+            {
+                last.cache_control = Some(serde_json::json!({"type": "ephemeral"}));
             }
             Some(tool_list)
         };
@@ -198,7 +196,9 @@ impl Model for Anthropic {
             }
 
             tracing::debug!(attempt = attempt, "sending request to Anthropic API");
-            let response = req_builder.send().await
+            let response = req_builder
+                .send()
+                .await
                 .map_err(|e| DaimonError::Model(format!("Anthropic HTTP error: {e}")))?;
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
@@ -252,7 +252,9 @@ impl Model for Anthropic {
         }
 
         tracing::debug!("sending streaming request to Anthropic API");
-        let response = req_builder.send().await
+        let response = req_builder
+            .send()
+            .await
             .map_err(|e| DaimonError::Model(format!("Anthropic HTTP error: {e}")))?;
 
         if !response.status().is_success() {
@@ -284,18 +286,17 @@ impl Model for Anthropic {
                         continue;
                     }
 
-                    if let Some(data) = line.strip_prefix("data: ") {
-                        if let Ok(event) = serde_json::from_str::<AnthropicStreamEvent>(data) {
+                    if let Some(data) = line.strip_prefix("data: ")
+                        && let Ok(event) = serde_json::from_str::<AnthropicStreamEvent>(data) {
                             match event.r#type.as_str() {
                                 "content_block_start" => {
-                                    if let Some(block) = event.content_block {
-                                        if block.r#type == "tool_use" {
+                                    if let Some(block) = event.content_block
+                                        && block.r#type == "tool_use" {
                                             yield StreamEvent::ToolCallStart {
                                                 id: block.id.unwrap_or_default(),
                                                 name: block.name.unwrap_or_default(),
                                             };
                                         }
-                                    }
                                 }
                                 "content_block_delta" => {
                                     if let Some(delta) = event.delta {
@@ -316,7 +317,6 @@ impl Model for Anthropic {
                                 _ => {}
                             }
                         }
-                    }
                 }
             }
         };
@@ -640,7 +640,10 @@ mod tests {
         };
         let body = model.build_request_body(&request);
         let sys = body.system.unwrap();
-        assert!(sys.is_array(), "system should be array when caching enabled");
+        assert!(
+            sys.is_array(),
+            "system should be array when caching enabled"
+        );
         let blocks = sys.as_array().unwrap();
         assert_eq!(blocks[0]["type"], "text");
         assert_eq!(blocks[0]["text"], "Be helpful");
@@ -669,7 +672,13 @@ mod tests {
         };
         let body = model.build_request_body(&request);
         let tools = body.tools.unwrap();
-        assert!(tools[0].cache_control.is_none(), "only last tool gets cache_control");
-        assert!(tools[1].cache_control.is_some(), "last tool should have cache_control");
+        assert!(
+            tools[0].cache_control.is_none(),
+            "only last tool gets cache_control"
+        );
+        assert!(
+            tools[1].cache_control.is_some(),
+            "last tool should have cache_control"
+        );
     }
 }

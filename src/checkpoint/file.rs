@@ -35,12 +35,10 @@ impl Checkpoint for FileCheckpoint {
         let json = serde_json::to_string_pretty(state)?;
 
         tokio::task::spawn_blocking(move || {
-            std::fs::create_dir_all(&dir).map_err(|e| {
-                DaimonError::Other(format!("failed to create checkpoint dir: {e}"))
-            })?;
-            std::fs::write(&path, json).map_err(|e| {
-                DaimonError::Other(format!("failed to write checkpoint: {e}"))
-            })?;
+            std::fs::create_dir_all(&dir)
+                .map_err(|e| DaimonError::Other(format!("failed to create checkpoint dir: {e}")))?;
+            std::fs::write(&path, json)
+                .map_err(|e| DaimonError::Other(format!("failed to write checkpoint: {e}")))?;
             Ok::<_, DaimonError>(())
         })
         .await
@@ -54,9 +52,8 @@ impl Checkpoint for FileCheckpoint {
             if !path.exists() {
                 return Ok(None);
             }
-            let json = std::fs::read_to_string(&path).map_err(|e| {
-                DaimonError::Other(format!("failed to read checkpoint: {e}"))
-            })?;
+            let json = std::fs::read_to_string(&path)
+                .map_err(|e| DaimonError::Other(format!("failed to read checkpoint: {e}")))?;
             let state: CheckpointState = serde_json::from_str(&json)?;
             Ok(Some(state))
         })
@@ -72,18 +69,16 @@ impl Checkpoint for FileCheckpoint {
                 return Ok(Vec::new());
             }
             let mut runs = Vec::new();
-            let entries = std::fs::read_dir(&dir).map_err(|e| {
-                DaimonError::Other(format!("failed to read checkpoint dir: {e}"))
-            })?;
+            let entries = std::fs::read_dir(&dir)
+                .map_err(|e| DaimonError::Other(format!("failed to read checkpoint dir: {e}")))?;
             for entry in entries {
-                let entry = entry.map_err(|e| {
-                    DaimonError::Other(format!("failed to read dir entry: {e}"))
-                })?;
+                let entry = entry
+                    .map_err(|e| DaimonError::Other(format!("failed to read dir entry: {e}")))?;
                 let path = entry.path();
-                if path.extension().is_some_and(|ext| ext == "json") {
-                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                        runs.push(stem.to_string());
-                    }
+                if path.extension().is_some_and(|ext| ext == "json")
+                    && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+                {
+                    runs.push(stem.to_string());
                 }
             }
             Ok(runs)
@@ -97,9 +92,8 @@ impl Checkpoint for FileCheckpoint {
 
         tokio::task::spawn_blocking(move || {
             if path.exists() {
-                std::fs::remove_file(&path).map_err(|e| {
-                    DaimonError::Other(format!("failed to delete checkpoint: {e}"))
-                })?;
+                std::fs::remove_file(&path)
+                    .map_err(|e| DaimonError::Other(format!("failed to delete checkpoint: {e}")))?;
             }
             Ok::<_, DaimonError>(())
         })
@@ -126,10 +120,7 @@ mod tests {
 
     fn temp_dir() -> PathBuf {
         let id = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!(
-            "daimon_cp_test_{}_{id}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("daimon_cp_test_{}_{id}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }
@@ -138,11 +129,7 @@ mod tests {
     async fn test_file_save_load() {
         let dir = temp_dir();
         let cp = FileCheckpoint::new(&dir);
-        let state = CheckpointState::new(
-            "run-1",
-            vec![Message::user("hello")],
-            1,
-        );
+        let state = CheckpointState::new("run-1", vec![Message::user("hello")], 1);
 
         cp.save(&state).await.unwrap();
 

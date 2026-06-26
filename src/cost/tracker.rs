@@ -24,10 +24,14 @@ impl CostTracker {
 
     /// Records usage from one model call and returns the incremental cost in USD.
     pub fn record(&self, model_id: &str, usage: &Usage) -> f64 {
-        let input_cost =
-            usage.input_tokens as f64 * self.cost_model.cost_per_token(model_id, TokenDirection::Input);
-        let output_cost =
-            usage.output_tokens as f64 * self.cost_model.cost_per_token(model_id, TokenDirection::Output);
+        let input_cost = usage.input_tokens as f64
+            * self
+                .cost_model
+                .cost_per_token(model_id, TokenDirection::Input);
+        let output_cost = usage.output_tokens as f64
+            * self
+                .cost_model
+                .cost_per_token(model_id, TokenDirection::Output);
         let total = input_cost + output_cost;
         let microdollars = (total * 1_000_000.0) as u64;
         self.cumulative_microdollars
@@ -72,11 +76,14 @@ mod tests {
     fn test_tracker_reset() {
         let tracker = CostTracker::new(Arc::new(OpenAiCostModel));
 
-        tracker.record("gpt-4o", &Usage {
-            input_tokens: 1000,
-            output_tokens: 500,
-            cached_tokens: 0,
-        });
+        tracker.record(
+            "gpt-4o",
+            &Usage {
+                input_tokens: 1000,
+                output_tokens: 500,
+                cached_tokens: 0,
+            },
+        );
 
         assert!(tracker.cumulative_cost() > 0.0);
         tracker.reset();

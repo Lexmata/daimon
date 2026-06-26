@@ -35,10 +35,7 @@ use crate::retriever::vector_store::VectorStore;
 pub trait KnowledgeBase: Send + Sync {
     /// Ingests documents, computing embeddings and storing them.
     /// Returns the IDs assigned to each document.
-    fn ingest(
-        &self,
-        documents: Vec<Document>,
-    ) -> impl Future<Output = Result<Vec<String>>> + Send;
+    fn ingest(&self, documents: Vec<Document>) -> impl Future<Output = Result<Vec<String>>> + Send;
 
     /// Searches for the `top_k` most relevant documents to the query.
     fn search(

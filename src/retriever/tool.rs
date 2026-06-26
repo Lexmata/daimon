@@ -81,10 +81,7 @@ impl Tool for RetrieverTool {
     }
 
     async fn execute(&self, input: &serde_json::Value) -> Result<ToolOutput> {
-        let query = input
-            .get("query")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let query = input.get("query").and_then(|v| v.as_str()).unwrap_or("");
 
         let top_k = input
             .get("top_k")

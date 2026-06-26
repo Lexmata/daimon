@@ -41,7 +41,7 @@ jobs:
       - name: Lint commits
         run: |
           for sha in $(git log --format=%H origin/${{ github.base_ref }}..HEAD); do
-            cargo commitlint --commit "$sha"
+            git log -1 --format=%s "$sha" | cargo commitlint check --config commitlint.toml
           done
 
   # ── Compilation matrix ────────────────────────────────────────────

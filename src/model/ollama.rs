@@ -17,8 +17,8 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{DaimonError, Result};
-use crate::model::types::{ChatRequest, ChatResponse, Message, Role, StopReason, ToolSpec, Usage};
 use crate::model::Model;
+use crate::model::types::{ChatRequest, ChatResponse, Message, Role, StopReason, ToolSpec, Usage};
 use crate::stream::{ResponseStream, StreamEvent};
 use crate::tool::ToolCall;
 
@@ -68,16 +68,9 @@ impl Ollama {
         self
     }
 
-    fn build_request_body(
-        &self,
-        request: &ChatRequest,
-        stream: bool,
-    ) -> serde_json::Value {
-        let messages: Vec<serde_json::Value> = request
-            .messages
-            .iter()
-            .map(convert_message)
-            .collect();
+    fn build_request_body(&self, request: &ChatRequest, stream: bool) -> serde_json::Value {
+        let messages: Vec<serde_json::Value> =
+            request.messages.iter().map(convert_message).collect();
 
         let mut body = serde_json::json!({
             "model": self.model,
@@ -86,11 +79,8 @@ impl Ollama {
         });
 
         if !request.tools.is_empty() {
-            let tools: Vec<serde_json::Value> = request
-                .tools
-                .iter()
-                .map(convert_tool_spec)
-                .collect();
+            let tools: Vec<serde_json::Value> =
+                request.tools.iter().map(convert_tool_spec).collect();
             body["tools"] = serde_json::Value::Array(tools);
         }
 
@@ -194,11 +184,10 @@ impl Model for Ollama {
                             }
                         }
 
-                        if let Some(ref content) = msg.content {
-                            if !content.is_empty() {
+                        if let Some(ref content) = msg.content
+                            && !content.is_empty() {
                                 yield StreamEvent::TextDelta(content.clone());
                             }
-                        }
                     }
 
                     if chunk.done {

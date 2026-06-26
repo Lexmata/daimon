@@ -1,12 +1,12 @@
 //! Builder for [`PgVectorStore`].
 
-use deadpool_postgres::{Config, Pool, Runtime};
 use daimon_core::{DaimonError, Result};
+use deadpool_postgres::{Config, Pool, Runtime};
 use tokio_postgres::NoTls;
 
+use crate::DistanceMetric;
 use crate::migrations;
 use crate::store::PgVectorStore;
-use crate::DistanceMetric;
 
 /// Builds a [`PgVectorStore`] with connection pooling and optional auto-migration.
 ///
@@ -126,9 +126,10 @@ impl PgVectorStoreBuilder {
     }
 
     async fn run_migrations(&self, pool: &Pool) -> Result<()> {
-        let client = pool.get().await.map_err(|e| {
-            DaimonError::Other(format!("pgvector migration pool error: {e}"))
-        })?;
+        let client = pool
+            .get()
+            .await
+            .map_err(|e| DaimonError::Other(format!("pgvector migration pool error: {e}")))?;
 
         tracing::info!("pgvector: creating extension and table '{}'", self.table);
 

@@ -13,8 +13,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use async_nats::jetstream::consumer::pull::Config as PullConfig;
 use async_nats::jetstream::consumer::Consumer;
+use async_nats::jetstream::consumer::pull::Config as PullConfig;
 use tokio::sync::Mutex;
 
 use crate::error::{DaimonError, Result};

@@ -1,12 +1,12 @@
 [advisories]
-vulnerability = "deny"
-unmaintained = "warn"
+unmaintained = "workspace"
 
 [licenses]
-unlicensed = "deny"
 allow = [
     "MIT",
+    "MIT-0",
     "Apache-2.0",
+    "CDLA-Permissive-2.0",
     "BSD-2-Clause",
     "BSD-3-Clause",
     "ISC",

@@ -68,11 +68,7 @@ impl EvalScenario {
     }
 
     /// Adds an LLM-as-judge scorer that evaluates output against a rubric.
-    pub fn expect_llm_judge(
-        mut self,
-        rubric: impl Into<String>,
-        model: SharedModel,
-    ) -> Self {
+    pub fn expect_llm_judge(mut self, rubric: impl Into<String>, model: SharedModel) -> Self {
         self.scorers.push(Scorer::llm_judge(rubric, model));
         self
     }
