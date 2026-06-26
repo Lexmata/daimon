@@ -95,7 +95,7 @@ tonic-build = { version = "0.12", default-features = false, features = ["prost",
 tokio = { version = "1", features = ["full", "test-util"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 proptest = "1"
-criterion = { version = "0.5", features = ["async_tokio"] }
+criterion = { version = "0.8", features = ["async_tokio"] }
 
 [dev-dependencies.cargo-husky]
 version = "1"
