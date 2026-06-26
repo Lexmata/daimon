@@ -89,7 +89,7 @@ async-nats = { version = "0.38", optional = true }
 lapin = { version = "2", optional = true }
 
 [build-dependencies]
-tonic-build = { version = "0.12", default-features = false, features = ["prost", "transport"] }
+tonic-build = { version = "0.13", default-features = false, features = ["prost", "transport"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
