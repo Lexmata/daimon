@@ -74,6 +74,23 @@ impl Message {
         }
     }
 
+    /// Create an assistant message that carries both text and tool calls.
+    ///
+    /// Models such as Anthropic and Gemini emit reasoning text alongside a
+    /// tool call in the same turn; preserving both keeps replayed history
+    /// faithful to what the model produced.
+    pub fn assistant_with_text_and_tool_calls(
+        content: impl Into<String>,
+        tool_calls: Vec<ToolCall>,
+    ) -> Self {
+        Self {
+            role: Role::Assistant,
+            content: Some(content.into()),
+            tool_calls,
+            tool_call_id: None,
+        }
+    }
+
     /// Create a tool result message.
     pub fn tool_result(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
         Self {

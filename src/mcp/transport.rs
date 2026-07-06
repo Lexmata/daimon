@@ -6,6 +6,24 @@ use std::pin::Pin;
 use crate::error::{DaimonError, Result};
 use crate::mcp::protocol::{JsonRpcNotification, JsonRpcRequest, JsonRpcResponse};
 
+/// Maximum size (in bytes) of a single framed message body we will accept from
+/// a peer. The Content-Length header is peer-supplied; without a cap a
+/// malicious or buggy server could advertise a huge length and force us to
+/// allocate that much memory up front (a trivial OOM DoS). 32 MiB is far larger
+/// than any legitimate MCP message.
+const MAX_MESSAGE_SIZE: usize = 32 * 1024 * 1024;
+
+/// Rejects a peer-advertised message length that exceeds [`MAX_MESSAGE_SIZE`]
+/// before we allocate a buffer of that size.
+fn check_content_length(length: usize) -> Result<()> {
+    if length > MAX_MESSAGE_SIZE {
+        return Err(DaimonError::Mcp(format!(
+            "Content-Length {length} exceeds maximum allowed message size {MAX_MESSAGE_SIZE}"
+        )));
+    }
+    Ok(())
+}
+
 /// Trait for sending JSON-RPC messages to an MCP server.
 pub trait McpTransport: Send + Sync {
     /// Sends a request and waits for the response.
@@ -31,6 +49,13 @@ pub struct StdioTransport {
     child_stdin: tokio::sync::Mutex<Option<tokio::process::ChildStdin>>,
     child_stdout: tokio::sync::Mutex<Option<tokio::io::BufReader<tokio::process::ChildStdout>>>,
     child: tokio::sync::Mutex<Option<tokio::process::Child>>,
+    // ponytail: stdio framing carries no JSON-RPC id correlation, so a bare
+    // write-then-read pair lets concurrent `send` calls (the agent runs tools in
+    // parallel over one shared transport) read each other's responses. Rather
+    // than build a full demuxing reader task, we serialize every write+read
+    // round trip behind this single lock — held for the whole exchange — so a
+    // request and its response can never interleave with another call's.
+    request_lock: tokio::sync::Mutex<()>,
 }
 
 impl StdioTransport {
@@ -63,6 +88,7 @@ impl StdioTransport {
             child_stdin: tokio::sync::Mutex::new(Some(stdin)),
             child_stdout: tokio::sync::Mutex::new(Some(tokio::io::BufReader::new(stdout))),
             child: tokio::sync::Mutex::new(Some(child)),
+            request_lock: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -131,6 +157,8 @@ impl StdioTransport {
         let length = content_length
             .ok_or_else(|| DaimonError::Mcp("missing Content-Length header".into()))?;
 
+        check_content_length(length)?;
+
         use tokio::io::AsyncReadExt;
         let mut body = vec![0u8; length];
         stdout
@@ -150,6 +178,10 @@ impl McpTransport for StdioTransport {
         Box::pin(async move {
             let body = serde_json::to_vec(request)
                 .map_err(|e| DaimonError::Mcp(format!("serialize request: {e}")))?;
+
+            // Hold the round-trip lock across both the write and the read so a
+            // response can only be consumed by the request that produced it.
+            let _guard = self.request_lock.lock().await;
             self.write_message(&body).await?;
 
             let response_bytes = self.read_message().await?;
@@ -167,6 +199,9 @@ impl McpTransport for StdioTransport {
         Box::pin(async move {
             let body = serde_json::to_vec(notification)
                 .map_err(|e| DaimonError::Mcp(format!("serialize notification: {e}")))?;
+            // Take the same round-trip lock so a notification write can't
+            // interleave between a concurrent request's write and its read.
+            let _guard = self.request_lock.lock().await;
             self.write_message(&body).await
         })
     }
@@ -271,6 +306,22 @@ impl McpTransport for HttpTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_content_length_within_cap_ok() {
+        assert!(check_content_length(0).is_ok());
+        assert!(check_content_length(1024).is_ok());
+        assert!(check_content_length(MAX_MESSAGE_SIZE).is_ok());
+    }
+
+    #[test]
+    fn test_content_length_over_cap_rejected() {
+        let err = check_content_length(MAX_MESSAGE_SIZE + 1).unwrap_err();
+        assert!(matches!(err, DaimonError::Mcp(_)));
+        // A wildly oversized advertised length must also be rejected before
+        // any allocation happens.
+        assert!(check_content_length(usize::MAX).is_err());
+    }
 
     #[test]
     fn test_http_transport_new() {

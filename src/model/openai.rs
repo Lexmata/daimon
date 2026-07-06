@@ -32,7 +32,6 @@ fn build_client(timeout: Option<Duration>) -> Client {
 ///
 /// Supports configurable timeouts, retries, response format, and parallel tool calls.
 /// Use `new()` or `with_api_key()` to create, then chain builder methods as needed.
-#[derive(Debug)]
 pub struct OpenAi {
     client: Client,
     api_key: String,
@@ -42,6 +41,23 @@ pub struct OpenAi {
     max_retries: u32,
     response_format: Option<String>,
     parallel_tool_calls: Option<bool>,
+}
+
+impl std::fmt::Debug for OpenAi {
+    /// Hand-written to avoid leaking the plaintext API key in logs or panic
+    /// output; a derived `Debug` would print `api_key` verbatim.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenAi")
+            .field("client", &self.client)
+            .field("api_key", &"[redacted]")
+            .field("model_id", &self.model_id)
+            .field("base_url", &self.base_url)
+            .field("timeout", &self.timeout)
+            .field("max_retries", &self.max_retries)
+            .field("response_format", &self.response_format)
+            .field("parallel_tool_calls", &self.parallel_tool_calls)
+            .finish()
+    }
 }
 
 impl OpenAi {
@@ -154,19 +170,20 @@ impl Model for OpenAi {
                 return parse_response(oai_response);
             }
 
+            let retry_after = crate::model::retry::parse_retry_after(response.headers());
             let text = response.text().await.unwrap_or_default();
             let is_retryable = status.as_u16() == 429 || status.is_server_error();
 
             if is_retryable && attempt < self.max_retries {
-                let delay_ms = 100 * 2u64.pow(attempt);
+                let delay = crate::model::retry::backoff_delay(attempt, retry_after);
                 tracing::debug!(
                     status = %status,
                     attempt = attempt + 1,
                     max_retries = self.max_retries,
-                    delay_ms,
+                    delay_ms = delay.as_millis(),
                     "retryable error, backing off"
                 );
-                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                tokio::time::sleep(delay).await;
             } else {
                 return Err(DaimonError::Model(format!(
                     "OpenAI API error ({status}): {text}"
@@ -206,17 +223,17 @@ impl Model for OpenAi {
 
         let stream = async_stream::try_stream! {
             use futures::StreamExt;
+            use crate::model::line_buffer::LineBuffer;
 
-            let mut buffer = String::new();
+            let mut buffer = LineBuffer::new();
             let mut stream = Box::pin(byte_stream);
 
             while let Some(chunk) = stream.next().await {
                 let chunk = chunk.map_err(|e| DaimonError::Model(format!("OpenAI stream error: {e}")))?;
-                buffer.push_str(&String::from_utf8_lossy(&chunk));
+                buffer.push(&chunk);
 
-                while let Some(line_end) = buffer.find('\n') {
-                    let line = buffer[..line_end].trim().to_string();
-                    buffer = buffer[line_end + 1..].to_string();
+                while let Some(line) = buffer.next_line() {
+                    let line = line.trim();
 
                     if line.is_empty() || line == "data: [DONE]" {
                         if line == "data: [DONE]" {
@@ -254,6 +271,42 @@ impl Model for OpenAi {
                             }
                         }
                 }
+            }
+
+            // A stream may end without a trailing newline, leaving a final SSE
+            // record buffered. Recover it through the identical parse path.
+            if let Some(line) = buffer.take_remaining() {
+                let line = line.trim();
+                if line == "data: [DONE]" {
+                    yield StreamEvent::Done;
+                } else if let Some(data) = line.strip_prefix("data: ")
+                    && let Ok(chunk) = serde_json::from_str::<OpenAiStreamChunk>(data) {
+                        for choice in &chunk.choices {
+                            if let Some(ref content) = choice.delta.content
+                                && !content.is_empty() {
+                                    yield StreamEvent::TextDelta(content.clone());
+                                }
+                            if let Some(ref tool_calls) = choice.delta.tool_calls {
+                                for tc in tool_calls {
+                                    if let Some(ref func) = tc.function {
+                                        if let Some(ref name) = func.name {
+                                            yield StreamEvent::ToolCallStart {
+                                                id: tc.index.to_string(),
+                                                name: name.clone(),
+                                            };
+                                        }
+                                        if let Some(ref args) = func.arguments
+                                            && !args.is_empty() {
+                                                yield StreamEvent::ToolCallDelta {
+                                                    id: tc.index.to_string(),
+                                                    arguments_delta: args.clone(),
+                                                };
+                                            }
+                                    }
+                                }
+                            }
+                        }
+                    }
             }
         };
 
@@ -630,5 +683,16 @@ mod tests {
     fn test_with_parallel_tool_calls() {
         let model = OpenAi::new("gpt-4o").with_parallel_tool_calls(true);
         assert_eq!(model.parallel_tool_calls, Some(true));
+    }
+
+    #[test]
+    fn test_debug_redacts_api_key() {
+        let model = OpenAi::with_api_key("gpt-4o", "sk-supersecret-key-value");
+        let dbg = format!("{model:?}");
+        assert!(
+            !dbg.contains("sk-supersecret-key-value"),
+            "Debug output must not contain the plaintext API key: {dbg}"
+        );
+        assert!(dbg.contains("[redacted]"));
     }
 }

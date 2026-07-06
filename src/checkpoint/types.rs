@@ -4,7 +4,54 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::types::Message;
+use crate::model::types::{Message, Usage};
+
+/// Serde adapter for [`Usage`].
+///
+/// `Usage` lives in `daimon-core` and does not itself derive `Serialize` /
+/// `Deserialize`, so it cannot be embedded directly in a `#[derive(Serialize,
+/// Deserialize)]` struct. This module mirrors its public fields and produces
+/// JSON identical to a derived implementation (a map of the three token
+/// counts), keeping the checkpoint format stable and self-describing.
+mod usage_serde {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    use super::Usage;
+
+    #[derive(Serialize, Deserialize)]
+    struct UsageRepr {
+        #[serde(default)]
+        input_tokens: u32,
+        #[serde(default)]
+        output_tokens: u32,
+        #[serde(default)]
+        cached_tokens: u32,
+    }
+
+    pub(super) fn serialize<S>(usage: &Usage, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        UsageRepr {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cached_tokens: usage.cached_tokens,
+        }
+        .serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<Usage, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let repr = UsageRepr::deserialize(deserializer)?;
+        Ok(Usage {
+            input_tokens: repr.input_tokens,
+            output_tokens: repr.output_tokens,
+            cached_tokens: repr.cached_tokens,
+        })
+    }
+}
 
 /// Serializable snapshot of an agent run at a specific iteration.
 ///
@@ -24,6 +71,16 @@ pub struct CheckpointState {
     pub metadata: HashMap<String, serde_json::Value>,
     /// Unix timestamp (seconds since epoch) when the checkpoint was created.
     pub created_at: u64,
+    /// Cumulative cost in USD spent so far in this run.
+    ///
+    /// Persisted so a cross-process resume can restore prior spend into the
+    /// cost tracker; otherwise `max_budget` would only bound post-resume
+    /// spend and the returned cost would under-report the true total.
+    #[serde(default)]
+    pub cumulative_cost: f64,
+    /// Aggregated token usage accumulated so far in this run.
+    #[serde(default, with = "usage_serde")]
+    pub usage: Usage,
 }
 
 impl CheckpointState {
@@ -41,7 +98,19 @@ impl CheckpointState {
             completed: false,
             metadata: HashMap::new(),
             created_at: now,
+            cumulative_cost: 0.0,
+            usage: Usage::default(),
         }
+    }
+
+    /// Records the cumulative cost and token usage spent up to this checkpoint.
+    ///
+    /// Set before saving so a later resume can reseed the cost tracker and
+    /// usage accumulators with the pre-interruption totals.
+    pub fn with_cost_usage(mut self, cost: f64, usage: Usage) -> Self {
+        self.cumulative_cost = cost;
+        self.usage = usage;
+        self
     }
 
     /// Marks this checkpoint as completed.

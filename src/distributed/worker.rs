@@ -114,9 +114,7 @@ impl TaskWorker {
                 });
             }
 
-            if let Some(result) = join_set.join_next().await
-                && let Err(e) = result
-            {
+            if let Some(Err(e)) = join_set.join_next().await {
                 tracing::warn!("worker task panicked: {e}");
             }
         }

@@ -44,7 +44,7 @@
 //! Enable the `aws-auth` feature for SigV4 authentication:
 //!
 //! ```toml
-//! daimon-plugin-opensearch = { version = "0.15", features = ["aws-auth"] }
+//! daimon-plugin-opensearch = { version = "0.17", features = ["aws-auth"] }
 //! ```
 
 mod builder;

@@ -85,7 +85,14 @@ impl Ollama {
         }
 
         if let Some(temp) = request.temperature {
-            body["options"] = serde_json::json!({"temperature": temp});
+            body["options"]["temperature"] = serde_json::json!(temp);
+        }
+
+        // Ollama expresses the output-token limit as `options.num_predict`.
+        // Previously `request.max_tokens` was silently dropped, so callers
+        // could not bound generation length at all.
+        if let Some(mt) = request.max_tokens {
+            body["options"]["num_predict"] = serde_json::json!(mt);
         }
 
         if let Some(ref ka) = self.keep_alive {
@@ -147,29 +154,34 @@ impl Model for Ollama {
 
         let stream = async_stream::try_stream! {
             use futures::StreamExt;
+            use crate::model::line_buffer::LineBuffer;
 
             let mut byte_stream = resp.bytes_stream();
-            let mut buffer = String::new();
+            let mut buffer = LineBuffer::new();
+            // Monotonic across the whole stream: Ollama emits one tool call per
+            // NDJSON message, so a per-message index resets every iteration and
+            // collides across messages. A stream-wide counter keeps ids unique.
+            let mut tool_call_seq: u64 = 0;
 
             while let Some(chunk) = byte_stream.next().await {
                 let chunk = chunk.map_err(|e| DaimonError::Model(e.to_string()))?;
-                buffer.push_str(&String::from_utf8_lossy(&chunk));
+                buffer.push(&chunk);
 
-                while let Some(newline_pos) = buffer.find('\n') {
-                    let line = buffer[..newline_pos].trim().to_string();
-                    buffer = buffer[newline_pos + 1..].to_string();
+                while let Some(line) = buffer.next_line() {
+                    let line = line.trim();
 
                     if line.is_empty() {
                         continue;
                     }
 
-                    let chunk: OllamaResponse = serde_json::from_str(&line)
+                    let parsed: OllamaResponse = serde_json::from_str(line)
                         .map_err(|e| DaimonError::Model(format!("invalid JSON: {e}")))?;
 
-                    if let Some(ref msg) = chunk.message {
+                    if let Some(ref msg) = parsed.message {
                         if !msg.tool_calls.is_empty() {
-                            for (i, tc) in msg.tool_calls.iter().enumerate() {
-                                let id = format!("ollama_tc_{i}");
+                            for tc in &msg.tool_calls {
+                                let id = format!("ollama_tc_{tool_call_seq}");
+                                tool_call_seq += 1;
                                 yield StreamEvent::ToolCallStart {
                                     id: id.clone(),
                                     name: tc.function.name.clone(),
@@ -190,7 +202,46 @@ impl Model for Ollama {
                             }
                     }
 
-                    if chunk.done {
+                    if parsed.done {
+                        yield StreamEvent::Done;
+                    }
+                }
+            }
+
+            // Recover a final NDJSON record the server sent without a trailing
+            // newline through the identical parse path used for normal lines.
+            if let Some(line) = buffer.take_remaining() {
+                let line = line.trim();
+                if !line.is_empty() {
+                    let parsed: OllamaResponse = serde_json::from_str(line)
+                        .map_err(|e| DaimonError::Model(format!("invalid JSON: {e}")))?;
+
+                    if let Some(ref msg) = parsed.message {
+                        if !msg.tool_calls.is_empty() {
+                            for tc in &msg.tool_calls {
+                                let id = format!("ollama_tc_{tool_call_seq}");
+                                tool_call_seq += 1;
+                                yield StreamEvent::ToolCallStart {
+                                    id: id.clone(),
+                                    name: tc.function.name.clone(),
+                                };
+                                let args_str = serde_json::to_string(&tc.function.arguments)
+                                    .unwrap_or_default();
+                                yield StreamEvent::ToolCallDelta {
+                                    id: id.clone(),
+                                    arguments_delta: args_str,
+                                };
+                                yield StreamEvent::ToolCallEnd { id };
+                            }
+                        }
+
+                        if let Some(ref content) = msg.content
+                            && !content.is_empty() {
+                                yield StreamEvent::TextDelta(content.clone());
+                            }
+                    }
+
+                    if parsed.done {
                         yield StreamEvent::Done;
                     }
                 }
@@ -447,5 +498,28 @@ mod tests {
         let body = model.build_request_body(&request, true);
         assert!(body["tools"].is_array());
         assert_eq!(body["options"]["temperature"], 0.5);
+    }
+
+    #[test]
+    fn test_build_request_body_maps_max_tokens() {
+        let model = Ollama::new("llama3.1");
+        let request = ChatRequest {
+            messages: vec![Message::user("hi")],
+            tools: vec![],
+            temperature: Some(0.5),
+            max_tokens: Some(256),
+        };
+        let body = model.build_request_body(&request, false);
+        assert_eq!(body["options"]["num_predict"], 256);
+        // temperature and num_predict must coexist under options.
+        assert_eq!(body["options"]["temperature"], 0.5);
+    }
+
+    #[test]
+    fn test_build_request_body_no_max_tokens() {
+        let model = Ollama::new("llama3.1");
+        let request = ChatRequest::new(vec![Message::user("hi")]);
+        let body = model.build_request_body(&request, false);
+        assert!(body["options"]["num_predict"].is_null());
     }
 }

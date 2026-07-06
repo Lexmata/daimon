@@ -74,12 +74,6 @@ pub use crate::distributed::AmqpBroker;
 #[cfg(feature = "grpc")]
 pub use crate::distributed::{GrpcBrokerClient, GrpcBrokerServer};
 
-#[cfg(feature = "mcp")]
-pub use crate::mcp::McpWsServer;
-
-#[cfg(all(feature = "mcp", feature = "grpc"))]
-pub use crate::mcp::{McpGrpcServer, McpGrpcTransport};
-
 #[cfg(feature = "qdrant")]
 pub use crate::retriever::qdrant::QdrantRetriever;
 

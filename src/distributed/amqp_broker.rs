@@ -1,7 +1,23 @@
 //! RabbitMQ task broker via AMQP 0-9-1 for distributed agent execution.
 //!
-//! Uses a durable queue for task delivery with manual acknowledgement.
-//! Enable with `feature = "amqp"`.
+//! Uses a durable queue for task delivery with manual, deferred
+//! acknowledgement. Enable with `feature = "amqp"`.
+//!
+//! # Acknowledgement model
+//!
+//! A delivery is **not** acked when [`receive`](AmqpBroker::receive) hands the
+//! task to a worker. The ack handle is retained and the delivery is only acked
+//! once the worker reports the outcome via
+//! [`complete`](AmqpBroker::complete) or [`fail`](AmqpBroker::fail). If the
+//! worker process crashes in between, the channel closes without an ack and
+//! RabbitMQ requeues the delivery — this is what makes the at-least-once
+//! guarantee real. (Acking inside `receive`, before processing, would silently
+//! drop tasks on a mid-flight crash.)
+//!
+//! # Status visibility
+//!
+//! Task status is tracked in a process-local map. See
+//! [`AmqpBroker::status`] for the cross-process caveat.
 //!
 //! ```ignore
 //! use daimon::distributed::AmqpBroker;
@@ -13,8 +29,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use lapin::acker::Acker;
 use lapin::options::{
-    BasicAckOptions, BasicConsumeOptions, BasicPublishOptions, QueueDeclareOptions,
+    BasicAckOptions, BasicConsumeOptions, BasicNackOptions, BasicPublishOptions,
+    QueueDeclareOptions,
 };
 use lapin::types::FieldTable;
 use lapin::{BasicProperties, Channel, Connection, ConnectionProperties, Consumer};
@@ -27,13 +45,19 @@ use super::types::{AgentTask, TaskResult, TaskStatus};
 
 /// Distributes agent tasks via RabbitMQ (AMQP 0-9-1).
 ///
-/// Tasks are published to a durable queue. Workers consume with
-/// manual acknowledgement for at-least-once delivery guarantees.
+/// Tasks are published to a durable queue. Workers consume with manual,
+/// deferred acknowledgement for at-least-once delivery guarantees (see the
+/// module docs). Status is tracked in a process-local map (see
+/// [`AmqpBroker::status`]).
 pub struct AmqpBroker {
     channel: Channel,
     queue_name: String,
     statuses: Arc<Mutex<HashMap<String, TaskStatus>>>,
     consumer: Arc<Mutex<Option<Consumer>>>,
+    /// Ack handles for deliveries received but not yet completed/failed, keyed
+    /// by task id. The delivery is acked only once the worker reports the
+    /// task outcome.
+    in_flight: Arc<Mutex<HashMap<String, Acker>>>,
 }
 
 impl AmqpBroker {
@@ -69,6 +93,7 @@ impl AmqpBroker {
             queue_name,
             statuses: Arc::new(Mutex::new(HashMap::new())),
             consumer: Arc::new(Mutex::new(None)),
+            in_flight: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -131,6 +156,14 @@ impl TaskBroker for AmqpBroker {
         Ok(id)
     }
 
+    /// Returns the last-known status of a task.
+    ///
+    /// **Process-local only.** Status transitions are recorded in an in-memory
+    /// map on the broker instance that handled the task, so a producer will
+    /// only observe `Pending` for a task that a *different* worker process
+    /// picked up. For cross-process status visibility use
+    /// [`RedisBroker`](super::RedisBroker), which persists status in a shared
+    /// Redis hash.
     async fn status(&self, task_id: &str) -> Result<TaskStatus> {
         let statuses = self.statuses.lock().await;
         Ok(statuses
@@ -147,14 +180,40 @@ impl TaskBroker for AmqpBroker {
 
         match stream.next().await {
             Some(Ok(delivery)) => {
-                let task: AgentTask = serde_json::from_slice(&delivery.data)
-                    .map_err(|e| DaimonError::Other(format!("deserialize task: {e}")))?;
+                let task: AgentTask = match serde_json::from_slice(&delivery.data) {
+                    Ok(task) => task,
+                    Err(e) => {
+                        // Poison message: the payload can never be deserialized,
+                        // so nack it with requeue=false. This removes it from the
+                        // queue (dead-lettered if a DLX is configured) instead of
+                        // requeuing it, which would otherwise redeliver the same
+                        // undeserializable message forever. Dropping the acker
+                        // without ack/nack closes the channel and RabbitMQ requeues
+                        // it — the exact redelivery loop we must avoid.
+                        if let Err(nack_err) = delivery
+                            .acker
+                            .nack(BasicNackOptions {
+                                requeue: false,
+                                ..Default::default()
+                            })
+                            .await
+                        {
+                            tracing::warn!(
+                                error = %nack_err,
+                                "failed to nack poison AMQP message"
+                            );
+                        }
+                        return Err(DaimonError::Other(format!("deserialize task: {e}")));
+                    }
+                };
 
-                delivery
-                    .ack(BasicAckOptions::default())
-                    .await
-                    .map_err(|e| DaimonError::Other(format!("amqp ack: {e}")))?;
-
+                // Retain the ack handle and ack only after the worker reports
+                // the outcome. Acking here (before processing) would lose the
+                // task if the worker then crashed.
+                {
+                    let mut in_flight = self.in_flight.lock().await;
+                    in_flight.insert(task.task_id.clone(), delivery.acker);
+                }
                 {
                     let mut statuses = self.statuses.lock().await;
                     statuses.insert(task.task_id.clone(), TaskStatus::Running);
@@ -168,12 +227,32 @@ impl TaskBroker for AmqpBroker {
     }
 
     async fn complete(&self, task_id: &str, result: TaskResult) -> Result<()> {
+        // Ack the delivery now that the task has been fully processed.
+        let acker = self.in_flight.lock().await.remove(task_id);
+        if let Some(acker) = acker {
+            acker
+                .ack(BasicAckOptions::default())
+                .await
+                .map_err(|e| DaimonError::Other(format!("amqp ack: {e}")))?;
+        }
+
         let mut statuses = self.statuses.lock().await;
         statuses.insert(task_id.to_string(), TaskStatus::Completed(result));
         Ok(())
     }
 
     async fn fail(&self, task_id: &str, error: String) -> Result<()> {
+        // The task was delivered and processed (it errored); ack it so it is
+        // not redelivered in a loop. The failure is recorded in the status
+        // map. A lost-on-crash task is handled by *not* acking in `receive`.
+        let acker = self.in_flight.lock().await.remove(task_id);
+        if let Some(acker) = acker {
+            acker
+                .ack(BasicAckOptions::default())
+                .await
+                .map_err(|e| DaimonError::Other(format!("amqp ack: {e}")))?;
+        }
+
         let mut statuses = self.statuses.lock().await;
         statuses.insert(task_id.to_string(), TaskStatus::Failed(error));
         Ok(())

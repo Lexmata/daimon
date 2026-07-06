@@ -11,6 +11,7 @@
 pub mod chain;
 pub mod dag;
 pub mod graph;
+pub(crate) mod toposort;
 pub mod workflow;
 
 pub use chain::{AgentStep, Chain, ChainBuilder, ChainContext, ChainStep, TransformStep};

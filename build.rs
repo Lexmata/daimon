@@ -1,10 +1,6 @@
 fn main() {
     if std::env::var("CARGO_FEATURE_GRPC").is_ok() {
-        let mut protos = vec!["proto/daimon_distributed.proto"];
-
-        if std::env::var("CARGO_FEATURE_MCP").is_ok() {
-            protos.push("proto/daimon_mcp.proto");
-        }
+        let protos = vec!["proto/daimon_distributed.proto"];
 
         tonic_build::configure()
             .build_server(true)

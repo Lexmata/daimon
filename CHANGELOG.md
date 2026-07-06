@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-07-06
+
+### Removed
+
+- **Non-spec MCP WebSocket transport** — `WebSocketTransport` and `McpWsServer` have been removed. stdio and HTTP are the MCP specification transports; the WebSocket transport was non-standard.
+- **gRPC MCP transport** — `McpGrpcServer` and `McpGrpcTransport` have been removed. The gRPC transport was non-spec and its `notify()` was a no-op.
+- The `tokio-tungstenite` dependency has been dropped from the `mcp` feature.
+
+### Changed
+
+- **BREAKING: `DaimonError` is now `#[non_exhaustive]`.** Downstream code that matches on `DaimonError` exhaustively must add a wildcard (`_`) arm.
+- **BREAKING: `prompt_stream` now runs the full ReAct loop like `prompt`.** It loads and **persists** conversation memory, fires lifecycle hooks, enforces `max_budget`, and applies input/output guardrails — previously it did none of these, so a streamed turn left the agent amnesiac and unguarded.
+- **Streaming tool-call arguments are now correctly correlated** — argument deltas are matched to their tool call by block index. Previously the delta id was empty, so streamed tool calls were dropped or executed with empty arguments.
+- **All five streaming parsers now handle UTF-8 split across chunks** — byte-accurate line buffering prevents multi-byte characters split across chunk boundaries from degrading to U+FFFD.
+- **`Dag` and `Workflow` now share one topological scheduler** — the duplicated Kahn's-algorithm implementation was extracted into `orchestration::toposort`.
+
+### Fixed
+
+- **Anthropic/Bedrock streaming tool-calls executed with empty arguments** — the argument deltas were not correlated to their tool call, so tools ran with `{}` input.
+- **Bedrock negative-integer corruption** — negative integers were cast through `PosInt` and corrupted; they now map to `NegInt`.
+- **`FileCheckpoint` path traversal and non-atomic writes** — `run_id` is now validated (traversal and absolute paths rejected) and writes are performed write-then-rename atomically.
+- **NATS/AMQP ack-before-processing** — acknowledgement is now deferred until the task is processed, making the documented at-least-once guarantee real.
+- **MCP stdio response cross-wiring** — the write+read round trip is serialized so concurrent tool calls can no longer receive each other's responses.
+- **Unbounded MCP Content-Length** — the framing layer now caps Content-Length (32 MiB) before allocating.
+- **Timing-unsafe API-key comparison** — `AgentServer` now compares API keys in constant time.
+- **Unbounded A2A task map** — the task map is now bounded with terminal-state eviction.
+- **OTel endpoint ignored** — the configured OTLP endpoint is now actually applied.
+- **pgvector table-name SQL injection and unbounded L2 score** — table identifiers are validated and a bounded L2 score is used.
+- **Ollama `max_tokens` ignored** — `max_tokens` is now honored via `num_predict`.
+- **API keys leaked via `Debug`** — `api_key` is now redacted in `Debug` output for OpenAI/Gemini/Azure.
+
+### Added
+
+- **`Message::assistant_with_text_and_tool_calls`** — preserves assistant text emitted alongside tool calls in conversation history.
+- **`A2aHandler::with_max_tasks`** — configures the bound on the A2A task map.
+- **`DistanceMetric` now derives `Default`.**
+- **docs.rs all-features metadata** on every crate.
+- **Runnable pgvector and opensearch RAG examples** (`examples/rag_pgvector.rs`, `examples/rag_opensearch.rs`).
+
 ## [0.16.0] - 2026-03-04
 
 ### Added
@@ -382,7 +421,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `commitlint.toml` for Conventional Commits enforcement.
 - `rustfmt.toml` and `clippy.toml` for consistent code style.
 
-[Unreleased]: https://github.com/Lexmata/daimon/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/Lexmata/daimon/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/Lexmata/daimon/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/Lexmata/daimon/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/Lexmata/daimon/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/Lexmata/daimon/compare/v0.13.0...v0.14.0

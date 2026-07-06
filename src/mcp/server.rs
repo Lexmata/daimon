@@ -21,6 +21,12 @@ use crate::error::{DaimonError, Result};
 use crate::mcp::protocol::McpToolInfo;
 use crate::tool::ToolRegistry;
 
+/// Maximum size (in bytes) of a single framed request body the server will
+/// accept. The Content-Length header comes from the (untrusted) client; without
+/// a cap a bogus length forces a huge up-front allocation (OOM DoS). 32 MiB is
+/// well above any legitimate MCP request.
+const MAX_MESSAGE_SIZE: usize = 32 * 1024 * 1024;
+
 /// An MCP-compliant tool server.
 ///
 /// Exposes a [`ToolRegistry`] over JSON-RPC 2.0 using Content-Length framed
@@ -273,6 +279,15 @@ async fn read_message<R: tokio::io::AsyncBufRead + Unpin>(
         return Ok(Some(content));
     };
 
+    if content_length > MAX_MESSAGE_SIZE {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "Content-Length {content_length} exceeds maximum allowed message size {MAX_MESSAGE_SIZE}"
+            ),
+        ));
+    }
+
     let mut separator = String::new();
     reader.read_line(&mut separator).await?;
 
@@ -402,6 +417,25 @@ mod tests {
         let resp = server.handle_request_raw(&body).await.unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&resp).unwrap();
         assert!(parsed["error"].is_object());
+    }
+
+    #[tokio::test]
+    async fn test_read_message_rejects_oversized_content_length() {
+        // A client that advertises a length beyond MAX_MESSAGE_SIZE must be
+        // rejected before we allocate the buffer.
+        let framed = format!("Content-Length: {}\r\n\r\n", MAX_MESSAGE_SIZE + 1);
+        let mut reader = tokio::io::BufReader::new(framed.as_bytes());
+        let err = read_message(&mut reader).await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[tokio::test]
+    async fn test_read_message_accepts_normal_content_length() {
+        let payload = "{}";
+        let framed = format!("Content-Length: {}\r\n\r\n{payload}", payload.len());
+        let mut reader = tokio::io::BufReader::new(framed.as_bytes());
+        let body = read_message(&mut reader).await.unwrap();
+        assert_eq!(body.as_deref(), Some("{}"));
     }
 
     #[tokio::test]
