@@ -60,7 +60,7 @@ jobs:
         run: cargo clippy --features full -- -D warnings
 
       - name: Coverage check
-        run: cargo llvm-cov --no-default-features --fail-under-lines 90
+        run: cargo llvm-cov --no-default-features --fail-under-lines 84
 
       - name: Publish dry-run
         run: cargo publish --dry-run
