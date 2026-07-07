@@ -20,13 +20,12 @@
 //! }
 //! ```
 
-mod traits;
 mod builtin;
 mod content_policy;
+mod traits;
 
-pub use traits::{
-    ErasedInputGuardrail, ErasedOutputGuardrail, GuardrailResult, InputGuardrail,
-    OutputGuardrail,
-};
 pub use builtin::{MaxTokenGuardrail, RegexFilterGuardrail};
 pub use content_policy::ContentPolicyGuardrail;
+pub use traits::{
+    ErasedInputGuardrail, ErasedOutputGuardrail, GuardrailResult, InputGuardrail, OutputGuardrail,
+};

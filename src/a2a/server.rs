@@ -7,32 +7,128 @@
 //! To expose this over HTTP, plug `handle_request` into your HTTP framework
 //! of choice (axum, actix, warp, etc.).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
-use crate::agent::Agent;
 use super::types::*;
+use crate::agent::Agent;
+
+/// Default maximum number of tasks retained in the in-memory store before
+/// terminal tasks start being evicted.
+const DEFAULT_MAX_TASKS: usize = 1000;
+
+/// Returns whether a task state is terminal (safe to evict).
+fn is_terminal(state: &TaskState) -> bool {
+    matches!(
+        state,
+        TaskState::Completed | TaskState::Failed | TaskState::Canceled
+    )
+}
+
+/// Bounded in-memory task store with FIFO eviction of terminal tasks.
+///
+/// The A2A handler previously kept every task in an unbounded `HashMap` that
+/// was only ever inserted into, so a long-running server leaked memory without
+/// limit. This store caps the number of retained tasks and, when over the cap,
+/// evicts the oldest tasks that have reached a terminal state (completed,
+/// failed, or canceled). Non-terminal (in-flight) tasks are never evicted.
+struct TaskStore {
+    tasks: HashMap<String, A2aTask>,
+    order: VecDeque<String>,
+    max_tasks: usize,
+}
+
+impl TaskStore {
+    fn new(max_tasks: usize) -> Self {
+        Self {
+            tasks: HashMap::new(),
+            order: VecDeque::new(),
+            max_tasks: max_tasks.max(1),
+        }
+    }
+
+    fn insert(&mut self, id: String, task: A2aTask) {
+        if !self.tasks.contains_key(&id) {
+            self.order.push_back(id.clone());
+        }
+        self.tasks.insert(id, task);
+        self.evict_if_needed();
+    }
+
+    fn get(&self, id: &str) -> Option<&A2aTask> {
+        self.tasks.get(id)
+    }
+
+    fn get_mut(&mut self, id: &str) -> Option<&mut A2aTask> {
+        self.tasks.get_mut(id)
+    }
+
+    /// Returns true if the store is at capacity and every retained task is
+    /// non-terminal (in-flight). In that state a brand-new task cannot be
+    /// admitted: eviction only reclaims terminal tasks, so inserting anyway
+    /// would grow the map past `max_tasks` without bound. Callers use this to
+    /// reject new inserts rather than dropping an in-flight task or leaking
+    /// memory.
+    fn is_full_of_nonterminal(&self) -> bool {
+        self.tasks.len() >= self.max_tasks
+            && self.tasks.values().all(|t| !is_terminal(&t.status.state))
+    }
+
+    fn evict_if_needed(&mut self) {
+        while self.tasks.len() > self.max_tasks {
+            // Evict the oldest task that has reached a terminal state. If none
+            // of the retained tasks are terminal we stop rather than drop an
+            // in-flight task.
+            let mut evict_idx = None;
+            for (i, id) in self.order.iter().enumerate() {
+                if self
+                    .tasks
+                    .get(id)
+                    .is_some_and(|t| is_terminal(&t.status.state))
+                {
+                    evict_idx = Some(i);
+                    break;
+                }
+            }
+            match evict_idx {
+                Some(i) => {
+                    if let Some(id) = self.order.remove(i) {
+                        self.tasks.remove(&id);
+                    }
+                }
+                None => break,
+            }
+        }
+    }
+}
 
 /// A2A server that routes JSON-RPC requests to an agent.
 ///
-/// Manages task lifecycle and stores tasks in memory. Plug this into
-/// any HTTP framework by calling [`handle_request`](A2aHandler::handle_request)
-/// with the raw JSON body.
+/// Manages task lifecycle and stores tasks in a bounded in-memory store. Plug
+/// this into any HTTP framework by calling
+/// [`handle_request`](A2aHandler::handle_request) with the raw JSON body.
 pub struct A2aHandler {
     agent: Arc<Agent>,
     card: AgentCard,
-    tasks: Mutex<HashMap<String, A2aTask>>,
+    tasks: Mutex<TaskStore>,
 }
 
 impl A2aHandler {
-    /// Creates a new A2A handler.
+    /// Creates a new A2A handler with the default task-store cap
+    /// (`DEFAULT_MAX_TASKS`).
     pub fn new(agent: Arc<Agent>, card: AgentCard) -> Self {
+        Self::with_max_tasks(agent, card, DEFAULT_MAX_TASKS)
+    }
+
+    /// Creates a new A2A handler with a custom cap on retained tasks. Once the
+    /// cap is exceeded, the oldest terminal tasks are evicted.
+    pub fn with_max_tasks(agent: Arc<Agent>, card: AgentCard, max_tasks: usize) -> Self {
         Self {
             agent,
             card,
-            tasks: Mutex::new(HashMap::new()),
+            tasks: Mutex::new(TaskStore::new(max_tasks)),
         }
     }
 
@@ -66,11 +162,9 @@ impl A2aHandler {
             "tasks/send" => self.handle_task_send(&request).await,
             "tasks/get" => self.handle_task_get(&request).await,
             "tasks/cancel" => self.handle_task_cancel(&request).await,
-            other => JsonRpcResponse::error(
-                request.id,
-                -32601,
-                format!("Method not found: {other}"),
-            ),
+            other => {
+                JsonRpcResponse::error(request.id, -32601, format!("Method not found: {other}"))
+            }
         };
 
         serde_json::to_string(&response).unwrap_or_default()
@@ -118,6 +212,19 @@ impl A2aHandler {
 
         {
             let mut tasks = self.tasks.lock().await;
+            // Enforce a hard ceiling on in-flight tasks. Terminal-task eviction
+            // cannot reclaim space when the store is full of non-terminal
+            // (Working) tasks, so admitting another new task would grow the map
+            // without bound (OOM). Reject the request instead. Continuing an
+            // existing task (id already present) never grows the map, so it is
+            // always allowed.
+            if tasks.get(&task_id).is_none() && tasks.is_full_of_nonterminal() {
+                return JsonRpcResponse::error(
+                    request.id.clone(),
+                    -32000,
+                    "server busy: too many in-flight tasks".to_string(),
+                );
+            }
             tasks.insert(task_id.clone(), task.clone());
         }
 
@@ -267,8 +374,8 @@ fn generate_id() -> String {
 mod tests {
     use super::*;
     use crate::error::Result;
-    use crate::model::types::{ChatRequest, ChatResponse, Message, StopReason, Usage};
     use crate::model::Model;
+    use crate::model::types::{ChatRequest, ChatResponse, Message, StopReason, Usage};
     use crate::stream::ResponseStream;
 
     struct EchoModel;
@@ -293,12 +400,7 @@ mod tests {
     }
 
     fn test_handler() -> A2aHandler {
-        let agent = Arc::new(
-            Agent::builder()
-                .model(EchoModel)
-                .build()
-                .unwrap(),
-        );
+        let agent = Arc::new(Agent::builder().model(EchoModel).build().unwrap());
         let card = AgentCard {
             name: "TestAgent".to_string(),
             description: "Test".to_string(),
@@ -387,9 +489,133 @@ mod tests {
         let cancel_resp_str = handler.handle_request(&cancel_req.to_string()).await;
         let cancel_resp: JsonRpcResponse = serde_json::from_str(&cancel_resp_str).unwrap();
         assert!(cancel_resp.error.is_none());
-        let cancelled: A2aTask =
-            serde_json::from_value(cancel_resp.result.unwrap()).unwrap();
+        let cancelled: A2aTask = serde_json::from_value(cancel_resp.result.unwrap()).unwrap();
         assert_eq!(cancelled.status.state, TaskState::Canceled);
+    }
+
+    fn handler_with_cap(max_tasks: usize) -> A2aHandler {
+        let agent = Arc::new(Agent::builder().model(EchoModel).build().unwrap());
+        let card = AgentCard {
+            name: "TestAgent".to_string(),
+            description: "Test".to_string(),
+            version: "0.1.0".to_string(),
+            url: "http://localhost:8080".to_string(),
+            capabilities: Vec::new(),
+            authentication: None,
+            protocol_version: "0.2".to_string(),
+        };
+        A2aHandler::with_max_tasks(agent, card, max_tasks)
+    }
+
+    async fn send_task(handler: &A2aHandler, text: &str) -> String {
+        let req = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tasks/send",
+            "params": {
+                "message": {
+                    "role": "user",
+                    "parts": [{"kind": "text", "text": text}]
+                }
+            }
+        });
+        let resp_str = handler.handle_request(&req.to_string()).await;
+        let resp: JsonRpcResponse = serde_json::from_str(&resp_str).unwrap();
+        let task: A2aTask = serde_json::from_value(resp.result.unwrap()).unwrap();
+        task.id
+    }
+
+    #[tokio::test]
+    async fn test_task_store_evicts_over_cap() {
+        let handler = handler_with_cap(2);
+
+        // Each send runs the agent synchronously, so tasks are terminal
+        // (Completed) by the time they land in the store.
+        let id1 = send_task(&handler, "one").await;
+        let id2 = send_task(&handler, "two").await;
+        let id3 = send_task(&handler, "three").await;
+
+        {
+            let store = handler.tasks.lock().await;
+            assert!(store.tasks.len() <= 2, "store should be capped at 2");
+            // The oldest task must have been evicted; the two newest remain.
+            assert!(store.get(&id1).is_none());
+            assert!(store.get(&id2).is_some());
+            assert!(store.get(&id3).is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_task_send_rejected_when_full_of_nonterminal() {
+        let handler = handler_with_cap(2);
+
+        // Pre-fill the store with in-flight (Working) tasks up to capacity.
+        // These stand in for concurrent requests still awaiting their agent
+        // response, which terminal-eviction cannot reclaim.
+        {
+            let mut store = handler.tasks.lock().await;
+            for id in ["w1", "w2"] {
+                store.insert(
+                    id.to_string(),
+                    A2aTask {
+                        id: id.to_string(),
+                        context_id: None,
+                        status: TaskStatus {
+                            state: TaskState::Working,
+                            message: None,
+                        },
+                        artifacts: Vec::new(),
+                        history: Vec::new(),
+                        metadata: HashMap::new(),
+                    },
+                );
+            }
+        }
+
+        // A new send must be rejected with -32000 rather than growing the map.
+        let req = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "tasks/send",
+            "params": {
+                "message": {
+                    "role": "user",
+                    "parts": [{"kind": "text", "text": "overflow"}]
+                }
+            }
+        });
+        let resp_str = handler.handle_request(&req.to_string()).await;
+        let resp: JsonRpcResponse = serde_json::from_str(&resp_str).unwrap();
+        assert!(resp.error.is_some(), "over-capacity send must be rejected");
+        assert_eq!(resp.error.unwrap().code, -32000);
+
+        let store = handler.tasks.lock().await;
+        assert_eq!(
+            store.tasks.len(),
+            2,
+            "rejected send must not grow the store past its cap"
+        );
+    }
+
+    #[test]
+    fn test_task_store_keeps_nonterminal_over_cap() {
+        // If everything retained is non-terminal, the store must not drop an
+        // in-flight task even when over the cap.
+        let mut store = TaskStore::new(1);
+        let working = |id: &str| A2aTask {
+            id: id.to_string(),
+            context_id: None,
+            status: TaskStatus {
+                state: TaskState::Working,
+                message: None,
+            },
+            artifacts: Vec::new(),
+            history: Vec::new(),
+            metadata: HashMap::new(),
+        };
+        store.insert("a".into(), working("a"));
+        store.insert("b".into(), working("b"));
+        assert_eq!(store.tasks.len(), 2, "non-terminal tasks are never evicted");
     }
 
     #[tokio::test]

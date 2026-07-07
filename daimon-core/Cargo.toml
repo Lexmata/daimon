@@ -1,8 +1,8 @@
 [package]
 name = "daimon-core"
-version = "0.16.0"
+version = "0.17.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "Core traits and types for the Daimon AI agent framework — implement Model to add providers"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Lexmata/daimon"
@@ -10,6 +10,9 @@ homepage = "https://github.com/Lexmata/daimon"
 documentation = "https://docs.rs/daimon-core"
 keywords = ["ai", "agent", "llm", "trait", "provider"]
 categories = ["asynchronous", "api-bindings"]
+
+[package.metadata.docs.rs]
+all-features = true
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

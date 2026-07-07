@@ -39,7 +39,7 @@
 //! let result = dag.run(DagContext::new().with_input("hello")).await.unwrap();
 //! ```
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -162,9 +162,7 @@ impl DagNode for AgentDagNode {
 // ---------------------------------------------------------------------------
 
 type BoxedDagFn = Arc<
-    dyn for<'a> Fn(
-            &'a mut DagContext,
-        ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>
+    dyn for<'a> Fn(&'a mut DagContext) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>
         + Send
         + Sync,
 >;
@@ -185,9 +183,7 @@ impl FnDagNode {
     /// Creates a node from a closure returning a boxed, pinned future.
     pub fn new<F>(func: F) -> Self
     where
-        F: for<'a> Fn(
-                &'a mut DagContext,
-            ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>
+        F: for<'a> Fn(&'a mut DagContext) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>
             + Send
             + Sync
             + 'static,
@@ -311,10 +307,7 @@ impl DagBuilder {
                     "edge references unknown node '{to}'"
                 )));
             }
-            successors
-                .entry(from.clone())
-                .or_default()
-                .push(to.clone());
+            successors.entry(from.clone()).or_default().push(to.clone());
             predecessors
                 .entry(to.clone())
                 .or_default()
@@ -322,17 +315,18 @@ impl DagBuilder {
         }
 
         if !successors.contains_key(START) {
-            return Err(DaimonError::Orchestration(
-                "no edges from START".into(),
-            ));
+            return Err(DaimonError::Orchestration("no edges from START".into()));
         }
         if !predecessors.contains_key(END) {
-            return Err(DaimonError::Orchestration(
-                "no edges into END".into(),
-            ));
+            return Err(DaimonError::Orchestration("no edges into END".into()));
         }
 
-        let levels = topological_levels(&all_nodes, &successors, &predecessors)?;
+        let levels = super::toposort::topological_levels(
+            &all_nodes,
+            &successors,
+            &predecessors,
+            "cycle detected in DAG — use Graph for cyclic orchestration",
+        )?;
 
         Ok(Dag {
             nodes: self.nodes,
@@ -397,7 +391,8 @@ impl Dag {
                 }
                 let preds = self.predecessors.get(name);
                 let has_active_incoming = preds.is_some_and(|ps| {
-                    ps.iter().any(|p| active_edges.contains(&(p.clone(), name.clone())))
+                    ps.iter()
+                        .any(|p| active_edges.contains(&(p.clone(), name.clone())))
                 });
                 if has_active_incoming {
                     runnable.push(name);
@@ -413,8 +408,7 @@ impl Dag {
                 let node = self.nodes.get(name).ok_or_else(|| {
                     DaimonError::Orchestration(format!("node '{name}' not found"))
                 })?;
-                let _span =
-                    tracing::info_span!("dag_node", name = %name).entered();
+                let _span = tracing::info_span!("dag_node", name = %name).entered();
                 node.process(&mut ctx).await?;
                 self.activate_successors(name, &ctx, &mut active_edges)?;
             } else {
@@ -447,13 +441,10 @@ impl Dag {
             }
         }
 
-        let end_reached = self
-            .predecessors
-            .get(END)
-            .is_some_and(|ps| {
-                ps.iter()
-                    .any(|p| active_edges.contains(&(p.clone(), END.to_string())))
-            });
+        let end_reached = self.predecessors.get(END).is_some_and(|ps| {
+            ps.iter()
+                .any(|p| active_edges.contains(&(p.clone(), END.to_string())))
+        });
 
         if !end_reached {
             return Err(DaimonError::Orchestration(
@@ -477,8 +468,7 @@ impl Dag {
 
         if let Some(branch_fn) = self.branches.get(node) {
             let selected = branch_fn(ctx)?;
-            let selected_set: HashSet<&str> =
-                selected.iter().map(|s| s.as_str()).collect();
+            let selected_set: HashSet<&str> = selected.iter().map(|s| s.as_str()).collect();
             for succ in succs {
                 if selected_set.contains(succ.as_str()) {
                     active_edges.insert((node.to_string(), succ.clone()));
@@ -492,63 +482,6 @@ impl Dag {
 
         Ok(())
     }
-}
-
-// ---------------------------------------------------------------------------
-// Topological sort
-// ---------------------------------------------------------------------------
-
-fn topological_levels(
-    all_nodes: &HashSet<String>,
-    successors: &HashMap<String, Vec<String>>,
-    predecessors: &HashMap<String, Vec<String>>,
-) -> Result<Vec<Vec<String>>> {
-    let mut in_degree: HashMap<String, usize> = HashMap::new();
-    for node in all_nodes {
-        in_degree.insert(
-            node.clone(),
-            predecessors.get(node).map(|p| p.len()).unwrap_or(0),
-        );
-    }
-
-    let mut queue: VecDeque<String> = VecDeque::new();
-    for (node, &degree) in &in_degree {
-        if degree == 0 {
-            queue.push_back(node.clone());
-        }
-    }
-
-    let mut levels: Vec<Vec<String>> = Vec::new();
-    let mut visited = 0usize;
-
-    while !queue.is_empty() {
-        let level: Vec<String> = queue.drain(..).collect();
-        visited += level.len();
-
-        let mut next: VecDeque<String> = VecDeque::new();
-        for node in &level {
-            if let Some(succs) = successors.get(node) {
-                for succ in succs {
-                    let deg = in_degree.get_mut(succ).expect("node in in_degree map");
-                    *deg -= 1;
-                    if *deg == 0 {
-                        next.push_back(succ.clone());
-                    }
-                }
-            }
-        }
-
-        levels.push(level);
-        queue = next;
-    }
-
-    if visited != all_nodes.len() {
-        return Err(DaimonError::Orchestration(
-            "cycle detected in DAG — use Graph for cyclic orchestration".into(),
-        ));
-    }
-
-    Ok(levels)
 }
 
 // ---------------------------------------------------------------------------
@@ -696,16 +629,10 @@ mod tests {
             .build()
             .unwrap();
 
-        let result = dag
-            .run(DagContext::new().with_input("a"))
-            .await
-            .unwrap();
+        let result = dag.run(DagContext::new().with_input("a")).await.unwrap();
         assert_eq!(result.get("path"), Some(&serde_json::json!("A")));
 
-        let result = dag
-            .run(DagContext::new().with_input("b"))
-            .await
-            .unwrap();
+        let result = dag.run(DagContext::new().with_input("b")).await.unwrap();
         assert_eq!(result.get("path"), Some(&serde_json::json!("B")));
     }
 
@@ -731,7 +658,10 @@ mod tests {
 
         let result = dag.run(DagContext::new()).await.unwrap();
         assert_eq!(result.get("b_ran"), Some(&serde_json::json!(true)));
-        assert!(result.get("a_ran").is_none(), "skipped_a should not have run");
+        assert!(
+            result.get("a_ran").is_none(),
+            "skipped_a should not have run"
+        );
         assert!(
             result.get("after_a_ran").is_none(),
             "only_after_a should be skipped because its only predecessor was skipped"
@@ -812,10 +742,7 @@ mod tests {
             .run(DagContext::new().with_input("hello"))
             .await
             .unwrap();
-        assert_eq!(
-            result.get_str("output"),
-            Some("echo: hello")
-        );
+        assert_eq!(result.get_str("output"), Some("echo: hello"));
     }
 
     #[tokio::test]

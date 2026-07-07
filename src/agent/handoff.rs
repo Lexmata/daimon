@@ -135,9 +135,7 @@ impl HandoffNetwork {
                                 Ok(out) => out,
                                 Err(e) => ToolOutput::error(e.to_string()),
                             },
-                            None => {
-                                ToolOutput::error(format!("tool '{}' not found", call.name))
-                            }
+                            None => ToolOutput::error(format!("tool '{}' not found", call.name)),
                         };
                         messages.push(Message::tool_result(&call.id, &output.content));
                     }
@@ -152,11 +150,11 @@ impl HandoffNetwork {
                         )));
                     }
 
-                    if let Some(new_agent) = self.agents.get(&target) {
-                        if let Some(system) = &new_agent.system_prompt {
-                            messages.retain(|m| m.role != crate::model::types::Role::System);
-                            messages.insert(0, Message::system(system));
-                        }
+                    if let Some(new_agent) = self.agents.get(&target)
+                        && let Some(system) = &new_agent.system_prompt
+                    {
+                        messages.retain(|m| m.role != crate::model::types::Role::System);
+                        messages.insert(0, Message::system(system));
                     }
 
                     tracing::info!(
@@ -261,9 +259,9 @@ impl HandoffBuilder {
 
     /// Builds the handoff network.
     pub fn build(self) -> Result<HandoffNetwork> {
-        let entry = self
-            .entry
-            .ok_or_else(|| DaimonError::Builder("handoff network requires an entry agent".into()))?;
+        let entry = self.entry.ok_or_else(|| {
+            DaimonError::Builder("handoff network requires an entry agent".into())
+        })?;
 
         if !self.agents.contains_key(&entry) {
             return Err(DaimonError::Builder(format!(
@@ -390,10 +388,7 @@ mod tests {
                 .build()
                 .unwrap(),
         );
-        let result = HandoffNetwork::builder()
-            .entry("a")
-            .agent("a", a)
-            .build();
+        let result = HandoffNetwork::builder().entry("a").agent("a", a).build();
         assert!(result.is_err());
     }
 

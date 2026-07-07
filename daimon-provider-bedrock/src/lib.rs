@@ -251,8 +251,7 @@ impl Bedrock {
         let mut text_content = String::new();
         let mut tool_calls = Vec::new();
 
-        if let Some(aws_sdk_bedrockruntime::types::ConverseOutput::Message(msg)) = output.output()
-        {
+        if let Some(aws_sdk_bedrockruntime::types::ConverseOutput::Message(msg)) = output.output() {
             for block in msg.content() {
                 match block {
                     ContentBlock::Text(t) => text_content.push_str(t),
@@ -365,7 +364,9 @@ impl Model for Bedrock {
                 Err(e) => {
                     last_error = Some(e.to_string());
                     if is_retryable_error(e.to_string()) && attempt < self.max_retries {
-                        let delay_ms = 100 * 2u64.pow(attempt);
+                        let delay_ms = 100u64
+                            .saturating_mul(2u64.saturating_pow(attempt))
+                            .min(30_000);
                         tracing::debug!(
                             attempt = attempt + 1,
                             max_retries = self.max_retries,
@@ -443,13 +444,37 @@ impl Model for Bedrock {
         tracing::debug!("stream established, processing events");
 
         let stream = async_stream::try_stream! {
+            use std::collections::HashMap;
+
             let stream_output = &mut event_stream.stream;
+            // Maps a Converse `contentBlockIndex` to the tool_use id opened at
+            // that block. The Converse stream only carries the tool_use id once,
+            // on `ContentBlockStart`; subsequent `ContentBlockDelta` (argument
+            // fragments) and `ContentBlockStop` events correlate to their block
+            // solely via the index. Emitting an empty id here dropped every
+            // argument fragment, so tools ran with `{}`.
+            let mut index_to_id: HashMap<i32, String> = HashMap::new();
+
             while let Some(event) = stream_output.recv().await.map_err(|e| {
                 DaimonError::Model(format!("Bedrock stream error: {e}"))
             })? {
                 use aws_sdk_bedrockruntime::types::ConverseStreamOutput;
                 match event {
+                    ConverseStreamOutput::ContentBlockStart(start) => {
+                        if let Some(s) = start.start() {
+                            use aws_sdk_bedrockruntime::types::ContentBlockStart as CBS;
+                            if let CBS::ToolUse(tu) = s {
+                                let id = tu.tool_use_id().to_string();
+                                index_to_id.insert(start.content_block_index(), id.clone());
+                                yield StreamEvent::ToolCallStart {
+                                    id,
+                                    name: tu.name().to_string(),
+                                };
+                            }
+                        }
+                    }
                     ConverseStreamOutput::ContentBlockDelta(delta) => {
+                        let index = delta.content_block_index();
                         if let Some(d) = delta.delta() {
                             use aws_sdk_bedrockruntime::types::ContentBlockDelta as CBD;
                             match d {
@@ -457,8 +482,12 @@ impl Model for Bedrock {
                                     yield StreamEvent::TextDelta(t.to_string());
                                 }
                                 CBD::ToolUse(tu) => {
+                                    let id = index_to_id
+                                        .get(&index)
+                                        .cloned()
+                                        .unwrap_or_default();
                                     yield StreamEvent::ToolCallDelta {
-                                        id: String::new(),
+                                        id,
                                         arguments_delta: tu.input().to_string(),
                                     };
                                 }
@@ -466,15 +495,9 @@ impl Model for Bedrock {
                             }
                         }
                     }
-                    ConverseStreamOutput::ContentBlockStart(start) => {
-                        if let Some(s) = start.start() {
-                            use aws_sdk_bedrockruntime::types::ContentBlockStart as CBS;
-                            if let CBS::ToolUse(tu) = s {
-                                yield StreamEvent::ToolCallStart {
-                                    id: tu.tool_use_id().to_string(),
-                                    name: tu.name().to_string(),
-                                };
-                            }
+                    ConverseStreamOutput::ContentBlockStop(stop) => {
+                        if let Some(id) = index_to_id.remove(&stop.content_block_index()) {
+                            yield StreamEvent::ToolCallEnd { id };
                         }
                     }
                     ConverseStreamOutput::MessageStop(_) => {
@@ -494,8 +517,15 @@ fn json_to_document(value: &serde_json::Value) -> aws_smithy_types::Document {
         serde_json::Value::Null => aws_smithy_types::Document::Null,
         serde_json::Value::Bool(b) => aws_smithy_types::Document::Bool(*b),
         serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                aws_smithy_types::Document::Number(aws_smithy_types::Number::PosInt(i as u64))
+            // Order matters: try unsigned first (covers all non-negative
+            // values, including those above i64::MAX), then signed for
+            // negatives, then float. The previous code funneled every integer
+            // through `PosInt(i as u64)`, which reinterprets a negative i64 as a
+            // huge unsigned value — e.g. -1 became 18446744073709551615.
+            if let Some(u) = n.as_u64() {
+                aws_smithy_types::Document::Number(aws_smithy_types::Number::PosInt(u))
+            } else if let Some(i) = n.as_i64() {
+                aws_smithy_types::Document::Number(aws_smithy_types::Number::NegInt(i))
             } else if let Some(f) = n.as_f64() {
                 aws_smithy_types::Document::Number(aws_smithy_types::Number::Float(f))
             } else {
@@ -715,6 +745,44 @@ mod tests {
         let doc = json_to_document(&original);
         let back = document_to_json(&doc);
         assert_eq!(original, back);
+    }
+
+    #[test]
+    fn test_roundtrip_negative_and_zero_integers() {
+        // Regression: negative integers were corrupted by `PosInt(i as u64)`.
+        let original = serde_json::json!({
+            "neg": -1,
+            "zero": 0,
+            "big_neg": -9007199254740991i64,
+            "pos": 7,
+            "temp": -0.5,
+            "nested": [-3, 0, 5]
+        });
+        let doc = json_to_document(&original);
+        let back = document_to_json(&doc);
+        assert_eq!(original, back);
+    }
+
+    #[test]
+    fn test_negative_integer_maps_to_negint() {
+        let doc = json_to_document(&serde_json::json!(-42));
+        match doc {
+            aws_smithy_types::Document::Number(aws_smithy_types::Number::NegInt(i)) => {
+                assert_eq!(i, -42);
+            }
+            other => panic!("expected NegInt(-42), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_zero_maps_to_posint() {
+        let doc = json_to_document(&serde_json::json!(0));
+        match doc {
+            aws_smithy_types::Document::Number(aws_smithy_types::Number::PosInt(u)) => {
+                assert_eq!(u, 0);
+            }
+            other => panic!("expected PosInt(0), got {other:?}"),
+        }
     }
 
     #[test]

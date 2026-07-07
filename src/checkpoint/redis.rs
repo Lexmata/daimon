@@ -82,14 +82,15 @@ impl Checkpoint for RedisCheckpoint {
         let mut conn = self.conn().await?;
 
         let json: Option<String> = conn
-            .hget(&self.data_key(), run_id)
+            .hget(self.data_key(), run_id)
             .await
             .map_err(|e| DaimonError::Other(format!("redis checkpoint load: {e}")))?;
 
         match json {
             Some(j) => {
-                let state: CheckpointState = serde_json::from_str(&j)
-                    .map_err(|e| DaimonError::Other(format!("redis checkpoint deserialize: {e}")))?;
+                let state: CheckpointState = serde_json::from_str(&j).map_err(|e| {
+                    DaimonError::Other(format!("redis checkpoint deserialize: {e}"))
+                })?;
                 Ok(Some(state))
             }
             None => Ok(None),
@@ -102,7 +103,7 @@ impl Checkpoint for RedisCheckpoint {
         let mut conn = self.conn().await?;
 
         let keys: Vec<String> = conn
-            .hkeys(&self.data_key())
+            .hkeys(self.data_key())
             .await
             .map_err(|e| DaimonError::Other(format!("redis checkpoint list: {e}")))?;
 
@@ -136,12 +137,8 @@ mod tests {
     fn test_state_serialization_roundtrip() {
         use crate::model::types::Message;
 
-        let state = CheckpointState::new(
-            "run-redis",
-            vec![Message::user("test")],
-            3,
-        )
-        .with_metadata("model", serde_json::json!("gpt-4o"));
+        let state = CheckpointState::new("run-redis", vec![Message::user("test")], 3)
+            .with_metadata("model", serde_json::json!("gpt-4o"));
 
         let json = serde_json::to_string(&state).unwrap();
         let deser: CheckpointState = serde_json::from_str(&json).unwrap();

@@ -84,7 +84,11 @@ pub struct AgentNode {
 
 impl AgentNode {
     /// Wraps an agent as a graph node. Reads from `input_key` and writes to `output_key`.
-    pub fn new(agent: Arc<Agent>, input_key: impl Into<String>, output_key: impl Into<String>) -> Self {
+    pub fn new(
+        agent: Arc<Agent>,
+        input_key: impl Into<String>,
+        output_key: impl Into<String>,
+    ) -> Self {
         Self {
             agent,
             input_key: input_key.into(),
@@ -99,12 +103,12 @@ impl GraphNode for AgentNode {
         ctx: &'a mut GraphContext,
     ) -> Pin<Box<dyn Future<Output = Result<NodeOutcome>> + Send + 'a>> {
         Box::pin(async move {
-            let input = ctx
-                .get_str(&self.input_key)
-                .unwrap_or("")
-                .to_string();
+            let input = ctx.get_str(&self.input_key).unwrap_or("").to_string();
             let response = self.agent.prompt(&input).await?;
-            ctx.set(&self.output_key, serde_json::Value::String(response.final_text));
+            ctx.set(
+                &self.output_key,
+                serde_json::Value::String(response.final_text),
+            );
             Ok(NodeOutcome::Continue)
         })
     }
@@ -131,7 +135,8 @@ impl FnNode {
     where
         F: for<'a> Fn(
                 &'a mut GraphContext,
-            ) -> Pin<Box<dyn Future<Output = Result<NodeOutcome>> + Send + 'a>>
+            )
+                -> Pin<Box<dyn Future<Output = Result<NodeOutcome>> + Send + 'a>>
             + Send
             + Sync
             + 'static,
@@ -280,9 +285,10 @@ impl Graph {
                 )));
             }
 
-            let node = self.nodes.get(&current).ok_or_else(|| {
-                DaimonError::Orchestration(format!("node '{current}' not found"))
-            })?;
+            let node = self
+                .nodes
+                .get(&current)
+                .ok_or_else(|| DaimonError::Orchestration(format!("node '{current}' not found")))?;
 
             let _span = tracing::info_span!("graph_node", name = %current, step = steps).entered();
             let outcome = node.process(&mut ctx).await?;
@@ -307,9 +313,10 @@ impl Graph {
     }
 
     fn follow_edges(&self, from: &str, ctx: &GraphContext) -> Result<String> {
-        let edges = self.edges.get(from).ok_or_else(|| {
-            DaimonError::Orchestration(format!("no edges from node '{from}'"))
-        })?;
+        let edges = self
+            .edges
+            .get(from)
+            .ok_or_else(|| DaimonError::Orchestration(format!("no edges from node '{from}'")))?;
 
         for edge in edges {
             match &edge.condition {
@@ -345,9 +352,8 @@ impl Graph {
 
         let mut merged = ctx;
         while let Some(result) = join_set.join_next().await {
-            let branch_ctx = result
-                .map_err(|e| DaimonError::Orchestration(format!("fan-out join: {e}")))?
-                ?;
+            let branch_ctx =
+                result.map_err(|e| DaimonError::Orchestration(format!("fan-out join: {e}")))??;
             for (key, value) in branch_ctx.state {
                 merged.state.insert(key, value);
             }
@@ -397,10 +403,7 @@ mod tests {
             ctx: &'a mut GraphContext,
         ) -> Pin<Box<dyn Future<Output = Result<NodeOutcome>> + Send + 'a>> {
             Box::pin(async move {
-                let target = ctx
-                    .get_str("route_to")
-                    .unwrap_or("default")
-                    .to_string();
+                let target = ctx.get_str("route_to").unwrap_or("default").to_string();
                 Ok(NodeOutcome::Route(target))
             })
         }
@@ -409,10 +412,13 @@ mod tests {
     #[tokio::test]
     async fn test_graph_simple_linear() {
         let graph = Graph::builder()
-            .node("start", SetValueNode {
-                key: "x".into(),
-                value: serde_json::json!(1),
-            })
+            .node(
+                "start",
+                SetValueNode {
+                    key: "x".into(),
+                    value: serde_json::json!(1),
+                },
+            )
             .node("end", DoneNode)
             .edge("start", "end")
             .build()
@@ -425,18 +431,27 @@ mod tests {
     #[tokio::test]
     async fn test_graph_conditional_routing() {
         let graph = Graph::builder()
-            .node("check", SetValueNode {
-                key: "checked".into(),
-                value: serde_json::json!(true),
-            })
-            .node("branch_a", SetValueNode {
-                key: "branch".into(),
-                value: serde_json::json!("a"),
-            })
-            .node("branch_b", SetValueNode {
-                key: "branch".into(),
-                value: serde_json::json!("b"),
-            })
+            .node(
+                "check",
+                SetValueNode {
+                    key: "checked".into(),
+                    value: serde_json::json!(true),
+                },
+            )
+            .node(
+                "branch_a",
+                SetValueNode {
+                    key: "branch".into(),
+                    value: serde_json::json!("a"),
+                },
+            )
+            .node(
+                "branch_b",
+                SetValueNode {
+                    key: "branch".into(),
+                    value: serde_json::json!("b"),
+                },
+            )
             .node("end", DoneNode)
             .conditional_edge("check", "branch_a", |ctx| {
                 ctx.get_str("input").unwrap_or("") == "go_a"
@@ -515,14 +530,20 @@ mod tests {
 
         let graph = Graph::builder()
             .node("start", FanOutNode)
-            .node("a", SetValueNode {
-                key: "from_a".into(),
-                value: serde_json::json!(true),
-            })
-            .node("b", SetValueNode {
-                key: "from_b".into(),
-                value: serde_json::json!(true),
-            })
+            .node(
+                "a",
+                SetValueNode {
+                    key: "from_a".into(),
+                    value: serde_json::json!(true),
+                },
+            )
+            .node(
+                "b",
+                SetValueNode {
+                    key: "from_b".into(),
+                    value: serde_json::json!(true),
+                },
+            )
             .node("merge", DoneNode)
             .build()
             .unwrap();
@@ -542,10 +563,7 @@ mod tests {
                 ctx: &'a mut GraphContext,
             ) -> Pin<Box<dyn Future<Output = Result<NodeOutcome>> + Send + 'a>> {
                 Box::pin(async move {
-                    let count = ctx
-                        .get("count")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
+                    let count = ctx.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
                     ctx.set("count", serde_json::json!(count + 1));
                     Ok(NodeOutcome::Continue)
                 })

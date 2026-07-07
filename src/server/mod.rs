@@ -121,16 +121,36 @@ fn check_api_key(
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-        .or_else(|| {
-            headers
-                .get("x-api-key")
-                .and_then(|v| v.to_str().ok())
-        });
+        .or_else(|| headers.get("x-api-key").and_then(|v| v.to_str().ok()));
 
     match provided {
-        Some(key) if key == expected.as_str() => Ok(()),
-        _ => Err((StatusCode::UNAUTHORIZED, "invalid or missing API key".to_string())),
+        Some(key) if constant_time_eq(key.as_bytes(), expected.as_bytes()) => Ok(()),
+        _ => Err((
+            StatusCode::UNAUTHORIZED,
+            "invalid or missing API key".to_string(),
+        )),
     }
+}
+
+/// Compares two byte slices in constant time relative to their contents.
+///
+/// A naive `==` on the API key short-circuits at the first differing byte,
+/// leaking — via response timing — how many leading bytes a guess got right and
+/// letting an attacker recover the key byte-by-byte. This comparison always
+/// inspects every byte of `expected` and folds the result together with a
+/// bitwise OR so the running time depends only on the lengths, not on where the
+/// first mismatch is.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    // A length mismatch is already observable and not secret-dependent per
+    // byte, so returning early here is fine.
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 async fn health() -> &'static str {
@@ -176,10 +196,89 @@ async fn prompt_stream_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let sse_stream = stream.map(|event| {
-        let event = event.map_err(|e| axum::Error::new(e))?;
+        let event = event.map_err(axum::Error::new)?;
         let data = serde_json::to_string(&format!("{event:?}")).unwrap_or_default();
         Ok(Event::default().data(data))
     });
 
     Ok(Sse::new(sse_stream))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Model;
+    use crate::model::types::{ChatRequest, ChatResponse, Message, StopReason, Usage};
+    use crate::stream::ResponseStream;
+
+    struct EchoModel;
+
+    impl Model for EchoModel {
+        async fn generate(&self, _request: &ChatRequest) -> Result<ChatResponse> {
+            Ok(ChatResponse {
+                message: Message::assistant("ok"),
+                stop_reason: StopReason::EndTurn,
+                usage: Some(Usage::default()),
+            })
+        }
+
+        async fn generate_stream(&self, _request: &ChatRequest) -> Result<ResponseStream> {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+    }
+
+    fn state_with_key(key: Option<&str>) -> AppState {
+        AppState {
+            agent: Agent::builder().model(EchoModel).build().unwrap(),
+            api_key: key.map(|k| k.to_string()),
+        }
+    }
+
+    #[test]
+    fn test_constant_time_eq() {
+        assert!(constant_time_eq(b"secret", b"secret"));
+        assert!(!constant_time_eq(b"secret", b"secreT"));
+        assert!(!constant_time_eq(b"secret", b"secret-longer"));
+        assert!(!constant_time_eq(b"", b"x"));
+        assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn test_no_key_configured_allows_all() {
+        let state = state_with_key(None);
+        let headers = HeaderMap::new();
+        assert!(check_api_key(&state, &headers).is_ok());
+    }
+
+    #[test]
+    fn test_correct_bearer_key_accepted() {
+        let state = state_with_key(Some("s3cr3t"));
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer s3cr3t".parse().unwrap());
+        assert!(check_api_key(&state, &headers).is_ok());
+    }
+
+    #[test]
+    fn test_correct_x_api_key_accepted() {
+        let state = state_with_key(Some("s3cr3t"));
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", "s3cr3t".parse().unwrap());
+        assert!(check_api_key(&state, &headers).is_ok());
+    }
+
+    #[test]
+    fn test_wrong_key_rejected() {
+        let state = state_with_key(Some("s3cr3t"));
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer wrong".parse().unwrap());
+        let err = check_api_key(&state, &headers).unwrap_err();
+        assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn test_missing_key_rejected() {
+        let state = state_with_key(Some("s3cr3t"));
+        let headers = HeaderMap::new();
+        assert!(check_api_key(&state, &headers).is_err());
+    }
 }

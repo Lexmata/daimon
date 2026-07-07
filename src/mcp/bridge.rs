@@ -111,10 +111,7 @@ mod tests {
             description: Some("Reads a file".into()),
             input_schema: serde_json::json!({"type": "object"}),
         };
-        let bridge = McpToolBridge::new(
-            Arc::new(NullTransport),
-            info,
-        );
+        let bridge = McpToolBridge::new(Arc::new(NullTransport), info);
         assert_eq!(bridge.name(), "read_file");
         assert_eq!(bridge.description(), "Reads a file");
     }
@@ -127,7 +124,10 @@ mod tests {
             input_schema: serde_json::Value::Null,
         };
         let bridge = McpToolBridge::new(Arc::new(NullTransport), info);
-        assert_eq!(bridge.parameters_schema(), serde_json::json!({"type": "object"}));
+        assert_eq!(
+            bridge.parameters_schema(),
+            serde_json::json!({"type": "object"})
+        );
     }
 
     #[test]
@@ -148,11 +148,13 @@ mod tests {
             &'a self,
             _request: &'a crate::mcp::protocol::JsonRpcRequest,
         ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<crate::mcp::protocol::JsonRpcResponse>> + Send + 'a>,
+            Box<
+                dyn std::future::Future<Output = Result<crate::mcp::protocol::JsonRpcResponse>>
+                    + Send
+                    + 'a,
+            >,
         > {
-            Box::pin(async {
-                Err(DaimonError::Mcp("null transport".into()))
-            })
+            Box::pin(async { Err(DaimonError::Mcp("null transport".into())) })
         }
 
         fn notify<'a>(

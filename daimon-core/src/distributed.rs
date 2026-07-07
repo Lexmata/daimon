@@ -106,7 +106,11 @@ pub trait TaskBroker: Send + Sync {
     fn receive(&self) -> impl Future<Output = Result<Option<AgentTask>>> + Send;
 
     /// Marks a task as completed with the given result.
-    fn complete(&self, task_id: &str, result: TaskResult) -> impl Future<Output = Result<()>> + Send;
+    fn complete(
+        &self,
+        task_id: &str,
+        result: TaskResult,
+    ) -> impl Future<Output = Result<()>> + Send;
 
     /// Marks a task as failed with an error message.
     fn fail(&self, task_id: &str, error: String) -> impl Future<Output = Result<()>> + Send;
@@ -124,7 +128,9 @@ pub trait ErasedTaskBroker: Send + Sync {
         task_id: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<TaskStatus>> + Send + 'a>>;
 
-    fn receive_erased(&self) -> Pin<Box<dyn Future<Output = Result<Option<AgentTask>>> + Send + '_>>;
+    fn receive_erased(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<AgentTask>>> + Send + '_>>;
 
     fn complete_erased<'a>(
         &'a self,
@@ -154,7 +160,9 @@ impl<T: TaskBroker> ErasedTaskBroker for T {
         Box::pin(self.status(task_id))
     }
 
-    fn receive_erased(&self) -> Pin<Box<dyn Future<Output = Result<Option<AgentTask>>> + Send + '_>> {
+    fn receive_erased(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<AgentTask>>> + Send + '_>> {
         Box::pin(self.receive())
     }
 

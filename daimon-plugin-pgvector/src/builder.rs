@@ -1,12 +1,12 @@
 //! Builder for [`PgVectorStore`].
 
-use deadpool_postgres::{Config, Pool, Runtime};
 use daimon_core::{DaimonError, Result};
+use deadpool_postgres::{Config, Pool, Runtime};
 use tokio_postgres::NoTls;
 
+use crate::DistanceMetric;
 use crate::migrations;
 use crate::store::PgVectorStore;
-use crate::DistanceMetric;
 
 /// Builds a [`PgVectorStore`] with connection pooling and optional auto-migration.
 ///
@@ -99,6 +99,14 @@ impl PgVectorStoreBuilder {
 
     /// Builds the [`PgVectorStore`], optionally running migrations.
     pub async fn build(self) -> Result<PgVectorStore> {
+        // Validate the table name *before* it is ever interpolated into SQL.
+        // PostgreSQL cannot bind identifiers as parameters, so the table name
+        // is formatted directly into every statement in `store.rs` and
+        // `migrations.rs`. An unvalidated name like `foo; DROP TABLE bar; --`
+        // would be a straightforward SQL injection. We only accept plain or
+        // schema-qualified identifiers matching `[A-Za-z_][A-Za-z0-9_]*`.
+        validate_table_name(&self.table)?;
+
         let pool = self.create_pool()?;
 
         if self.auto_migrate {
@@ -113,6 +121,8 @@ impl PgVectorStoreBuilder {
         })
     }
 
+    // (validation lives in the free `validate_table_name` fn below)
+
     fn create_pool(&self) -> Result<Pool> {
         let mut cfg = Config::new();
         cfg.url = Some(self.connection_string.clone());
@@ -126,9 +136,10 @@ impl PgVectorStoreBuilder {
     }
 
     async fn run_migrations(&self, pool: &Pool) -> Result<()> {
-        let client = pool.get().await.map_err(|e| {
-            DaimonError::Other(format!("pgvector migration pool error: {e}"))
-        })?;
+        let client = pool
+            .get()
+            .await
+            .map_err(|e| DaimonError::Other(format!("pgvector migration pool error: {e}")))?;
 
         tracing::info!("pgvector: creating extension and table '{}'", self.table);
 
@@ -157,5 +168,67 @@ impl PgVectorStoreBuilder {
 
         tracing::info!("pgvector: migration complete for '{}'", self.table);
         Ok(())
+    }
+}
+
+/// Validates a (possibly schema-qualified) PostgreSQL table identifier.
+///
+/// Accepts a single identifier (`embeddings`) or a schema-qualified one
+/// (`public.embeddings`) where every dot-separated part matches
+/// `^[A-Za-z_][A-Za-z0-9_]*$`. Rejects anything containing quotes, whitespace,
+/// semicolons, or other punctuation that could break out of the identifier
+/// position in a formatted SQL statement.
+fn validate_table_name(table: &str) -> Result<()> {
+    fn is_valid_part(part: &str) -> bool {
+        let mut chars = part.chars();
+        match chars.next() {
+            Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+            _ => return false,
+        }
+        chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    }
+
+    if table.is_empty() {
+        return Err(DaimonError::Other(
+            "pgvector: table name must not be empty".to_string(),
+        ));
+    }
+
+    let parts: Vec<&str> = table.split('.').collect();
+    if parts.len() > 2 || !parts.iter().all(|p| is_valid_part(p)) {
+        return Err(DaimonError::Other(format!(
+            "pgvector: invalid table name '{table}': expected an identifier matching \
+             [A-Za-z_][A-Za-z0-9_]* (optionally schema-qualified as schema.table)"
+        )));
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_valid_table_names() {
+        assert!(validate_table_name("embeddings").is_ok());
+        assert!(validate_table_name("daimon_vectors").is_ok());
+        assert!(validate_table_name("_private").is_ok());
+        assert!(validate_table_name("Table123").is_ok());
+        assert!(validate_table_name("public.embeddings").is_ok());
+    }
+
+    #[test]
+    fn test_invalid_table_names_rejected() {
+        assert!(validate_table_name("").is_err());
+        assert!(validate_table_name("foo; DROP TABLE bar").is_err());
+        assert!(validate_table_name("foo; DROP TABLE bar; --").is_err());
+        assert!(validate_table_name("\"foo\"").is_err());
+        assert!(validate_table_name("foo bar").is_err());
+        assert!(validate_table_name("1foo").is_err());
+        assert!(validate_table_name("foo.bar.baz").is_err());
+        assert!(validate_table_name("foo'").is_err());
+        assert!(validate_table_name("foo)").is_err());
+        assert!(validate_table_name("schema..table").is_err());
     }
 }

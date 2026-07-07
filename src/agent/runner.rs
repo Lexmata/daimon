@@ -4,11 +4,13 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 use crate::agent::Agent;
+use crate::cost::CostTracker;
 use crate::error::{DaimonError, Result};
+use crate::guardrails::{ErasedOutputGuardrail, GuardrailResult};
 use crate::hooks::AgentState;
 use crate::model::types::{ChatRequest, ChatResponse, Message, Usage};
 use crate::stream::ResponseStream;
-use crate::tool::{ToolRetryPolicy, ErasedTool};
+use crate::tool::{ErasedTool, ToolRetryPolicy};
 
 /// Executes a tool with optional retry policy.
 async fn execute_tool_with_retry(
@@ -86,6 +88,85 @@ impl AgentResponse {
     }
 }
 
+/// Outcome of a single ReAct iteration ([`Agent::run_iteration`]).
+pub(crate) enum StepOutcome {
+    /// The loop should stop with this text — either the model produced a final
+    /// answer or middleware short-circuited with a replacement response. Both
+    /// terminate the loop identically (final message already pushed).
+    Final(String),
+    /// Tool calls were executed and appended; the loop should continue.
+    Continue,
+}
+
+/// Cross-cutting budget check shared by the non-streaming ([`Agent::run_iteration`])
+/// and streaming ([`Agent::prompt_stream`]) ReAct loops.
+///
+/// Returns `Some((spent, limit))` when a tracker and a limit are both present
+/// and the tracker's cumulative cost has reached or exceeded the limit;
+/// otherwise `None` (no tracker, no limit, or still under budget). Keeping this
+/// in one place means a change to budget semantics can't silently drift between
+/// the two loops — the exact divergence this branch closes.
+fn budget_exceeded(tracker: Option<&CostTracker>, limit: Option<f64>) -> Option<(f64, f64)> {
+    match (tracker, limit) {
+        (Some(tracker), Some(limit)) => {
+            let spent = tracker.cumulative_cost();
+            (spent >= limit).then_some((spent, limit))
+        }
+        _ => None,
+    }
+}
+
+/// Outcome of folding the output-guardrail sequence over a candidate text.
+pub(crate) enum GuardrailDecision {
+    /// No guardrail altered or rejected the text.
+    Pass,
+    /// A guardrail rejected the text; carries the block message.
+    Block(String),
+    /// One or more guardrails rewrote the text; carries the final rewrite.
+    Transform(String),
+}
+
+/// Folds an output-guardrail sequence over `text`, short-circuiting on the
+/// first `Block`. Each guard sees the text as rewritten by the guards before it
+/// (matching the historical in-place fold in both loops).
+///
+/// This is the single source of truth for output-guardrail semantics. Both the
+/// non-streaming [`Agent::run_output_guardrails`] (via
+/// [`Agent::evaluate_output_guardrails`]) and the streaming loop route through
+/// it, so the two paths can never diverge. It is a free function rather than a
+/// `&self` method because the streaming loop moves cloned guardrail handles into
+/// a `'static` stream and cannot borrow `self`.
+async fn evaluate_output_guardrails_over(
+    guardrails: &[std::sync::Arc<dyn ErasedOutputGuardrail>],
+    text: &str,
+    usage: &Usage,
+) -> Result<GuardrailDecision> {
+    let mut current = text.to_string();
+    let mut transformed = false;
+    for guard in guardrails {
+        let chat_resp = ChatResponse {
+            message: Message::assistant(&current),
+            stop_reason: crate::model::types::StopReason::EndTurn,
+            usage: Some(usage.clone()),
+        };
+        match guard.check_erased(&chat_resp).await? {
+            GuardrailResult::Pass => {}
+            GuardrailResult::Block(msg) => {
+                return Ok(GuardrailDecision::Block(msg));
+            }
+            GuardrailResult::Transform(new_text) => {
+                current = new_text;
+                transformed = true;
+            }
+        }
+    }
+    Ok(if transformed {
+        GuardrailDecision::Transform(current)
+    } else {
+        GuardrailDecision::Pass
+    })
+}
+
 impl Agent {
     /// Send a text prompt to the agent and get a complete response.
     ///
@@ -126,6 +207,7 @@ impl Agent {
         input: &str,
         cancel: &CancellationToken,
     ) -> Result<AgentResponse> {
+        let actual_input = self.run_input_guardrails(input).await?;
         let history = self.memory.get_messages_erased().await?;
 
         let mut messages = Vec::new();
@@ -133,11 +215,15 @@ impl Agent {
             messages.push(Message::system(system));
         }
         messages.extend(history);
-        messages.push(Message::user(input));
+        messages.push(Message::user(&actual_input));
 
-        self.memory.add_message_erased(Message::user(input)).await?;
+        self.memory
+            .add_message_erased(Message::user(&actual_input))
+            .await?;
 
-        self.run_react_loop(messages, cancel).await
+        let mut response = self.run_react_loop(messages, cancel).await?;
+        self.run_output_guardrails(&mut response).await?;
+        Ok(response)
     }
 
     /// Send pre-built messages to the agent and get a complete response.
@@ -146,23 +232,38 @@ impl Agent {
     /// full message history yourself. Useful for advanced scenarios like
     /// replaying conversations or injecting custom context.
     #[tracing::instrument(skip_all, fields(message_count = messages.len()))]
-    pub async fn prompt_with_messages(&self, messages: Vec<Message>) -> Result<AgentResponse> {
-        self.run_react_loop(messages, &CancellationToken::new())
-            .await
+    pub async fn prompt_with_messages(&self, mut messages: Vec<Message>) -> Result<AgentResponse> {
+        // Apply input guardrails to the final user message, if any, so this
+        // entry point enforces the same policy as `prompt`.
+        if let Some(last_user) = messages
+            .iter_mut()
+            .rev()
+            .find(|m| m.role == crate::model::types::Role::User)
+            && let Some(content) = &last_user.content
+        {
+            let checked = self.run_input_guardrails(content).await?;
+            last_user.content = Some(checked);
+        }
+
+        let mut response = self
+            .run_react_loop(messages, &CancellationToken::new())
+            .await?;
+        self.run_output_guardrails(&mut response).await?;
+        Ok(response)
     }
 
-    /// Core ReAct loop shared by all prompt methods.
+    /// Core ReAct loop shared by all non-streaming prompt methods.
     ///
-    /// Uses `std::mem::take` to move messages and tool specs in and out of
-    /// each `ChatRequest` without cloning, then moves them back after the
-    /// model call completes.
+    /// Delegates each iteration to [`Agent::run_iteration`] so that budget
+    /// enforcement, middleware, hooks, cost tracking, and memory persistence
+    /// stay identical across `prompt`, `prompt_with_cancellation`,
+    /// `prompt_with_messages`, `prompt_resumable*`, and `replay`. The resumable
+    /// variant wraps the same helper with per-iteration checkpoint saves.
     pub(crate) async fn run_react_loop(
         &self,
         mut messages: Vec<Message>,
         cancel: &CancellationToken,
     ) -> Result<AgentResponse> {
-        use crate::middleware::MiddlewareAction;
-
         let mut tool_specs_vec: Vec<crate::model::types::ToolSpec> =
             self.tools.tool_specs().to_vec();
         let mut iteration = 0;
@@ -174,77 +275,20 @@ impl Agent {
         }
 
         loop {
-            if cancel.is_cancelled() {
-                return Err(DaimonError::Cancelled);
-            }
-
-            if let (Some(tracker), Some(limit)) = (&self.cost_tracker, self.max_budget) {
-                let spent = tracker.cumulative_cost();
-                if spent >= limit {
-                    return Err(DaimonError::BudgetExceeded { spent, limit });
-                }
-            }
-
             iteration += 1;
-            let state = AgentState {
-                iteration,
-                max_iterations: self.max_iterations,
-            };
+            let outcome = self
+                .run_iteration(
+                    iteration,
+                    &mut messages,
+                    &mut tool_specs_vec,
+                    &mut total_usage,
+                    &mut total_cost,
+                    cancel,
+                )
+                .await?;
 
-            self.hooks.on_iteration_start_erased(&state).await?;
-
-            let mut request = ChatRequest {
-                messages: std::mem::take(&mut messages),
-                tools: std::mem::take(&mut tool_specs_vec),
-                temperature: self.temperature,
-                max_tokens: self.max_tokens,
-            };
-
-            match self.middleware.run_on_request(&mut request).await? {
-                MiddlewareAction::ShortCircuit(resp) => {
-                    let mut msgs = std::mem::take(&mut request.messages);
-                    let final_text = resp.text().to_string();
-                    msgs.push(resp.message);
-                    return Ok(AgentResponse {
-                        messages: msgs,
-                        final_text,
-                        iterations: iteration,
-                        usage: total_usage,
-                        cost: total_cost,
-                    });
-                }
-                MiddlewareAction::Continue => {}
-            }
-
-            let result = {
-                tracing::debug!(iteration, "calling model");
-                self.model
-                    .generate_erased(&request)
-                    .instrument(tracing::info_span!("model_generate", iteration))
-                    .await
-            };
-
-            messages = std::mem::take(&mut request.messages);
-            tool_specs_vec = std::mem::take(&mut request.tools);
-
-            let mut response = result?;
-
-            if let Some(ref usage) = response.usage {
-                tracing::debug!(
-                    input_tokens = usage.input_tokens,
-                    output_tokens = usage.output_tokens,
-                    "model usage"
-                );
-                total_usage.accumulate(usage);
-                if let Some(ref tracker) = self.cost_tracker {
-                    total_cost += tracker.record("default", usage);
-                }
-            }
-
-            match self.middleware.run_on_response(&mut response).await? {
-                MiddlewareAction::ShortCircuit(replaced) => {
-                    let final_text = replaced.text().to_string();
-                    messages.push(replaced.message);
+            match outcome {
+                StepOutcome::Final(final_text) => {
                     return Ok(AgentResponse {
                         messages,
                         final_text,
@@ -253,48 +297,142 @@ impl Agent {
                         cost: total_cost,
                     });
                 }
-                MiddlewareAction::Continue => {}
-            }
-
-            self.hooks.on_model_response_erased(&response).await?;
-
-            if response.has_tool_calls() {
-                let tool_calls = std::mem::take(&mut response.message.tool_calls);
-                let assistant_msg = Message::assistant_with_tool_calls(tool_calls.clone());
-                self.memory.add_message_erased(assistant_msg.clone()).await?;
-                messages.push(assistant_msg);
-
-                let tool_results = self.execute_tools_parallel(&tool_calls).await;
-
-                for (call, tool_result) in tool_calls.iter().zip(tool_results) {
-                    let result_msg = Message::tool_result(&call.id, &tool_result.content);
-                    self.memory.add_message_erased(result_msg.clone()).await?;
-                    messages.push(result_msg);
+                StepOutcome::Continue => {
+                    if iteration >= self.max_iterations {
+                        return Err(DaimonError::MaxIterations(self.max_iterations));
+                    }
                 }
-
-                self.hooks.on_iteration_end_erased(&state).await?;
-
-                if iteration >= self.max_iterations {
-                    return Err(DaimonError::MaxIterations(self.max_iterations));
-                }
-
-                continue;
             }
+        }
+    }
 
-            let final_text = response.text().to_string();
-            self.memory.add_message_erased(response.message.clone()).await?;
-            messages.push(response.message);
+    /// Runs a single ReAct iteration: budget check → middleware → model call →
+    /// usage/cost accounting → tool execution (or final response). Appends all
+    /// produced messages to both `messages` (the working request log) and the
+    /// agent's memory, exactly once, so every caller shares identical
+    /// cross-cutting behavior.
+    ///
+    /// `iteration` is 1-based and already incremented by the caller. The caller
+    /// is responsible for the `max_iterations` guard after a
+    /// [`StepOutcome::Continue`] and for any checkpointing.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn run_iteration(
+        &self,
+        iteration: usize,
+        messages: &mut Vec<Message>,
+        tool_specs_vec: &mut Vec<crate::model::types::ToolSpec>,
+        total_usage: &mut Usage,
+        total_cost: &mut f64,
+        cancel: &CancellationToken,
+    ) -> Result<StepOutcome> {
+        use crate::middleware::MiddlewareAction;
+
+        if cancel.is_cancelled() {
+            return Err(DaimonError::Cancelled);
+        }
+
+        if let Some((spent, limit)) = budget_exceeded(self.cost_tracker.as_ref(), self.max_budget) {
+            return Err(DaimonError::BudgetExceeded { spent, limit });
+        }
+
+        let state = AgentState {
+            iteration,
+            max_iterations: self.max_iterations,
+        };
+
+        self.hooks.on_iteration_start_erased(&state).await?;
+
+        let mut request = ChatRequest {
+            messages: std::mem::take(messages),
+            tools: std::mem::take(tool_specs_vec),
+            temperature: self.temperature,
+            max_tokens: self.max_tokens,
+        };
+
+        match self.middleware.run_on_request(&mut request).await? {
+            MiddlewareAction::ShortCircuit(resp) => {
+                *messages = std::mem::take(&mut request.messages);
+                *tool_specs_vec = std::mem::take(&mut request.tools);
+                let final_text = resp.text().to_string();
+                messages.push(resp.message);
+                // Middleware short-circuit terminates the loop like a final answer.
+                return Ok(StepOutcome::Final(final_text));
+            }
+            MiddlewareAction::Continue => {}
+        }
+
+        let result = {
+            tracing::debug!(iteration, "calling model");
+            self.model
+                .generate_erased(&request)
+                .instrument(tracing::info_span!("model_generate", iteration))
+                .await
+        };
+
+        *messages = std::mem::take(&mut request.messages);
+        *tool_specs_vec = std::mem::take(&mut request.tools);
+
+        let mut response = result?;
+
+        if let Some(ref usage) = response.usage {
+            tracing::debug!(
+                input_tokens = usage.input_tokens,
+                output_tokens = usage.output_tokens,
+                "model usage"
+            );
+            total_usage.accumulate(usage);
+            if let Some(ref tracker) = self.cost_tracker {
+                *total_cost += tracker.record("default", usage);
+            }
+        }
+
+        match self.middleware.run_on_response(&mut response).await? {
+            MiddlewareAction::ShortCircuit(replaced) => {
+                let final_text = replaced.text().to_string();
+                messages.push(replaced.message);
+                // Middleware short-circuit terminates the loop like a final answer.
+                return Ok(StepOutcome::Final(final_text));
+            }
+            MiddlewareAction::Continue => {}
+        }
+
+        self.hooks.on_model_response_erased(&response).await?;
+
+        if response.has_tool_calls() {
+            let tool_calls = std::mem::take(&mut response.message.tool_calls);
+            // Preserve any assistant text emitted alongside the tool calls.
+            let assistant_msg = match response.message.content.take() {
+                Some(text) if !text.is_empty() => {
+                    Message::assistant_with_text_and_tool_calls(text, tool_calls.clone())
+                }
+                _ => Message::assistant_with_tool_calls(tool_calls.clone()),
+            };
+            self.memory
+                .add_message_erased(assistant_msg.clone())
+                .await?;
+            messages.push(assistant_msg);
+
+            let tool_results = self.execute_tools_parallel(&tool_calls).await;
+
+            for (call, tool_result) in tool_calls.iter().zip(tool_results) {
+                let result_msg = Message::tool_result(&call.id, &tool_result.content);
+                self.memory.add_message_erased(result_msg.clone()).await?;
+                messages.push(result_msg);
+            }
 
             self.hooks.on_iteration_end_erased(&state).await?;
-
-            return Ok(AgentResponse {
-                messages,
-                final_text,
-                iterations: iteration,
-                usage: total_usage,
-                cost: total_cost,
-            });
+            return Ok(StepOutcome::Continue);
         }
+
+        let final_text = response.text().to_string();
+        self.memory
+            .add_message_erased(response.message.clone())
+            .await?;
+        messages.push(response.message);
+
+        self.hooks.on_iteration_end_erased(&state).await?;
+
+        Ok(StepOutcome::Final(final_text))
     }
 
     /// Execute multiple tool calls concurrently with `tokio::spawn`.
@@ -335,27 +473,29 @@ impl Agent {
 
             self.hooks.on_tool_call_erased(&call_mut).await.ok();
 
-            if validate {
-                if let Some(errors) = self.tools.validate_input(&call_mut.name, &call_mut.arguments) {
-                    tracing::warn!(
-                        tool = %call_mut.name,
-                        id = %call_mut.id,
-                        "tool input schema validation failed: {errors}"
-                    );
-                    let output = crate::tool::ToolOutput::error(format!(
-                        "Invalid arguments for tool '{}': {errors}",
-                        call_mut.name
-                    ));
-                    let err = DaimonError::SchemaValidation {
-                        tool: call_mut.name.clone(),
-                        errors: errors.clone(),
-                    };
-                    self.hooks.on_error_erased(&err).await.ok();
-                    order.push(idx);
-                    let idx_copy = idx;
-                    join_set.spawn(async move { (idx_copy, output) });
-                    continue;
-                }
+            if validate
+                && let Some(errors) = self
+                    .tools
+                    .validate_input(&call_mut.name, &call_mut.arguments)
+            {
+                tracing::warn!(
+                    tool = %call_mut.name,
+                    id = %call_mut.id,
+                    "tool input schema validation failed: {errors}"
+                );
+                let output = crate::tool::ToolOutput::error(format!(
+                    "Invalid arguments for tool '{}': {errors}",
+                    call_mut.name
+                ));
+                let err = DaimonError::SchemaValidation {
+                    tool: call_mut.name.clone(),
+                    errors: errors.clone(),
+                };
+                self.hooks.on_error_erased(&err).await.ok();
+                order.push(idx);
+                let idx_copy = idx;
+                join_set.spawn(async move { (idx_copy, output) });
+                continue;
             }
 
             let tool_opt = self.tools.get(&call_mut.name).cloned();
@@ -377,8 +517,12 @@ impl Agent {
                 async move {
                     let result = match tool_opt {
                         Some(tool) => {
-                            execute_tool_with_retry(&tool, &call_mut.arguments, effective_policy.as_ref())
-                                .await
+                            execute_tool_with_retry(
+                                &tool,
+                                &call_mut.arguments,
+                                effective_policy.as_ref(),
+                            )
+                            .await
                         }
                         None => crate::tool::ToolOutput::error(format!(
                             "tool '{}' not found",
@@ -418,15 +562,27 @@ impl Agent {
     /// Start a streaming response from the agent.
     ///
     /// Returns a [`ResponseStream`] that emits [`StreamEvent`](crate::stream::StreamEvent)s as the model
-    /// generates its response. The stream runs the full ReAct loop:
-    /// tool call deltas are accumulated and when complete, tools are executed
-    /// and the model is re-invoked, all within the same stream.
+    /// generates its response. The stream runs the full ReAct loop: tool-call
+    /// deltas are accumulated, tools are executed (with the agent's retry
+    /// policy), and the model is re-invoked, all within the same stream.
+    ///
+    /// Like [`Agent::prompt`], the streaming loop persists every assistant and
+    /// tool message to the agent's [`memory`](Agent::memory), fires lifecycle
+    /// [`hooks`](crate::hooks), enforces `max_budget`, and applies input/output
+    /// guardrails. Two differences from the non-streaming path are inherent to
+    /// streaming: usage/cost is *estimated* from character counts (providers do
+    /// not report exact token counts mid-stream), and output guardrails act on
+    /// the message persisted to memory — text deltas are emitted live and
+    /// cannot be retracted, so a `Block` verdict surfaces as a
+    /// [`StreamEvent::Error`](crate::stream::StreamEvent::Error) rather than suppressing already-sent tokens.
     #[tracing::instrument(skip_all, fields(input_len = input.len()))]
     pub async fn prompt_stream(&self, input: &str) -> Result<ResponseStream> {
+        use crate::hooks::AgentState;
         use crate::stream::StreamEvent;
         use futures::StreamExt;
         use std::collections::HashMap;
 
+        let actual_input = self.run_input_guardrails(input).await?;
         let history = self.memory.get_messages_erased().await?;
 
         let mut messages = Vec::new();
@@ -434,10 +590,10 @@ impl Agent {
             messages.push(Message::system(system));
         }
         messages.extend(history);
-        messages.push(Message::user(input));
+        messages.push(Message::user(&actual_input));
 
         self.memory
-            .add_message_erased(Message::user(input))
+            .add_message_erased(Message::user(&actual_input))
             .await?;
 
         let mut tool_specs_vec: Vec<crate::model::types::ToolSpec> =
@@ -446,13 +602,21 @@ impl Agent {
 
         let model = self.model.clone();
         let tools = self.tools.clone();
+        let memory = self.memory.clone();
+        let hooks = self.hooks.clone();
+        let output_guardrails = self.output_guardrails.clone();
+        let agent_retry_policy = self.tool_retry_policy.clone();
         let temperature = self.temperature;
         let max_tokens = self.max_tokens;
         let validate = self.validate_tool_inputs;
+        let max_budget = self.max_budget;
+        // Budget is enforced per prompt call (the non-streaming loop resets its
+        // tracker each call), so a fresh per-stream tracker seeded from the same
+        // cost model correctly bounds spend across this stream's iterations.
         let cost_tracker = self.cost_tracker.as_ref().map(|t| {
-            std::sync::Arc::new(crate::cost::CostTracker::new(
-                std::sync::Arc::clone(&t.cost_model),
-            ))
+            std::sync::Arc::new(crate::cost::CostTracker::new(std::sync::Arc::clone(
+                &t.cost_model,
+            )))
         });
 
         let out_stream = async_stream::try_stream! {
@@ -465,6 +629,19 @@ impl Agent {
                     yield StreamEvent::Done;
                     break;
                 }
+
+                if let Some((spent, limit)) =
+                    budget_exceeded(cost_tracker.as_deref(), max_budget)
+                {
+                    yield StreamEvent::Error(format!(
+                        "budget exceeded: spent ${spent:.4} of ${limit:.4}"
+                    ));
+                    yield StreamEvent::Done;
+                    break;
+                }
+
+                let state = AgentState { iteration, max_iterations };
+                hooks.on_iteration_start_erased(&state).await?;
 
                 let input_chars: usize = messages.iter().map(|m| {
                     m.content.as_ref().map_or(0, |c| c.len())
@@ -483,6 +660,7 @@ impl Agent {
                 let mut inner = stream_result?;
 
                 let mut pending_tool_calls: HashMap<String, (String, String)> = HashMap::new();
+                let mut tool_call_order: Vec<String> = Vec::new();
                 let mut had_tool_calls = false;
                 let mut text_buf = String::new();
 
@@ -490,6 +668,9 @@ impl Agent {
                     let event = event?;
                     match &event {
                         StreamEvent::ToolCallStart { id, name } => {
+                            if !pending_tool_calls.contains_key(id) {
+                                tool_call_order.push(id.clone());
+                            }
                             pending_tool_calls.insert(id.clone(), (name.clone(), String::new()));
                             had_tool_calls = true;
                             yield event;
@@ -536,51 +717,90 @@ impl Agent {
                 };
 
                 if !had_tool_calls {
-                    if !text_buf.is_empty() {
-                        messages.push(Message::assistant(&text_buf));
+                    // Synthesize the final assistant response so hooks and
+                    // output guardrails see the same shape as the non-streaming path.
+                    let synthesized = ChatResponse {
+                        message: Message::assistant(&text_buf),
+                        stop_reason: crate::model::types::StopReason::EndTurn,
+                        usage: Some(est_usage.clone()),
+                    };
+                    hooks.on_model_response_erased(&synthesized).await?;
+
+                    // Route through the same guardrail fold the non-streaming
+                    // path uses, so budget/guardrail semantics never diverge.
+                    let decision =
+                        evaluate_output_guardrails_over(&output_guardrails, &text_buf, &est_usage)
+                            .await?;
+
+                    hooks.on_iteration_end_erased(&state).await?;
+
+                    // Deltas are already emitted live and cannot be retracted, so
+                    // a Block surfaces as an Error event; Transform/Pass differ only
+                    // in which text is persisted to memory.
+                    let final_text = match decision {
+                        GuardrailDecision::Block(msg) => {
+                            yield StreamEvent::Error(format!("output blocked by guardrail: {msg}"));
+                            yield StreamEvent::Done;
+                            break;
+                        }
+                        GuardrailDecision::Transform(new_text) => new_text,
+                        GuardrailDecision::Pass => text_buf.clone(),
+                    };
+
+                    if !final_text.is_empty() {
+                        let assistant = Message::assistant(&final_text);
+                        memory.add_message_erased(assistant.clone()).await?;
+                        messages.push(assistant);
                     }
                     yield StreamEvent::Done;
                     break;
                 }
 
-                let mut completed_calls = Vec::new();
-                for (id, (name, args_str)) in &pending_tool_calls {
-                    let arguments: serde_json::Value = serde_json::from_str(args_str)
-                        .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
-                    completed_calls.push(crate::tool::ToolCall {
-                        id: id.clone(),
-                        name: name.clone(),
-                        arguments,
-                    });
+                // Rebuild tool calls in the order they were announced.
+                let mut completed_calls = Vec::with_capacity(tool_call_order.len());
+                for id in &tool_call_order {
+                    if let Some((name, args_str)) = pending_tool_calls.get(id) {
+                        let arguments: serde_json::Value = serde_json::from_str(args_str)
+                            .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                        completed_calls.push(crate::tool::ToolCall {
+                            id: id.clone(),
+                            name: name.clone(),
+                            arguments,
+                        });
+                    }
                 }
 
-                messages.push(Message::assistant_with_tool_calls(completed_calls.clone()));
+                let assistant_msg = if text_buf.is_empty() {
+                    Message::assistant_with_tool_calls(completed_calls.clone())
+                } else {
+                    Message::assistant_with_text_and_tool_calls(&text_buf, completed_calls.clone())
+                };
+                memory.add_message_erased(assistant_msg.clone()).await?;
+                messages.push(assistant_msg);
 
                 for call in &completed_calls {
-                    let tool_result = if validate {
-                        if let Some(errors) = tools.validate_input(&call.name, &call.arguments) {
-                            crate::tool::ToolOutput::error(format!(
-                                "Invalid arguments for tool '{}': {errors}",
-                                call.name
-                            ))
-                        } else {
-                            match tools.get(&call.name) {
-                                Some(tool) => match tool.execute_erased(&call.arguments).await {
-                                    Ok(output) => output,
-                                    Err(e) => crate::tool::ToolOutput::error(e.to_string()),
-                                },
-                                None => crate::tool::ToolOutput::error(format!(
-                                    "tool '{}' not found",
-                                    call.name
-                                )),
-                            }
-                        }
+                    hooks.on_tool_call_erased(call).await.ok();
+
+                    let validation_error = if validate {
+                        tools.validate_input(&call.name, &call.arguments)
                     } else {
-                        match tools.get(&call.name) {
-                            Some(tool) => match tool.execute_erased(&call.arguments).await {
-                                Ok(output) => output,
-                                Err(e) => crate::tool::ToolOutput::error(e.to_string()),
-                            },
+                        None
+                    };
+
+                    let tool_result = if let Some(errors) = validation_error {
+                        crate::tool::ToolOutput::error(format!(
+                            "Invalid arguments for tool '{}': {errors}",
+                            call.name
+                        ))
+                    } else {
+                        match tools.get(&call.name).cloned() {
+                            Some(tool) => {
+                                let policy = tool
+                                    .retry_policy()
+                                    .or_else(|| agent_retry_policy.clone());
+                                execute_tool_with_retry(&tool, &call.arguments, policy.as_ref())
+                                    .await
+                            }
                             None => crate::tool::ToolOutput::error(format!(
                                 "tool '{}' not found",
                                 call.name
@@ -588,14 +808,28 @@ impl Agent {
                         }
                     };
 
+                    if tool_result.is_error {
+                        let err = DaimonError::ToolExecution {
+                            tool: call.name.clone(),
+                            message: tool_result.content.clone(),
+                        };
+                        hooks.on_error_erased(&err).await.ok();
+                    } else {
+                        hooks.on_tool_result_erased(call, &tool_result).await.ok();
+                    }
+
                     yield StreamEvent::ToolResult {
                         id: call.id.clone(),
                         content: tool_result.content.clone(),
                         is_error: tool_result.is_error,
                     };
 
-                    messages.push(Message::tool_result(&call.id, &tool_result.content));
+                    let result_msg = Message::tool_result(&call.id, &tool_result.content);
+                    memory.add_message_erased(result_msg.clone()).await?;
+                    messages.push(result_msg);
                 }
+
+                hooks.on_iteration_end_erased(&state).await?;
             }
         };
 
@@ -603,7 +837,7 @@ impl Agent {
     }
 
     /// Runs input guardrails. Returns the (potentially transformed) input or an error.
-    async fn run_input_guardrails(&self, input: &str) -> Result<String> {
+    pub(crate) async fn run_input_guardrails(&self, input: &str) -> Result<String> {
         let mut current = input.to_string();
         for guard in &self.input_guardrails {
             match guard.check_erased(&current, &[]).await? {
@@ -619,23 +853,27 @@ impl Agent {
         Ok(current)
     }
 
+    /// Evaluates this agent's output guardrails over `text`, returning the
+    /// [`GuardrailDecision`]. Thin `&self` wrapper over the shared
+    /// [`evaluate_output_guardrails_over`] fold so the non-streaming path and
+    /// the streaming path share identical guardrail semantics.
+    pub(crate) async fn evaluate_output_guardrails(
+        &self,
+        text: &str,
+        usage: &Usage,
+    ) -> Result<GuardrailDecision> {
+        evaluate_output_guardrails_over(&self.output_guardrails, text, usage).await
+    }
+
     /// Runs output guardrails on the final response.
-    async fn run_output_guardrails(&self, response: &mut AgentResponse) -> Result<()> {
-        for guard in &self.output_guardrails {
-            let chat_resp = ChatResponse {
-                message: Message::assistant(&response.final_text),
-                stop_reason: crate::model::types::StopReason::EndTurn,
-                usage: Some(response.usage.clone()),
-            };
-            match guard.check_erased(&chat_resp).await? {
-                crate::guardrails::GuardrailResult::Pass => {}
-                crate::guardrails::GuardrailResult::Block(msg) => {
-                    return Err(DaimonError::GuardrailBlocked(msg));
-                }
-                crate::guardrails::GuardrailResult::Transform(new_text) => {
-                    response.final_text = new_text;
-                }
-            }
+    pub(crate) async fn run_output_guardrails(&self, response: &mut AgentResponse) -> Result<()> {
+        match self
+            .evaluate_output_guardrails(&response.final_text, &response.usage)
+            .await?
+        {
+            GuardrailDecision::Pass => {}
+            GuardrailDecision::Block(msg) => return Err(DaimonError::GuardrailBlocked(msg)),
+            GuardrailDecision::Transform(new_text) => response.final_text = new_text,
         }
         Ok(())
     }
@@ -1012,8 +1250,15 @@ mod tests {
                     usage: None,
                 })
             } else if count == 1 {
-                let last = request.messages.last().and_then(|m| m.content.as_deref()).unwrap_or("");
-                assert!(last.contains("Invalid arguments"), "model should see validation error: {last}");
+                let last = request
+                    .messages
+                    .last()
+                    .and_then(|m| m.content.as_deref())
+                    .unwrap_or("");
+                assert!(
+                    last.contains("Invalid arguments"),
+                    "model should see validation error: {last}"
+                );
                 Ok(ChatResponse {
                     message: Message::assistant_with_tool_calls(vec![crate::tool::ToolCall {
                         id: "call_2".into(),
@@ -1081,6 +1326,442 @@ mod tests {
 
         let result = agent.prompt("test").await;
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), crate::error::DaimonError::MaxIterations(1)));
+        assert!(matches!(
+            result.unwrap_err(),
+            crate::error::DaimonError::MaxIterations(1)
+        ));
+    }
+
+    // ---- Shared-core parity tests (DAIM-1) ----
+
+    /// A model whose stream emits a couple of text deltas then completes.
+    struct StreamingTextModel;
+
+    impl Model for StreamingTextModel {
+        async fn generate(&self, _request: &ChatRequest) -> Result<ChatResponse> {
+            Ok(ChatResponse {
+                message: Message::assistant("hi there"),
+                stop_reason: StopReason::EndTurn,
+                usage: None,
+            })
+        }
+
+        async fn generate_stream(&self, _request: &ChatRequest) -> Result<ResponseStream> {
+            use crate::stream::StreamEvent;
+            let events = vec![
+                Ok(StreamEvent::TextDelta("hi ".into())),
+                Ok(StreamEvent::TextDelta("there".into())),
+                Ok(StreamEvent::Done),
+            ];
+            Ok(Box::pin(futures::stream::iter(events)))
+        }
+    }
+
+    struct BlockingInputGuardrail;
+
+    impl crate::guardrails::InputGuardrail for BlockingInputGuardrail {
+        async fn check(
+            &self,
+            _input: &str,
+            _messages: &[Message],
+        ) -> Result<crate::guardrails::GuardrailResult> {
+            Ok(crate::guardrails::GuardrailResult::Block("nope".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_streaming_persists_to_memory() {
+        use crate::stream::StreamEvent;
+        use futures::StreamExt;
+
+        let agent = Agent::builder().model(StreamingTextModel).build().unwrap();
+
+        let mut stream = agent.prompt_stream("hello").await.unwrap();
+        while let Some(ev) = stream.next().await {
+            if matches!(ev.unwrap(), StreamEvent::Done) {
+                break;
+            }
+        }
+
+        // The user message and the assembled assistant message must both be saved,
+        // so a following turn sees the full context (regression: streaming used to
+        // persist only the user message).
+        let messages = agent.memory.get_messages_erased().await.unwrap();
+        assert_eq!(messages.len(), 2, "expected user + assistant in memory");
+        assert_eq!(messages[0].role, crate::model::types::Role::User);
+        assert_eq!(messages[1].role, crate::model::types::Role::Assistant);
+        assert_eq!(messages[1].content.as_deref(), Some("hi there"));
+    }
+
+    #[tokio::test]
+    async fn test_streaming_enforces_input_guardrail() {
+        let agent = Agent::builder()
+            .model(StreamingTextModel)
+            .input_guardrail(BlockingInputGuardrail)
+            .build()
+            .unwrap();
+
+        let result = agent.prompt_stream("hello").await;
+        assert!(matches!(
+            result.err(),
+            Some(crate::error::DaimonError::GuardrailBlocked(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_cancellation_variant_enforces_input_guardrail() {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let agent = Agent::builder()
+            .model(EchoModel)
+            .input_guardrail(BlockingInputGuardrail)
+            .build()
+            .unwrap();
+
+        let result = agent.prompt_with_cancellation("hi", &cancel).await;
+        assert!(matches!(
+            result.err(),
+            Some(crate::error::DaimonError::GuardrailBlocked(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_prompt_with_messages_enforces_input_guardrail() {
+        let agent = Agent::builder()
+            .model(EchoModel)
+            .input_guardrail(BlockingInputGuardrail)
+            .build()
+            .unwrap();
+
+        let result = agent.prompt_with_messages(vec![Message::user("hi")]).await;
+        assert!(matches!(
+            result.err(),
+            Some(crate::error::DaimonError::GuardrailBlocked(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_cancellation_variant_enforces_budget() {
+        // ToolCallingModel runs 2 iterations; a tiny budget must trip on the
+        // second iteration's pre-check (regression: budget was only checked in
+        // prompt(), not prompt_with_cancellation()).
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let agent = Agent::builder()
+            .model(ToolCallingModel::new())
+            .tool(AdderTool)
+            .cost_model(crate::cost::OpenAiCostModel)
+            .max_budget(1e-9)
+            .build()
+            .unwrap();
+
+        let result = agent.prompt_with_cancellation("add 2 and 3", &cancel).await;
+        assert!(matches!(
+            result.err(),
+            Some(crate::error::DaimonError::BudgetExceeded { .. })
+        ));
+    }
+
+    // ---- Streaming ReAct regression tests (DAIM-1) ----
+
+    /// A streaming model that always emits a single tool call (no final text),
+    /// forcing the ReAct loop to iterate indefinitely. Used to exercise the
+    /// per-stream budget guard, which trips on the second iteration's pre-check.
+    struct StreamingToolLoopModel;
+
+    impl Model for StreamingToolLoopModel {
+        async fn generate(&self, _request: &ChatRequest) -> Result<ChatResponse> {
+            Ok(ChatResponse {
+                message: Message::assistant("unused"),
+                stop_reason: StopReason::EndTurn,
+                usage: None,
+            })
+        }
+
+        async fn generate_stream(&self, _request: &ChatRequest) -> Result<ResponseStream> {
+            use crate::stream::StreamEvent;
+            let events = vec![
+                Ok(StreamEvent::ToolCallStart {
+                    id: "loop".into(),
+                    name: "noop".into(),
+                }),
+                Ok(StreamEvent::ToolCallDelta {
+                    id: "loop".into(),
+                    arguments_delta: "{}".into(),
+                }),
+                Ok(StreamEvent::Done),
+            ];
+            Ok(Box::pin(futures::stream::iter(events)))
+        }
+    }
+
+    /// A streaming model that announces two tool calls (ids "a" then "b") on the
+    /// first iteration and returns final text on the second. Exercises that the
+    /// streaming loop preserves the announced tool-call order rather than the
+    /// arbitrary iteration order of the pending-calls `HashMap`.
+    struct StreamingMultiToolModel {
+        call_count: AtomicUsize,
+    }
+
+    impl StreamingMultiToolModel {
+        fn new() -> Self {
+            Self {
+                call_count: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl Model for StreamingMultiToolModel {
+        async fn generate(&self, _request: &ChatRequest) -> Result<ChatResponse> {
+            Ok(ChatResponse {
+                message: Message::assistant("unused"),
+                stop_reason: StopReason::EndTurn,
+                usage: None,
+            })
+        }
+
+        async fn generate_stream(&self, _request: &ChatRequest) -> Result<ResponseStream> {
+            use crate::stream::StreamEvent;
+            let count = self.call_count.fetch_add(1, Ordering::SeqCst);
+            let events: Vec<Result<StreamEvent>> = if count == 0 {
+                vec![
+                    Ok(StreamEvent::ToolCallStart {
+                        id: "a".into(),
+                        name: "tool_a".into(),
+                    }),
+                    Ok(StreamEvent::ToolCallDelta {
+                        id: "a".into(),
+                        arguments_delta: "{}".into(),
+                    }),
+                    Ok(StreamEvent::ToolCallStart {
+                        id: "b".into(),
+                        name: "tool_b".into(),
+                    }),
+                    Ok(StreamEvent::ToolCallDelta {
+                        id: "b".into(),
+                        arguments_delta: "{}".into(),
+                    }),
+                    Ok(StreamEvent::Done),
+                ]
+            } else {
+                vec![
+                    Ok(StreamEvent::TextDelta("all done".into())),
+                    Ok(StreamEvent::Done),
+                ]
+            };
+            Ok(Box::pin(futures::stream::iter(events)))
+        }
+    }
+
+    struct ToolA;
+
+    impl Tool for ToolA {
+        fn name(&self) -> &str {
+            "tool_a"
+        }
+        fn description(&self) -> &str {
+            "Tool A"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        async fn execute(&self, _input: &serde_json::Value) -> Result<ToolOutput> {
+            Ok(ToolOutput::text("result_a"))
+        }
+    }
+
+    struct ToolB;
+
+    impl Tool for ToolB {
+        fn name(&self) -> &str {
+            "tool_b"
+        }
+        fn description(&self) -> &str {
+            "Tool B"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        async fn execute(&self, _input: &serde_json::Value) -> Result<ToolOutput> {
+            Ok(ToolOutput::text("result_b"))
+        }
+    }
+
+    struct BlockingOutputGuardrail;
+
+    impl crate::guardrails::OutputGuardrail for BlockingOutputGuardrail {
+        async fn check(
+            &self,
+            _response: &ChatResponse,
+        ) -> Result<crate::guardrails::GuardrailResult> {
+            Ok(crate::guardrails::GuardrailResult::Block("nope".into()))
+        }
+    }
+
+    struct TransformOutputGuardrail;
+
+    impl crate::guardrails::OutputGuardrail for TransformOutputGuardrail {
+        async fn check(
+            &self,
+            _response: &ChatResponse,
+        ) -> Result<crate::guardrails::GuardrailResult> {
+            Ok(crate::guardrails::GuardrailResult::Transform(
+                "REPLACED".into(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_streaming_enforces_budget() {
+        use crate::stream::StreamEvent;
+        use futures::StreamExt;
+
+        // The model never terminates on its own (always a tool call), so only the
+        // per-stream budget guard can stop the loop. With a sub-nanodollar budget,
+        // the first iteration records a non-zero estimated cost and the second
+        // iteration's pre-check must trip. The streaming path surfaces this as a
+        // StreamEvent::Error (it does not return Err from prompt_stream).
+        let agent = Agent::builder()
+            .model(StreamingToolLoopModel)
+            .tool(NoopTool)
+            .cost_model(crate::cost::OpenAiCostModel)
+            .max_budget(1e-9)
+            .max_iterations(100)
+            .build()
+            .unwrap();
+
+        let mut stream = agent.prompt_stream("go").await.unwrap();
+
+        let mut saw_budget_error = false;
+        let mut saw_done = false;
+        while let Some(ev) = stream.next().await {
+            match ev.unwrap() {
+                StreamEvent::Error(msg) => {
+                    assert!(
+                        msg.contains("budget"),
+                        "expected a budget error, got: {msg}"
+                    );
+                    // The budget Error must precede Done.
+                    assert!(!saw_done, "budget Error should be emitted before Done");
+                    saw_budget_error = true;
+                }
+                StreamEvent::Done => {
+                    saw_done = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        assert!(saw_budget_error, "expected a budget StreamEvent::Error");
+        assert!(saw_done, "stream must terminate with Done");
+    }
+
+    #[tokio::test]
+    async fn test_streaming_output_guardrail_blocks() {
+        use crate::stream::StreamEvent;
+        use futures::StreamExt;
+
+        let agent = Agent::builder()
+            .model(StreamingTextModel)
+            .output_guardrail(BlockingOutputGuardrail)
+            .build()
+            .unwrap();
+
+        let mut stream = agent.prompt_stream("hello").await.unwrap();
+
+        let mut saw_guardrail_error = false;
+        while let Some(ev) = stream.next().await {
+            match ev.unwrap() {
+                StreamEvent::Error(msg) => {
+                    assert!(
+                        msg.contains("guardrail"),
+                        "expected a guardrail error, got: {msg}"
+                    );
+                    saw_guardrail_error = true;
+                }
+                StreamEvent::Done => break,
+                _ => {}
+            }
+        }
+
+        assert!(
+            saw_guardrail_error,
+            "expected a guardrail StreamEvent::Error"
+        );
+
+        // A blocked output must NOT be persisted: memory holds only the user
+        // message, never the assistant response the guardrail rejected.
+        let messages = agent.memory().get_messages_erased().await.unwrap();
+        assert_eq!(
+            messages.len(),
+            1,
+            "blocked assistant output must not be saved to memory"
+        );
+        assert_eq!(messages[0].role, crate::model::types::Role::User);
+    }
+
+    #[tokio::test]
+    async fn test_streaming_output_guardrail_transforms() {
+        use crate::stream::StreamEvent;
+        use futures::StreamExt;
+
+        let agent = Agent::builder()
+            .model(StreamingTextModel)
+            .output_guardrail(TransformOutputGuardrail)
+            .build()
+            .unwrap();
+
+        let mut stream = agent.prompt_stream("hello").await.unwrap();
+        while let Some(ev) = stream.next().await {
+            if matches!(ev.unwrap(), StreamEvent::Done) {
+                break;
+            }
+        }
+
+        // The transform must affect the persisted assistant message, not just the
+        // live deltas: history should reflect the transformed text.
+        let messages = agent.memory().get_messages_erased().await.unwrap();
+        assert_eq!(messages.len(), 2, "expected user + assistant in memory");
+        assert_eq!(messages[1].role, crate::model::types::Role::Assistant);
+        assert_eq!(messages[1].content.as_deref(), Some("REPLACED"));
+    }
+
+    #[tokio::test]
+    async fn test_streaming_preserves_multi_tool_order() {
+        use crate::stream::StreamEvent;
+        use futures::StreamExt;
+
+        let agent = Agent::builder()
+            .model(StreamingMultiToolModel::new())
+            .tool(ToolA)
+            .tool(ToolB)
+            .build()
+            .unwrap();
+
+        let mut stream = agent.prompt_stream("run both").await.unwrap();
+
+        let mut result_ids = Vec::new();
+        while let Some(ev) = stream.next().await {
+            match ev.unwrap() {
+                StreamEvent::ToolResult { id, content, .. } => {
+                    // Sanity: each id maps to its own tool's output.
+                    match id.as_str() {
+                        "a" => assert_eq!(content, "result_a"),
+                        "b" => assert_eq!(content, "result_b"),
+                        other => panic!("unexpected tool result id: {other}"),
+                    }
+                    result_ids.push(id);
+                }
+                StreamEvent::Done => break,
+                _ => {}
+            }
+        }
+
+        // Both tools ran, and results are emitted in the announced order (a before
+        // b) rather than an arbitrary HashMap iteration order.
+        assert_eq!(
+            result_ids,
+            vec!["a".to_string(), "b".to_string()],
+            "tool results must preserve announced order"
+        );
     }
 }

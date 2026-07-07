@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use crate::error::{DaimonError, Result};
 use crate::model::ErasedEmbeddingModel;
-use crate::retriever::types::Document;
 use crate::retriever::traits::Retriever;
+use crate::retriever::types::Document;
 
 /// Retriever backed by a Qdrant vector database.
 pub struct QdrantRetriever {
@@ -76,10 +76,10 @@ impl Retriever for QdrantRetriever {
             let mut doc = Document::new(content).with_score(point.score as f64);
 
             for (key, val) in &point.payload {
-                if key != &self.content_field {
-                    if let Some(s) = val.as_str() {
-                        doc = doc.with_metadata(key, serde_json::json!(s));
-                    }
+                if key != &self.content_field
+                    && let Some(s) = val.as_str()
+                {
+                    doc = doc.with_metadata(key, serde_json::json!(s));
                 }
             }
 

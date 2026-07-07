@@ -21,8 +21,8 @@
 //! }
 //! ```
 
-mod traits;
 mod stack;
+mod traits;
 
-pub use traits::{ErasedMiddleware, Middleware, MiddlewareAction, SharedMiddleware};
 pub use stack::MiddlewareStack;
+pub use traits::{ErasedMiddleware, Middleware, MiddlewareAction, SharedMiddleware};

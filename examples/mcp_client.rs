@@ -12,7 +12,11 @@ async fn main() -> daimon::Result<()> {
 
     println!("Discovered {} MCP tools:", client.tool_infos().len());
     for tool in client.tool_infos() {
-        println!("  - {}: {}", tool.name, tool.description.as_deref().unwrap_or(""));
+        println!(
+            "  - {}: {}",
+            tool.name,
+            tool.description.as_deref().unwrap_or("")
+        );
     }
 
     let mut builder = Agent::builder()

@@ -53,7 +53,8 @@ impl RegexFilterGuardrail {
     /// Adds a pattern that blocks the input when matched.
     pub fn block(mut self, pattern: &str, message: impl Into<String>) -> Self {
         if let Ok(re) = regex_lite::Regex::new(pattern) {
-            self.patterns.push((re, FilterAction::Block(message.into())));
+            self.patterns
+                .push((re, FilterAction::Block(message.into())));
         }
         self
     }
@@ -121,20 +122,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_regex_filter_block() {
-        let guard = RegexFilterGuardrail::new()
-            .block(r"(?i)password\s*[:=]", "potential credential leak");
+        let guard =
+            RegexFilterGuardrail::new().block(r"(?i)password\s*[:=]", "potential credential leak");
         let result = guard.check("my password: secret123", &[]).await.unwrap();
         assert!(matches!(result, GuardrailResult::Block(_)));
     }
 
     #[tokio::test]
     async fn test_regex_filter_redact() {
-        let guard = RegexFilterGuardrail::new()
-            .redact(r"\b\d{3}-\d{2}-\d{4}\b", "[SSN REDACTED]");
-        let result = guard
-            .check("my ssn is 123-45-6789", &[])
-            .await
-            .unwrap();
+        let guard = RegexFilterGuardrail::new().redact(r"\b\d{3}-\d{2}-\d{4}\b", "[SSN REDACTED]");
+        let result = guard.check("my ssn is 123-45-6789", &[]).await.unwrap();
         match result {
             GuardrailResult::Transform(s) => {
                 assert_eq!(s, "my ssn is [SSN REDACTED]");
@@ -145,8 +142,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_regex_filter_pass() {
-        let guard = RegexFilterGuardrail::new()
-            .block(r"badword", "blocked");
+        let guard = RegexFilterGuardrail::new().block(r"badword", "blocked");
         let result = guard.check("totally fine input", &[]).await.unwrap();
         assert!(matches!(result, GuardrailResult::Pass));
     }

@@ -7,6 +7,7 @@ use thiserror::Error;
 /// Provider crates should map their transport-specific errors
 /// (HTTP, gRPC, SDK) to [`DaimonError::Model`].
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum DaimonError {
     /// An error originating from a model provider (API error, bad response, etc.).
     #[error("model error: {0}")]

@@ -35,6 +35,14 @@ impl OpenSearchVectorStore {
         self.dimensions
     }
 
+    /// Returns the configured k-NN space type (distance metric).
+    ///
+    /// This determines how OpenSearch scores query hits; see [`query`](VectorStore::query)
+    /// for why those scores are only comparable within a single space type.
+    pub fn space_type(&self) -> SpaceType {
+        self.space_type
+    }
+
     fn map_os_error(resp: opensearch::Error) -> DaimonError {
         DaimonError::Other(format!("opensearch error: {resp}"))
     }
@@ -141,17 +149,15 @@ impl VectorStore for OpenSearchVectorStore {
                 .and_then(|m| serde_json::from_value(m.clone()).ok())
                 .unwrap_or_default();
 
-            let raw_score = hit["_score"].as_f64().unwrap_or(0.0);
-
-            // OpenSearch k-NN scores vary by space type:
-            // - cosinesimil: 1 / (1 + cosine_distance), range (0, 1]
-            // - l2: 1 / (1 + l2_distance), range (0, 1]
-            // - innerproduct: already a similarity score
-            // We normalize to a 0..1 range for consistency.
-            let score = match self.space_type {
-                SpaceType::CosineSimilarity | SpaceType::L2 => raw_score,
-                SpaceType::InnerProduct => raw_score,
-            };
+            // This is the backend-raw `_score` returned by OpenSearch. Its scale
+            // depends on the configured space type — OpenSearch applies a
+            // different transform per metric (e.g. `1 / (1 + distance)` for l2,
+            // and metric-specific formulas for cosinesimil / innerproduct), and
+            // these are not on a common, cleanly comparable 0..1 scale. We
+            // therefore surface the raw score unchanged: it is meaningful only
+            // for *ranking within a single space type*, not for cross-metric
+            // comparison or as a calibrated similarity probability.
+            let score = hit["_score"].as_f64().unwrap_or(0.0);
 
             let doc = Document {
                 content,

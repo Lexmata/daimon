@@ -22,6 +22,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
 mod embedding;
+mod stream_util;
 
 #[cfg(feature = "servicebus")]
 pub mod servicebus;
@@ -51,7 +52,6 @@ fn build_client(timeout: Option<Duration>) -> Client {
 ///
 /// Connects to an Azure OpenAI deployment. Authentication is via API key
 /// (default, using the `api-key` header) or Microsoft Entra ID bearer token.
-#[derive(Debug)]
 pub struct AzureOpenAi {
     client: Client,
     api_key: String,
@@ -61,6 +61,23 @@ pub struct AzureOpenAi {
     timeout: Option<Duration>,
     max_retries: u32,
     use_bearer_token: bool,
+}
+
+impl std::fmt::Debug for AzureOpenAi {
+    /// Hand-written to avoid leaking the plaintext API key (or Entra ID bearer
+    /// token) in logs or panic output; a derived `Debug` would print it verbatim.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AzureOpenAi")
+            .field("client", &self.client)
+            .field("api_key", &"[redacted]")
+            .field("resource_url", &self.resource_url)
+            .field("deployment_id", &self.deployment_id)
+            .field("api_version", &self.api_version)
+            .field("timeout", &self.timeout)
+            .field("max_retries", &self.max_retries)
+            .field("use_bearer_token", &self.use_bearer_token)
+            .finish()
+    }
 }
 
 impl AzureOpenAi {
@@ -171,23 +188,21 @@ impl Model for AzureOpenAi {
             let status = response.status();
 
             if status.is_success() {
-                let api_resp: AzureResponse = response
-                    .json()
-                    .await
-                    .map_err(|e| {
-                        DaimonError::Model(format!("Azure OpenAI response parse error: {e}"))
-                    })?;
+                let api_resp: AzureResponse = response.json().await.map_err(|e| {
+                    DaimonError::Model(format!("Azure OpenAI response parse error: {e}"))
+                })?;
                 tracing::debug!("received successful Azure OpenAI response");
                 return parse_response(api_resp);
             }
 
+            let retry_after = stream_util::parse_retry_after(response.headers());
             let text = response.text().await.unwrap_or_default();
             let is_retryable = status.as_u16() == 429 || status.is_server_error();
 
             if is_retryable && attempt < self.max_retries {
-                let delay_ms = 100 * 2u64.pow(attempt);
-                tracing::debug!(status = %status, attempt, delay_ms, "retryable error, backing off");
-                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                let delay = stream_util::backoff_delay(attempt, retry_after);
+                tracing::debug!(status = %status, attempt, delay_ms = delay.as_millis(), "retryable error, backing off");
+                tokio::time::sleep(delay).await;
             } else {
                 return Err(DaimonError::Model(format!(
                     "Azure OpenAI API error ({status}): {text}"
@@ -229,17 +244,17 @@ impl Model for AzureOpenAi {
 
         let stream = async_stream::try_stream! {
             use futures::StreamExt;
+            use crate::stream_util::LineBuffer;
 
-            let mut buffer = String::new();
+            let mut buffer = LineBuffer::new();
             let mut stream = Box::pin(byte_stream);
 
             while let Some(chunk) = stream.next().await {
                 let chunk = chunk.map_err(|e| DaimonError::Model(format!("Azure OpenAI stream error: {e}")))?;
-                buffer.push_str(&String::from_utf8_lossy(&chunk));
+                buffer.push(&chunk);
 
-                while let Some(line_end) = buffer.find('\n') {
-                    let line = buffer[..line_end].trim().to_string();
-                    buffer = buffer[line_end + 1..].to_string();
+                while let Some(line) = buffer.next_line() {
+                    let line = line.trim();
 
                     if line.is_empty() || line == "data: [DONE]" {
                         if line == "data: [DONE]" {
@@ -248,14 +263,13 @@ impl Model for AzureOpenAi {
                         continue;
                     }
 
-                    if let Some(data) = line.strip_prefix("data: ") {
-                        if let Ok(chunk) = serde_json::from_str::<AzureStreamChunk>(data) {
+                    if let Some(data) = line.strip_prefix("data: ")
+                        && let Ok(chunk) = serde_json::from_str::<AzureStreamChunk>(data) {
                             for choice in &chunk.choices {
-                                if let Some(ref content) = choice.delta.content {
-                                    if !content.is_empty() {
+                                if let Some(ref content) = choice.delta.content
+                                    && !content.is_empty() {
                                         yield StreamEvent::TextDelta(content.clone());
                                     }
-                                }
                                 if let Some(ref tool_calls) = choice.delta.tool_calls {
                                     for tc in tool_calls {
                                         if let Some(ref func) = tc.function {
@@ -265,21 +279,55 @@ impl Model for AzureOpenAi {
                                                     name: name.clone(),
                                                 };
                                             }
-                                            if let Some(ref args) = func.arguments {
-                                                if !args.is_empty() {
+                                            if let Some(ref args) = func.arguments
+                                                && !args.is_empty() {
                                                     yield StreamEvent::ToolCallDelta {
                                                         id: tc.index.to_string(),
                                                         arguments_delta: args.clone(),
                                                     };
                                                 }
-                                            }
                                         }
                                     }
                                 }
                             }
                         }
-                    }
                 }
+            }
+
+            // A stream may end without a trailing newline, leaving a final SSE
+            // record buffered. Recover it through the identical parse path.
+            if let Some(line) = buffer.take_remaining() {
+                let line = line.trim();
+                if line == "data: [DONE]" {
+                    yield StreamEvent::Done;
+                } else if let Some(data) = line.strip_prefix("data: ")
+                    && let Ok(chunk) = serde_json::from_str::<AzureStreamChunk>(data) {
+                        for choice in &chunk.choices {
+                            if let Some(ref content) = choice.delta.content
+                                && !content.is_empty() {
+                                    yield StreamEvent::TextDelta(content.clone());
+                                }
+                            if let Some(ref tool_calls) = choice.delta.tool_calls {
+                                for tc in tool_calls {
+                                    if let Some(ref func) = tc.function {
+                                        if let Some(ref name) = func.name {
+                                            yield StreamEvent::ToolCallStart {
+                                                id: tc.index.to_string(),
+                                                name: name.clone(),
+                                            };
+                                        }
+                                        if let Some(ref args) = func.arguments
+                                            && !args.is_empty() {
+                                                yield StreamEvent::ToolCallDelta {
+                                                    id: tc.index.to_string(),
+                                                    arguments_delta: args.clone(),
+                                                };
+                                            }
+                                    }
+                                }
+                            }
+                        }
+                    }
             }
         };
 
@@ -508,10 +556,7 @@ mod tests {
     fn test_azure_new_default() {
         let model = AzureOpenAi::new("https://my-resource.openai.azure.com", "gpt-4o");
         assert_eq!(model.deployment_id, "gpt-4o");
-        assert_eq!(
-            model.resource_url,
-            "https://my-resource.openai.azure.com"
-        );
+        assert_eq!(model.resource_url, "https://my-resource.openai.azure.com");
         assert_eq!(model.api_version, DEFAULT_API_VERSION);
         assert_eq!(model.max_retries, DEFAULT_MAX_RETRIES);
         assert!(!model.use_bearer_token);
@@ -520,19 +565,13 @@ mod tests {
     #[test]
     fn test_resource_url_trailing_slash_stripped() {
         let model = AzureOpenAi::new("https://my-resource.openai.azure.com/", "gpt-4o");
-        assert_eq!(
-            model.resource_url,
-            "https://my-resource.openai.azure.com"
-        );
+        assert_eq!(model.resource_url, "https://my-resource.openai.azure.com");
     }
 
     #[test]
     fn test_endpoint_url() {
-        let model = AzureOpenAi::with_api_key(
-            "https://my-resource.openai.azure.com",
-            "gpt-4o",
-            "key",
-        );
+        let model =
+            AzureOpenAi::with_api_key("https://my-resource.openai.azure.com", "gpt-4o", "key");
         assert_eq!(
             model.endpoint_url(),
             "https://my-resource.openai.azure.com/openai/deployments/gpt-4o/chat/completions"
@@ -541,8 +580,8 @@ mod tests {
 
     #[test]
     fn test_with_api_version() {
-        let model = AzureOpenAi::new("https://x.openai.azure.com", "gpt-4o")
-            .with_api_version("2025-01-01");
+        let model =
+            AzureOpenAi::new("https://x.openai.azure.com", "gpt-4o").with_api_version("2025-01-01");
         assert_eq!(model.api_version, "2025-01-01");
     }
 
@@ -555,15 +594,13 @@ mod tests {
 
     #[test]
     fn test_with_max_retries() {
-        let model = AzureOpenAi::new("https://x.openai.azure.com", "gpt-4o")
-            .with_max_retries(10);
+        let model = AzureOpenAi::new("https://x.openai.azure.com", "gpt-4o").with_max_retries(10);
         assert_eq!(model.max_retries, 10);
     }
 
     #[test]
     fn test_with_bearer_token() {
-        let model =
-            AzureOpenAi::new("https://x.openai.azure.com", "gpt-4o").with_bearer_token();
+        let model = AzureOpenAi::new("https://x.openai.azure.com", "gpt-4o").with_bearer_token();
         assert!(model.use_bearer_token);
     }
 
@@ -680,5 +717,20 @@ mod tests {
         assert_eq!(model.timeout, Some(Duration::from_secs(30)));
         assert_eq!(model.max_retries, 5);
         assert!(model.use_bearer_token);
+    }
+
+    #[test]
+    fn test_debug_redacts_api_key() {
+        let model = AzureOpenAi::with_api_key(
+            "https://x.openai.azure.com",
+            "gpt-4o",
+            "azure-supersecret-key",
+        );
+        let dbg = format!("{model:?}");
+        assert!(
+            !dbg.contains("azure-supersecret-key"),
+            "Debug output must not contain the plaintext API key: {dbg}"
+        );
+        assert!(dbg.contains("[redacted]"));
     }
 }

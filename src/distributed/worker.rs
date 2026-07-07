@@ -56,10 +56,14 @@ impl TaskWorker {
 
         match &result {
             Ok(tr) => {
-                self.broker.complete_erased(&task.task_id, tr.clone()).await?;
+                self.broker
+                    .complete_erased(&task.task_id, tr.clone())
+                    .await?;
             }
             Err(e) => {
-                self.broker.fail_erased(&task.task_id, e.to_string()).await?;
+                self.broker
+                    .fail_erased(&task.task_id, e.to_string())
+                    .await?;
             }
         }
 
@@ -103,20 +107,15 @@ impl TaskWorker {
                 let broker = Arc::clone(&self.broker);
                 let factory = Arc::clone(&self.factory);
                 join_set.spawn(async move {
-                    let worker = TaskWorker {
-                        broker,
-                        factory,
-                    };
+                    let worker = TaskWorker { broker, factory };
                     if let Err(e) = worker.execute_and_report(&task).await {
                         tracing::warn!(task_id = %task.task_id, "task failed: {e}");
                     }
                 });
             }
 
-            if let Some(result) = join_set.join_next().await {
-                if let Err(e) = result {
-                    tracing::warn!("worker task panicked: {e}");
-                }
+            if let Some(Err(e)) = join_set.join_next().await {
+                tracing::warn!("worker task panicked: {e}");
             }
         }
     }
@@ -237,8 +236,7 @@ mod tests {
     async fn test_worker_processes_task_metadata() {
         let (broker, worker) = make_broker_and_worker();
 
-        let task = AgentTask::new("with meta")
-            .with_metadata("priority", serde_json::json!(5));
+        let task = AgentTask::new("with meta").with_metadata("priority", serde_json::json!(5));
         let id = broker.submit(task).await.unwrap();
 
         let result = worker.run_once().await.unwrap().unwrap();

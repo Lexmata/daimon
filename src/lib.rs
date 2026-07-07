@@ -47,13 +47,13 @@
 //! | `pgvector` | pgvector-backed vector store (via `daimon-plugin-pgvector`) |
 //! | `opensearch` | OpenSearch k-NN vector store (via `daimon-plugin-opensearch`) |
 //! | `grpc` | gRPC transport for distributed execution |
-//! | `full` | All providers + macros + MCP + SQLite + Redis + NATS + AMQP + gRPC + OTel + SQS + Pub/Sub + Service Bus + pgvector |
+//! | `full` | All providers + macros + MCP + SQLite + Redis + NATS + AMQP + OTel + HTTP server + Qdrant + pgvector + OpenSearch + gRPC + eval + SQS + Pub/Sub + Service Bus |
 //!
 //! The core framework compiles with no features; enable providers as needed.
 //!
 //! ## Plugin Interface
 //!
-//! The [`Model`] trait (from [`daimon_core`]) is the plugin interface. To create
+//! The [`Model`](crate::model::Model) trait (from [`daimon_core`]) is the plugin interface. To create
 //! a new LLM provider, depend on `daimon-core` and implement `Model`. See the
 //! `daimon-provider-*` crates for examples.
 //!
@@ -70,7 +70,7 @@
 //! - [`checkpoint`] — Checkpointing and state persistence
 //! - [`a2a`] — Google Agent-to-Agent protocol support
 //! - [`distributed`] — Distributed agent execution across processes
-//! - [`mcp`] — Model Context Protocol client and server (stdio, HTTP, WebSocket)
+//! - [`mcp`] — Model Context Protocol client and server (stdio, HTTP)
 //! - [`telemetry`] — OpenTelemetry OTLP export (feature = "otel")
 
 pub mod a2a;

@@ -33,6 +33,7 @@ mod embedding;
 mod error;
 mod model;
 mod stream;
+pub mod stream_util;
 mod tool_types;
 mod types;
 pub mod vector_store;

@@ -1,8 +1,8 @@
 [package]
 name = "daimon-plugin-opensearch"
-version = "0.16.0"
+version = "0.17.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "OpenSearch k-NN backed VectorStore plugin for the Daimon AI agent framework"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Lexmata/daimon"
@@ -11,8 +11,11 @@ documentation = "https://docs.rs/daimon-plugin-opensearch"
 keywords = ["ai", "agent", "opensearch", "rag", "vector-store"]
 categories = ["asynchronous", "database"]
 
+[package.metadata.docs.rs]
+all-features = true
+
 [dependencies]
-daimon-core = { version = "0.16.0", path = "../daimon-core" }
+daimon-core = { version = "0.17.0", path = "../daimon-core" }
 opensearch = { version = "2", default-features = false, features = ["rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

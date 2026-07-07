@@ -22,7 +22,7 @@ Add Daimon to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-daimon = "0.1"
+daimon = "0.17"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -104,7 +104,11 @@ async fn main() -> daimon::Result<()> {
 
 ## Streaming
 
-Stream responses token-by-token with the full ReAct loop:
+Stream responses token-by-token with the full ReAct loop. Streaming is not a
+degraded path: it runs the same loop as `prompt()` — conversation memory is
+loaded and persisted, lifecycle hooks fire, guardrails are enforced, and tool
+calls accumulate and re-invoke the model within a single stream until a final
+response is produced.
 
 ```rust
 use daimon::prelude::*;
@@ -136,20 +140,35 @@ async fn main() -> daimon::Result<()> {
 |---------|---------|-------------|
 | `openai` | Yes | OpenAI Chat Completions API |
 | `anthropic` | Yes | Anthropic Messages API |
+| `macros` | Yes | `#[tool_fn]` proc macro for defining tools |
 | `bedrock` | No | AWS Bedrock Converse API |
-| `full` | No | All providers |
+| `gemini` | No | Google Gemini / Vertex AI provider |
+| `azure` | No | Azure OpenAI Service provider |
+| `ollama` | No | Ollama local model provider |
+| `mcp` | No | Model Context Protocol client & server |
+| `sqlite` | No | SQLite memory backend |
+| `redis` | No | Redis memory backend + task broker + checkpoint |
+| `nats` | No | NATS JetStream task broker + checkpoint |
+| `amqp` | No | RabbitMQ (AMQP) task broker |
+| `qdrant` | No | Qdrant vector store retriever |
+| `pgvector` | No | pgvector-backed vector store (via `daimon-plugin-pgvector`) |
+| `opensearch` | No | OpenSearch k-NN vector store (via `daimon-plugin-opensearch`) |
+| `otel` | No | OpenTelemetry OTLP span export |
+| `http-server` | No | HTTP agent server (`AgentServer`) |
+| `grpc` | No | gRPC transport for distributed execution |
+| `full` | No | All providers + macros + MCP + SQLite + Redis + NATS + AMQP + OTel + HTTP server + Qdrant + pgvector + OpenSearch + gRPC + eval + SQS + Pub/Sub + Service Bus |
 
 The core framework compiles with no features enabled. Enable only the providers you need:
 
 ```toml
 # Only Anthropic
-daimon = { version = "0.1", default-features = false, features = ["anthropic"] }
+daimon = { version = "0.17", default-features = false, features = ["anthropic"] }
 
 # All providers
-daimon = { version = "0.1", features = ["full"] }
+daimon = { version = "0.17", features = ["full"] }
 
 # Core only (bring your own Model impl)
-daimon = { version = "0.1", default-features = false }
+daimon = { version = "0.17", default-features = false }
 ```
 
 ## Provider Configuration
@@ -232,6 +251,37 @@ let response = agent.prompt_with_messages(messages).await?;
 └──────────────────────────────────────────────────┘
 ```
 
+## Environment Variables
+
+Each provider reads its API key from standard environment variables:
+
+| Provider | Variable | Notes |
+|----------|----------|-------|
+| OpenAI | `OPENAI_API_KEY` | Required for `openai` feature |
+| Anthropic | `ANTHROPIC_API_KEY` | Required for `anthropic` feature |
+| AWS Bedrock | Standard AWS credentials | `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` or IAM role |
+| Google Gemini | `GOOGLE_APPLICATION_CREDENTIALS` | Service account JSON path |
+| Azure OpenAI | `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT` | Required for `azure` feature |
+| Ollama | `OLLAMA_HOST` | Defaults to `http://localhost:11434` |
+
+## Testing
+
+```bash
+# Default features (openai + anthropic)
+cargo test
+
+# All features
+cargo test --features full
+
+# Core only (no providers)
+cargo test --no-default-features
+
+# Coverage (requires cargo-llvm-cov)
+cargo llvm-cov --features full --fail-under-lines 90
+```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for full testing and development setup.
+
 ## Minimum Supported Rust Version
 
 Rust **1.85** (edition 2024).
@@ -244,6 +294,12 @@ Licensed under either of
 - MIT License ([LICENSE-MIT](LICENSE-MIT) or <http://opensource.org/licenses/MIT>)
 
 at your option.
+
+## Related Repos
+
+- [cardozo-ai](../cardozo-ai) -- Legal AI framework (Rust + Candle, shares Rust tooling patterns)
+- [lexmata-initial-case-evaluation](../lexmata-initial-case-evaluation) -- Go AI service that could use Daimon's agent patterns
+- [lexmata-app-backend](../lexmata-app-backend) -- Backend that dispatches AI work to Bedrock
 
 ## Contributing
 

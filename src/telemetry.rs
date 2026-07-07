@@ -25,11 +25,11 @@
 //! ```
 
 use opentelemetry::trace::TracerProvider;
-use opentelemetry_otlp::SpanExporter;
+use opentelemetry_otlp::{SpanExporter, WithExportConfig};
 use opentelemetry_sdk::trace::SdkTracerProvider;
+use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::EnvFilter;
 
 /// Configuration for the OpenTelemetry OTLP pipeline.
 #[derive(Debug, Clone)]
@@ -101,6 +101,7 @@ impl OtelGuard {
 pub fn init_otel_tracing(config: OtelConfig) -> Result<OtelGuard, Box<dyn std::error::Error>> {
     let exporter = SpanExporter::builder()
         .with_http()
+        .with_endpoint(config.endpoint.clone())
         .build()?;
 
     let resource = opentelemetry_sdk::Resource::builder()

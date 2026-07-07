@@ -27,9 +27,10 @@ impl Agent {
     /// The forked agent can run concurrently without affecting the original
     /// agent's conversation history.
     pub fn fork(&self) -> Agent {
-        let cost_tracker = self.cost_tracker.as_ref().map(|t| {
-            CostTracker::new(Arc::clone(&t.cost_model))
-        });
+        let cost_tracker = self
+            .cost_tracker
+            .as_ref()
+            .map(|t| CostTracker::new(Arc::clone(&t.cost_model)));
 
         Agent {
             model: self.model.clone(),
@@ -74,9 +75,10 @@ impl Agent {
             memory.add_message(msg.clone()).await?;
         }
 
-        let cost_tracker = self.cost_tracker.as_ref().map(|t| {
-            CostTracker::new(Arc::clone(&t.cost_model))
-        });
+        let cost_tracker = self
+            .cost_tracker
+            .as_ref()
+            .map(|t| CostTracker::new(Arc::clone(&t.cost_model)));
 
         Ok(Agent {
             model: self.model.clone(),
@@ -103,9 +105,10 @@ impl Agent {
     /// Useful for switching from in-memory to persistent storage, or for
     /// running the same agent configuration against a fresh conversation.
     pub fn fork_with_memory<M: Memory + 'static>(&self, memory: M) -> Agent {
-        let cost_tracker = self.cost_tracker.as_ref().map(|t| {
-            CostTracker::new(Arc::clone(&t.cost_model))
-        });
+        let cost_tracker = self
+            .cost_tracker
+            .as_ref()
+            .map(|t| CostTracker::new(Arc::clone(&t.cost_model)));
 
         Agent {
             model: self.model.clone(),
@@ -153,7 +156,10 @@ impl Agent {
             temperature: self.temperature,
             max_tokens: self.max_tokens,
             validate_tool_inputs: self.validate_tool_inputs,
-            cost_model: self.cost_tracker.as_ref().map(|t| Arc::clone(&t.cost_model)),
+            cost_model: self
+                .cost_tracker
+                .as_ref()
+                .map(|t| Arc::clone(&t.cost_model)),
             max_budget: self.max_budget,
             tool_retry_policy: self.tool_retry_policy.clone(),
         }
@@ -403,7 +409,10 @@ mod tests {
         );
         cp.save(&state).await.unwrap();
 
-        let forked = agent.fork_from_checkpoint("run-1", &(cp as Arc<_>)).await.unwrap();
+        let forked = agent
+            .fork_from_checkpoint("run-1", &(cp as Arc<_>))
+            .await
+            .unwrap();
         let msgs = forked.memory.get_messages_erased().await.unwrap();
         assert_eq!(msgs.len(), 2);
     }
@@ -411,8 +420,7 @@ mod tests {
     #[tokio::test]
     async fn test_fork_from_checkpoint_missing_run() {
         let agent = Agent::builder().model(EchoModel).build().unwrap();
-        let cp: Arc<dyn crate::checkpoint::ErasedCheckpoint> =
-            Arc::new(InMemoryCheckpoint::new());
+        let cp: Arc<dyn crate::checkpoint::ErasedCheckpoint> = Arc::new(InMemoryCheckpoint::new());
 
         let result = agent.fork_from_checkpoint("missing", &cp).await;
         assert!(result.is_err());
@@ -457,10 +465,7 @@ mod tests {
             .build()
             .unwrap();
 
-        let forked = agent
-            .fork_builder()
-            .system_prompt("New prompt")
-            .build();
+        let forked = agent.fork_builder().system_prompt("New prompt").build();
 
         assert_eq!(forked.system_prompt.as_deref(), Some("New prompt"));
     }

@@ -24,9 +24,9 @@
 pub mod in_memory;
 pub mod in_memory_store;
 pub mod knowledge_base;
+mod tool;
 mod traits;
 mod types;
-mod tool;
 pub mod vector_store;
 
 #[cfg(feature = "qdrant")]
@@ -49,7 +49,7 @@ pub use in_memory_store::InMemoryVectorStoreBackend;
 pub use knowledge_base::{
     ErasedKnowledgeBase, KnowledgeBase, SharedKnowledgeBase, SimpleKnowledgeBase,
 };
-pub use traits::{ErasedRetriever, Retriever, SharedRetriever};
 pub use tool::RetrieverTool;
+pub use traits::{ErasedRetriever, Retriever, SharedRetriever};
 pub use types::Document;
 pub use vector_store::{ErasedVectorStore, ScoredDocument, SharedVectorStore, VectorStore};

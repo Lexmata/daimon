@@ -41,11 +41,7 @@ impl AgentTool {
     /// * `agent` — the agent to wrap (shared ownership via `Arc`)
     /// * `name` — tool name the calling agent will use
     /// * `description` — description the model sees when deciding to call this tool
-    pub fn new(
-        agent: Arc<Agent>,
-        name: impl Into<String>,
-        description: impl Into<String>,
-    ) -> Self {
+    pub fn new(agent: Arc<Agent>, name: impl Into<String>, description: impl Into<String>) -> Self {
         Self {
             agent,
             name: name.into(),
@@ -77,10 +73,7 @@ impl Tool for AgentTool {
     }
 
     async fn execute(&self, input: &serde_json::Value) -> Result<ToolOutput> {
-        let prompt = input
-            .get("input")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let prompt = input.get("input").and_then(|v| v.as_str()).unwrap_or("");
 
         match self.agent.prompt(prompt).await {
             Ok(response) => Ok(ToolOutput::text(response.final_text)),

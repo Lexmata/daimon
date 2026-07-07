@@ -14,12 +14,12 @@
 //! assert_eq!(tpl.render_static(), "You are a helpful assistant. Today is 2026-03-03.");
 //! ```
 
-mod template;
 mod builder;
 mod dynamic;
 mod few_shot;
+mod template;
 
-pub use template::PromptTemplate;
 pub use builder::PromptBuilder;
 pub use dynamic::{DynamicContext, ErasedDynamicContext};
 pub use few_shot::FewShotTemplate;
+pub use template::PromptTemplate;

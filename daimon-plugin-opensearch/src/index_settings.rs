@@ -89,7 +89,10 @@ mod tests {
             None,
         );
         assert!(body["settings"]["index"]["knn"].as_bool().unwrap());
-        assert_eq!(body["mappings"]["properties"]["embedding"]["dimension"], 1536);
+        assert_eq!(
+            body["mappings"]["properties"]["embedding"]["dimension"],
+            1536
+        );
         assert_eq!(
             body["mappings"]["properties"]["embedding"]["method"]["space_type"],
             "cosinesimil"
@@ -112,13 +115,7 @@ mod tests {
 
     #[test]
     fn test_create_index_body_custom_params() {
-        let body = create_index_body(
-            768,
-            SpaceType::L2,
-            Engine::Faiss,
-            Some(32),
-            Some(256),
-        );
+        let body = create_index_body(768, SpaceType::L2, Engine::Faiss, Some(32), Some(256));
         assert_eq!(
             body["mappings"]["properties"]["embedding"]["method"]["parameters"]["m"],
             32

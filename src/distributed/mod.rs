@@ -39,9 +39,9 @@
 //! worker.run_once().await?;
 //! ```
 
-mod types;
 mod broker;
 pub mod streaming;
+mod types;
 mod worker;
 
 #[cfg(feature = "redis")]
@@ -56,12 +56,11 @@ pub mod amqp_broker;
 #[cfg(feature = "grpc")]
 pub mod grpc;
 
-pub use types::{AgentTask, TaskResult, TaskStatus};
-pub use broker::{TaskBroker, ErasedTaskBroker, InProcessBroker};
+pub use broker::{ErasedTaskBroker, InProcessBroker, TaskBroker};
 pub use streaming::{
-    InProcessEventBus, SerializableStreamEvent, StreamingTaskWorker, TaskEventBus,
-    TaskStreamEvent,
+    InProcessEventBus, SerializableStreamEvent, StreamingTaskWorker, TaskEventBus, TaskStreamEvent,
 };
+pub use types::{AgentTask, TaskResult, TaskStatus};
 pub use worker::TaskWorker;
 
 #[cfg(feature = "redis")]

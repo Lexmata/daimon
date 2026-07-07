@@ -22,24 +22,19 @@
 //!
 //! McpServer::new(registry).serve_stdio().await?;
 //! ```
+//!
+//! Daimon implements the two transports defined by the MCP specification —
+//! stdio ([`StdioTransport`]) and HTTP ([`HttpTransport`]). Bespoke WebSocket
+//! and gRPC transports were removed in 0.17.0 as non-spec surface with no
+//! consumers.
 
-pub mod protocol;
-pub mod transport;
-pub mod client;
 pub mod bridge;
+pub mod client;
+pub mod protocol;
 pub mod server;
-pub mod websocket;
-pub mod ws_server;
+pub mod transport;
 
-#[cfg(feature = "grpc")]
-pub mod grpc_transport;
-
-pub use client::McpClient;
 pub use bridge::McpToolBridge;
+pub use client::McpClient;
 pub use server::McpServer;
 pub use transport::{HttpTransport, McpTransport, StdioTransport};
-pub use websocket::WebSocketTransport;
-pub use ws_server::McpWsServer;
-
-#[cfg(feature = "grpc")]
-pub use grpc_transport::{McpGrpcServer, McpGrpcTransport};

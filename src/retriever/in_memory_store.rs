@@ -64,10 +64,13 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 
 impl VectorStore for InMemoryVectorStoreBackend {
     async fn upsert(&self, id: &str, embedding: Vec<f32>, document: Document) -> Result<()> {
-        self.entries
-            .write()
-            .await
-            .insert(id.to_string(), StoredEntry { embedding, document });
+        self.entries.write().await.insert(
+            id.to_string(),
+            StoredEntry {
+                embedding,
+                document,
+            },
+        );
         Ok(())
     }
 
@@ -81,7 +84,11 @@ impl VectorStore for InMemoryVectorStoreBackend {
             })
             .collect();
 
-        scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        scored.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         scored.truncate(top_k);
         Ok(scored)
     }

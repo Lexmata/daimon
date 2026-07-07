@@ -18,6 +18,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
 mod embedding;
+mod stream_util;
 
 #[cfg(feature = "pubsub")]
 pub mod pubsub;
@@ -48,7 +49,6 @@ fn build_client(timeout: Option<Duration>) -> Client {
 /// Connects to the Gemini REST API. Supports both the public Generative AI
 /// endpoint (default) and Vertex AI via `with_base_url()`. Authentication is
 /// via API key (passed as `?key=` query parameter) or bearer token for Vertex AI.
-#[derive(Debug)]
 pub struct Gemini {
     client: Client,
     api_key: String,
@@ -58,6 +58,23 @@ pub struct Gemini {
     max_retries: u32,
     use_bearer_token: bool,
     cached_content: Option<String>,
+}
+
+impl std::fmt::Debug for Gemini {
+    /// Hand-written to avoid leaking the plaintext API key (or Vertex bearer
+    /// token) in logs or panic output; a derived `Debug` would print it verbatim.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Gemini")
+            .field("client", &self.client)
+            .field("api_key", &"[redacted]")
+            .field("model_id", &self.model_id)
+            .field("base_url", &self.base_url)
+            .field("timeout", &self.timeout)
+            .field("max_retries", &self.max_retries)
+            .field("use_bearer_token", &self.use_bearer_token)
+            .field("cached_content", &self.cached_content)
+            .finish()
+    }
 }
 
 impl Gemini {
@@ -118,10 +135,7 @@ impl Gemini {
     }
 
     fn endpoint_url(&self, method: &str) -> String {
-        format!(
-            "{}/models/{}:{}",
-            self.base_url, self.model_id, method
-        )
+        format!("{}/models/{}:{}", self.base_url, self.model_id, method)
     }
 
     fn apply_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
@@ -142,9 +156,7 @@ impl Gemini {
                     if let Some(text) = &msg.content {
                         system_instruction = Some(GeminiContent {
                             role: "user".to_string(),
-                            parts: vec![GeminiPart::Text {
-                                text: text.clone(),
-                            }],
+                            parts: vec![GeminiPart::Text { text: text.clone() }],
                         });
                     }
                 }
@@ -152,24 +164,27 @@ impl Gemini {
                     if let Some(text) = &msg.content {
                         contents.push(GeminiContent {
                             role: "user".to_string(),
-                            parts: vec![GeminiPart::Text {
-                                text: text.clone(),
-                            }],
+                            parts: vec![GeminiPart::Text { text: text.clone() }],
                         });
                     }
                 }
                 Role::Assistant => {
                     if !msg.tool_calls.is_empty() {
-                        let parts = msg
-                            .tool_calls
-                            .iter()
-                            .map(|tc| GeminiPart::FunctionCall {
-                                function_call: GeminiFunctionCall {
-                                    name: tc.name.clone(),
-                                    args: tc.arguments.clone(),
-                                },
-                            })
-                            .collect();
+                        // Preserve any assistant text emitted alongside the tool
+                        // calls as a leading text part; dropping it (the prior
+                        // behavior) discards the model's reasoning turn.
+                        let mut parts: Vec<GeminiPart> = Vec::new();
+                        if let Some(text) = &msg.content
+                            && !text.is_empty()
+                        {
+                            parts.push(GeminiPart::Text { text: text.clone() });
+                        }
+                        parts.extend(msg.tool_calls.iter().map(|tc| GeminiPart::FunctionCall {
+                            function_call: GeminiFunctionCall {
+                                name: tc.name.clone(),
+                                args: tc.arguments.clone(),
+                            },
+                        }));
                         contents.push(GeminiContent {
                             role: "model".to_string(),
                             parts,
@@ -177,19 +192,15 @@ impl Gemini {
                     } else if let Some(text) = &msg.content {
                         contents.push(GeminiContent {
                             role: "model".to_string(),
-                            parts: vec![GeminiPart::Text {
-                                text: text.clone(),
-                            }],
+                            parts: vec![GeminiPart::Text { text: text.clone() }],
                         });
                     }
                 }
                 Role::Tool => {
                     let name = msg.tool_call_id.clone().unwrap_or_default();
                     let content = msg.content.clone().unwrap_or_default();
-                    let response_value: serde_json::Value =
-                        serde_json::from_str(&content).unwrap_or_else(|_| {
-                            serde_json::json!({ "result": content })
-                        });
+                    let response_value: serde_json::Value = serde_json::from_str(&content)
+                        .unwrap_or_else(|_| serde_json::json!({ "result": content }));
                     contents.push(GeminiContent {
                         role: "user".to_string(),
                         parts: vec![GeminiPart::FunctionResponse {
@@ -254,13 +265,14 @@ impl Model for Gemini {
                 return parse_response(api_resp);
             }
 
+            let retry_after = stream_util::parse_retry_after(response.headers());
             let text = response.text().await.unwrap_or_default();
             let is_retryable = status.as_u16() == 429 || status.is_server_error();
 
             if is_retryable && attempt < self.max_retries {
-                let delay_ms = 100 * 2u64.pow(attempt);
-                tracing::debug!(status = %status, attempt, delay_ms, "retryable error, backing off");
-                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                let delay = stream_util::backoff_delay(attempt, retry_after);
+                tracing::debug!(status = %status, attempt, delay_ms = delay.as_millis(), "retryable error, backing off");
+                tokio::time::sleep(delay).await;
             } else {
                 return Err(DaimonError::Model(format!(
                     "Gemini API error ({status}): {text}"
@@ -276,11 +288,7 @@ impl Model for Gemini {
         let body = self.build_request_body(request);
         let url = self.endpoint_url("streamGenerateContent");
 
-        let req = self
-            .client
-            .post(&url)
-            .query(&[("alt", "sse")])
-            .json(&body);
+        let req = self.client.post(&url).query(&[("alt", "sse")]).json(&body);
         let req = self.apply_auth(req);
 
         tracing::debug!("sending Gemini streaming request");
@@ -302,24 +310,27 @@ impl Model for Gemini {
 
         let stream = async_stream::try_stream! {
             use futures::StreamExt;
+            use crate::stream_util::LineBuffer;
 
-            let mut buffer = String::new();
+            let mut buffer = LineBuffer::new();
             let mut stream = Box::pin(byte_stream);
+            // Monotonic across the whole stream so parallel calls to the same
+            // function get distinct ids; the function name alone collides.
+            let mut tool_call_seq: u64 = 0;
 
             while let Some(chunk) = stream.next().await {
                 let chunk = chunk.map_err(|e| DaimonError::Model(format!("Gemini stream error: {e}")))?;
-                buffer.push_str(&String::from_utf8_lossy(&chunk));
+                buffer.push(&chunk);
 
-                while let Some(line_end) = buffer.find('\n') {
-                    let line = buffer[..line_end].trim().to_string();
-                    buffer = buffer[line_end + 1..].to_string();
+                while let Some(line) = buffer.next_line() {
+                    let line = line.trim();
 
                     if line.is_empty() {
                         continue;
                     }
 
-                    if let Some(data) = line.strip_prefix("data: ") {
-                        if let Ok(chunk_resp) = serde_json::from_str::<GeminiResponse>(data) {
+                    if let Some(data) = line.strip_prefix("data: ")
+                        && let Ok(chunk_resp) = serde_json::from_str::<GeminiResponse>(data) {
                             for candidate in &chunk_resp.candidates {
                                 for part in &candidate.content.parts {
                                     match part {
@@ -329,7 +340,11 @@ impl Model for Gemini {
                                             }
                                         }
                                         GeminiResponsePart::FunctionCall { function_call } => {
-                                            let id = format!("gemini_{}", function_call.name);
+                                            let id = format!(
+                                                "gemini_{}_{}",
+                                                function_call.name, tool_call_seq
+                                            );
+                                            tool_call_seq += 1;
                                             yield StreamEvent::ToolCallStart {
                                                 id: id.clone(),
                                                 name: function_call.name.clone(),
@@ -354,8 +369,53 @@ impl Model for Gemini {
                                 yield StreamEvent::Done;
                             }
                         }
-                    }
                 }
+            }
+
+            // A stream may end without a trailing newline, leaving a final SSE
+            // record buffered. Recover it through the identical parse path.
+            if let Some(line) = buffer.take_remaining() {
+                let line = line.trim();
+                if let Some(data) = line.strip_prefix("data: ")
+                    && let Ok(chunk_resp) = serde_json::from_str::<GeminiResponse>(data) {
+                        for candidate in &chunk_resp.candidates {
+                            for part in &candidate.content.parts {
+                                match part {
+                                    GeminiResponsePart::Text { text } => {
+                                        if !text.is_empty() {
+                                            yield StreamEvent::TextDelta(text.clone());
+                                        }
+                                    }
+                                    GeminiResponsePart::FunctionCall { function_call } => {
+                                        let id = format!(
+                                            "gemini_{}_{}",
+                                            function_call.name, tool_call_seq
+                                        );
+                                        tool_call_seq += 1;
+                                        yield StreamEvent::ToolCallStart {
+                                            id: id.clone(),
+                                            name: function_call.name.clone(),
+                                        };
+                                        let args = serde_json::to_string(&function_call.args)
+                                            .unwrap_or_default();
+                                        yield StreamEvent::ToolCallDelta {
+                                            id: id.clone(),
+                                            arguments_delta: args,
+                                        };
+                                        yield StreamEvent::ToolCallEnd { id };
+                                    }
+                                }
+                            }
+                        }
+
+                        let is_done = chunk_resp.candidates.iter().any(|c| {
+                            c.finish_reason.as_deref() == Some("STOP")
+                                || c.finish_reason.as_deref() == Some("MAX_TOKENS")
+                        });
+                        if is_done {
+                            yield StreamEvent::Done;
+                        }
+                    }
             }
         };
 
@@ -740,5 +800,43 @@ mod tests {
         assert_eq!(model.timeout, Some(Duration::from_secs(60)));
         assert_eq!(model.max_retries, 5);
         assert!(model.use_bearer_token);
+    }
+
+    #[test]
+    fn test_debug_redacts_api_key() {
+        let model = Gemini::with_api_key("gemini-pro", "AIza-supersecret-token");
+        let dbg = format!("{model:?}");
+        assert!(
+            !dbg.contains("AIza-supersecret-token"),
+            "Debug output must not contain the plaintext API key: {dbg}"
+        );
+        assert!(dbg.contains("[redacted]"));
+    }
+
+    #[test]
+    fn test_assistant_text_preserved_with_tool_call() {
+        let model = Gemini::with_api_key("gemini-pro", "key");
+        let assistant = Message {
+            role: Role::Assistant,
+            content: Some("Calling the tool now.".to_string()),
+            tool_calls: vec![ToolCall {
+                id: "gemini_calc".into(),
+                name: "calc".into(),
+                arguments: serde_json::json!({"expr": "2+2"}),
+            }],
+            tool_call_id: None,
+        };
+        let request = ChatRequest {
+            messages: vec![Message::user("hi"), assistant],
+            tools: vec![],
+            temperature: None,
+            max_tokens: None,
+        };
+        let body = model.build_request_body(&request);
+        let json = serde_json::to_value(&body).unwrap();
+        let parts = json["contents"][1]["parts"].as_array().unwrap();
+        assert_eq!(parts.len(), 2, "text part + functionCall part");
+        assert_eq!(parts[0]["text"], "Calling the tool now.");
+        assert_eq!(parts[1]["functionCall"]["name"], "calc");
     }
 }

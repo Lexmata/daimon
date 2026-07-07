@@ -106,11 +106,7 @@ impl McpClient {
     }
 
     /// Calls a tool on the MCP server and returns the text output.
-    pub async fn call_tool(
-        &self,
-        name: &str,
-        arguments: &serde_json::Value,
-    ) -> Result<String> {
+    pub async fn call_tool(&self, name: &str, arguments: &serde_json::Value) -> Result<String> {
         let request = JsonRpcRequest::new(
             self.next_id(),
             "tools/call",
