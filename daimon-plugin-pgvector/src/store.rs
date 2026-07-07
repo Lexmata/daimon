@@ -29,6 +29,21 @@ impl PgVectorStore {
         }
     }
 
+    /// Builds the SQL expression that converts pgvector's distance operator
+    /// (`$1` is the query vector) into a similarity score.
+    ///
+    /// See [`VectorStore::query`] for the rationale behind each transform.
+    /// L2 uses `1 / (1 + distance)` so the score stays in `(0, 1]` and
+    /// monotonic; a naive `1 - distance` would be unbounded and go negative.
+    fn score_expr(&self) -> String {
+        let op = self.distance_operator();
+        match self.distance_metric {
+            DistanceMetric::Cosine => format!("1.0 - (embedding {op} $1)"),
+            DistanceMetric::L2 => format!("1.0 / (1.0 + (embedding {op} $1))"),
+            DistanceMetric::InnerProduct => format!("-(embedding {op} $1)"),
+        }
+    }
+
     /// Returns a reference to the underlying connection pool.
     pub fn pool(&self) -> &Pool {
         &self.pool
@@ -97,17 +112,7 @@ impl VectorStore for PgVectorStore {
 
         let vec = Vector::from(embedding);
         let op = self.distance_operator();
-
-        // For cosine and L2, lower distance = more similar, so score = 1 - distance.
-        // For inner product, pgvector returns negative inner product, so score = -distance.
-        let score_expr = match self.distance_metric {
-            DistanceMetric::Cosine | DistanceMetric::L2 => {
-                format!("1.0 - (embedding {op} $1)")
-            }
-            DistanceMetric::InnerProduct => {
-                format!("-(embedding {op} $1)")
-            }
-        };
+        let score_expr = self.score_expr();
 
         let sql = format!(
             "SELECT id, content, metadata, {score_expr} AS score \
@@ -200,6 +205,30 @@ mod tests {
             ..store
         };
         assert_eq!(store.distance_operator(), "<#>");
+    }
+
+    #[test]
+    fn test_score_expr_per_metric() {
+        let base = PgVectorStore {
+            pool: create_dummy_pool(),
+            table: "t".into(),
+            dimensions: 3,
+            distance_metric: DistanceMetric::Cosine,
+        };
+        assert_eq!(base.score_expr(), "1.0 - (embedding <=> $1)");
+
+        let l2 = PgVectorStore {
+            distance_metric: DistanceMetric::L2,
+            ..base
+        };
+        // L2 must use the bounded transform, not `1 - distance`.
+        assert_eq!(l2.score_expr(), "1.0 / (1.0 + (embedding <-> $1))");
+
+        let ip = PgVectorStore {
+            distance_metric: DistanceMetric::InnerProduct,
+            ..l2
+        };
+        assert_eq!(ip.score_expr(), "-(embedding <#> $1)");
     }
 
     fn create_dummy_pool() -> Pool {

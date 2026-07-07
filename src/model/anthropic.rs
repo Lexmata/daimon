@@ -4,6 +4,7 @@
 //! streaming, and tool use. Configure via builder methods for timeout, retries,
 //! and prompt caching.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use reqwest::Client;
@@ -113,15 +114,24 @@ impl Anthropic {
                 }
                 Role::Assistant => {
                     if !msg.tool_calls.is_empty() {
-                        let blocks: Vec<AnthropicContentBlock> = msg
-                            .tool_calls
-                            .iter()
-                            .map(|tc| AnthropicContentBlock::ToolUse {
+                        // Preserve any assistant text that accompanied the tool
+                        // calls. Anthropic requires the text block to precede
+                        // the tool_use blocks; dropping it (the previous
+                        // behavior) loses the model's reasoning and can break
+                        // multi-turn continuity.
+                        let mut blocks: Vec<AnthropicContentBlock> = Vec::new();
+                        if let Some(ref text) = msg.content
+                            && !text.is_empty()
+                        {
+                            blocks.push(AnthropicContentBlock::Text { text: text.clone() });
+                        }
+                        blocks.extend(msg.tool_calls.iter().map(|tc| {
+                            AnthropicContentBlock::ToolUse {
                                 id: tc.id.clone(),
                                 name: tc.name.clone(),
                                 input: tc.arguments.clone(),
-                            })
-                            .collect();
+                            }
+                        }));
                         messages.push(AnthropicMessage {
                             role: "assistant".to_string(),
                             content: AnthropicContent::Blocks(blocks),
@@ -201,6 +211,7 @@ impl Model for Anthropic {
                 .await
                 .map_err(|e| DaimonError::Model(format!("Anthropic HTTP error: {e}")))?;
             let status = response.status();
+            let retry_after = crate::model::retry::parse_retry_after(response.headers());
             let text = response.text().await.unwrap_or_default();
 
             if status.is_success() {
@@ -214,12 +225,11 @@ impl Model for Anthropic {
             let is_retriable = code == 429 || code == 529 || (500..600).contains(&code);
 
             if is_retriable && attempt < self.max_retries {
-                let delay_ms = 100 * 2_u64.pow(attempt);
-                let delay = Duration::from_millis(delay_ms);
+                let delay = crate::model::retry::backoff_delay(attempt, retry_after);
                 tracing::debug!(
                     status = %status,
                     attempt = attempt,
-                    delay_ms = delay_ms,
+                    delay_ms = delay.as_millis(),
                     "retriable error, backing off"
                 );
                 tokio::time::sleep(delay).await;
@@ -270,17 +280,25 @@ impl Model for Anthropic {
 
         let stream = async_stream::try_stream! {
             use futures::StreamExt;
+            use crate::model::line_buffer::LineBuffer;
 
-            let mut buffer = String::new();
+            // Byte-accurate line buffer: a multi-byte UTF-8 character can be
+            // split across two network chunks; only complete lines are decoded.
+            let mut buffer = LineBuffer::new();
+            // Maps an Anthropic content-block `index` to the tool_use id opened
+            // at that index. The streaming spec correlates `content_block_delta`
+            // (partial_json) and `content_block_stop` events to their block only
+            // via this index — the id is present just once, at
+            // `content_block_start`.
+            let mut index_to_id: HashMap<u64, String> = HashMap::new();
             let mut stream = Box::pin(byte_stream);
 
             while let Some(chunk) = stream.next().await {
                 let chunk = chunk.map_err(|e| DaimonError::Model(format!("Anthropic stream error: {e}")))?;
-                buffer.push_str(&String::from_utf8_lossy(&chunk));
+                buffer.push(&chunk);
 
-                while let Some(line_end) = buffer.find('\n') {
-                    let line = buffer[..line_end].trim().to_string();
-                    buffer = buffer[line_end + 1..].to_string();
+                while let Some(line) = buffer.next_line() {
+                    let line = line.trim();
 
                     if line.is_empty() {
                         continue;
@@ -288,41 +306,92 @@ impl Model for Anthropic {
 
                     if let Some(data) = line.strip_prefix("data: ")
                         && let Ok(event) = serde_json::from_str::<AnthropicStreamEvent>(data) {
-                            match event.r#type.as_str() {
-                                "content_block_start" => {
-                                    if let Some(block) = event.content_block
-                                        && block.r#type == "tool_use" {
-                                            yield StreamEvent::ToolCallStart {
-                                                id: block.id.unwrap_or_default(),
-                                                name: block.name.unwrap_or_default(),
-                                            };
-                                        }
-                                }
-                                "content_block_delta" => {
-                                    if let Some(delta) = event.delta {
-                                        if let Some(text) = delta.text {
-                                            yield StreamEvent::TextDelta(text);
-                                        }
-                                        if let Some(json) = delta.partial_json {
-                                            yield StreamEvent::ToolCallDelta {
-                                                id: String::new(),
-                                                arguments_delta: json,
-                                            };
-                                        }
-                                    }
-                                }
-                                "message_stop" => {
-                                    yield StreamEvent::Done;
-                                }
-                                _ => {}
+                            for stream_event in handle_anthropic_stream_event(&mut index_to_id, event) {
+                                yield stream_event;
                             }
                         }
                 }
             }
+
+            // A stream can terminate without a trailing newline on its final
+            // `data:` line. `next_line` only yields newline-terminated lines, so
+            // that last event would otherwise be silently dropped. Drain the
+            // buffered remainder and run it through the identical SSE parse path.
+            if let Some(line) = buffer.take_remaining()
+                && let Some(data) = line.strip_prefix("data: ")
+                    && let Ok(event) = serde_json::from_str::<AnthropicStreamEvent>(data) {
+                        for stream_event in handle_anthropic_stream_event(&mut index_to_id, event) {
+                            yield stream_event;
+                        }
+                    }
         };
 
         Ok(Box::pin(stream))
     }
+}
+
+/// Advances the Anthropic streaming state machine by one SSE event and returns
+/// the [`StreamEvent`]s it produces (in order).
+///
+/// This is the correctness-critical core of `generate_stream`: it maintains the
+/// `index -> tool_use id` correlation map so that `content_block_delta`
+/// (partial JSON arguments) and `content_block_stop` events — which carry only
+/// a block `index`, never the id — are attributed to the tool call opened at
+/// that index by the earlier `content_block_start`. Extracted from the
+/// `async_stream::try_stream!` block so it can be unit-tested without a live
+/// HTTP stream; the streaming loop simply yields whatever this returns.
+fn handle_anthropic_stream_event(
+    index_to_id: &mut HashMap<u64, String>,
+    event: AnthropicStreamEvent,
+) -> Vec<StreamEvent> {
+    let mut events = Vec::new();
+    match event.r#type.as_str() {
+        "content_block_start" => {
+            if let Some(block) = event.content_block
+                && block.r#type == "tool_use"
+            {
+                let id = block.id.unwrap_or_default();
+                if let Some(idx) = event.index {
+                    index_to_id.insert(idx, id.clone());
+                }
+                events.push(StreamEvent::ToolCallStart {
+                    id,
+                    name: block.name.unwrap_or_default(),
+                });
+            }
+        }
+        "content_block_delta" => {
+            if let Some(delta) = event.delta {
+                if let Some(text) = delta.text {
+                    events.push(StreamEvent::TextDelta(text));
+                }
+                if let Some(json) = delta.partial_json {
+                    // Resolve the id from the block index so the consumer keys
+                    // accumulation to the right tool call.
+                    let id = event
+                        .index
+                        .and_then(|idx| index_to_id.get(&idx).cloned())
+                        .unwrap_or_default();
+                    events.push(StreamEvent::ToolCallDelta {
+                        id,
+                        arguments_delta: json,
+                    });
+                }
+            }
+        }
+        "content_block_stop" => {
+            if let Some(idx) = event.index
+                && let Some(id) = index_to_id.remove(&idx)
+            {
+                events.push(StreamEvent::ToolCallEnd { id });
+            }
+        }
+        "message_stop" => {
+            events.push(StreamEvent::Done);
+        }
+        _ => {}
+    }
+    events
 }
 
 fn parse_response(response: AnthropicResponse) -> Result<ChatResponse> {
@@ -417,6 +486,8 @@ enum AnthropicContent {
 #[derive(Serialize)]
 #[serde(tag = "type")]
 enum AnthropicContentBlock {
+    #[serde(rename = "text")]
+    Text { text: String },
     #[serde(rename = "tool_use")]
     ToolUse {
         id: String,
@@ -483,6 +554,11 @@ struct AnthropicUsage {
 #[derive(Deserialize)]
 struct AnthropicStreamEvent {
     r#type: String,
+    /// Content-block index. Present on `content_block_start`,
+    /// `content_block_delta`, and `content_block_stop`; correlates deltas to
+    /// the block (and thus the tool_use id) they belong to.
+    #[serde(default)]
+    index: Option<u64>,
     content_block: Option<AnthropicStreamBlock>,
     delta: Option<AnthropicStreamDelta>,
 }
@@ -651,6 +727,60 @@ mod tests {
     }
 
     #[test]
+    fn test_assistant_text_preserved_with_tool_call() {
+        // An assistant history message carrying both text and a tool call must
+        // serialize a leading text block followed by the tool_use block.
+        let model = Anthropic::new("test");
+        let assistant = Message {
+            role: Role::Assistant,
+            content: Some("Let me look that up.".to_string()),
+            tool_calls: vec![ToolCall {
+                id: "toolu_1".into(),
+                name: "search".into(),
+                arguments: serde_json::json!({"q": "rust"}),
+            }],
+            tool_call_id: None,
+        };
+        let request = ChatRequest {
+            messages: vec![Message::user("hi"), assistant],
+            tools: vec![],
+            temperature: None,
+            max_tokens: None,
+        };
+        let body = model.build_request_body(&request);
+        // Serialize and inspect the assistant message content blocks.
+        let json = serde_json::to_value(&body).unwrap();
+        let blocks = json["messages"][1]["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 2, "text block + tool_use block");
+        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(blocks[0]["text"], "Let me look that up.");
+        assert_eq!(blocks[1]["type"], "tool_use");
+        assert_eq!(blocks[1]["id"], "toolu_1");
+        assert_eq!(blocks[1]["name"], "search");
+    }
+
+    #[test]
+    fn test_assistant_tool_call_without_text_has_no_text_block() {
+        let model = Anthropic::new("test");
+        let assistant = Message::assistant_with_tool_calls(vec![ToolCall {
+            id: "toolu_1".into(),
+            name: "search".into(),
+            arguments: serde_json::json!({}),
+        }]);
+        let request = ChatRequest {
+            messages: vec![assistant],
+            tools: vec![],
+            temperature: None,
+            max_tokens: None,
+        };
+        let body = model.build_request_body(&request);
+        let json = serde_json::to_value(&body).unwrap();
+        let blocks = json["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 1, "only the tool_use block");
+        assert_eq!(blocks[0]["type"], "tool_use");
+    }
+
+    #[test]
     fn test_prompt_caching_tool_cache_control() {
         let model = Anthropic::with_api_key("test", "key").with_prompt_caching();
         let request = ChatRequest {
@@ -680,5 +810,228 @@ mod tests {
             tools[1].cache_control.is_some(),
             "last tool should have cache_control"
         );
+    }
+
+    // --- Streaming state-machine tests ---
+    //
+    // These exercise `handle_anthropic_stream_event` directly, feeding events
+    // deserialized from the exact JSON shapes Anthropic emits over SSE. This is
+    // the logic that previously lived (untested) inside the `try_stream!` block
+    // and that emitted tool-call argument deltas with an empty id before the
+    // `index -> id` correlation map was added.
+
+    /// Deserializes one SSE event payload the way the streaming loop does.
+    fn event(json: &str) -> AnthropicStreamEvent {
+        serde_json::from_str(json).expect("valid AnthropicStreamEvent JSON")
+    }
+
+    #[test]
+    fn test_stream_event_tool_use_start_maps_index_to_id() {
+        let mut idx = HashMap::new();
+        let out = handle_anthropic_stream_event(
+            &mut idx,
+            event(
+                r#"{"type":"content_block_start","index":0,
+                    "content_block":{"type":"tool_use","id":"toolu_A","name":"f","input":{}}}"#,
+            ),
+        );
+        assert_eq!(out.len(), 1);
+        match &out[0] {
+            StreamEvent::ToolCallStart { id, name } => {
+                assert_eq!(id, "toolu_A");
+                assert_eq!(name, "f");
+            }
+            other => panic!("expected ToolCallStart, got {other:?}"),
+        }
+        // The start must record the index so later deltas resolve to it.
+        assert_eq!(idx.get(&0).map(String::as_str), Some("toolu_A"));
+    }
+
+    #[test]
+    fn test_stream_event_deltas_carry_correlated_id_and_concatenate() {
+        let mut idx = HashMap::new();
+        handle_anthropic_stream_event(
+            &mut idx,
+            event(
+                r#"{"type":"content_block_start","index":0,
+                    "content_block":{"type":"tool_use","id":"toolu_A","name":"f","input":{}}}"#,
+            ),
+        );
+
+        let mut assembled = String::new();
+        for fragment in [r#"{\"x\":"#, "1}"] {
+            let json = format!(
+                r#"{{"type":"content_block_delta","index":0,
+                     "delta":{{"type":"input_json_delta","partial_json":"{fragment}"}}}}"#
+            );
+            let out = handle_anthropic_stream_event(&mut idx, event(&json));
+            assert_eq!(out.len(), 1);
+            match &out[0] {
+                StreamEvent::ToolCallDelta {
+                    id,
+                    arguments_delta,
+                } => {
+                    // Every delta must carry the correlated id, not "".
+                    assert_eq!(
+                        id, "toolu_A",
+                        "delta must resolve to the opening block's id"
+                    );
+                    assembled.push_str(arguments_delta);
+                }
+                other => panic!("expected ToolCallDelta, got {other:?}"),
+            }
+        }
+        assert_eq!(assembled, r#"{"x":1}"#);
+    }
+
+    #[test]
+    fn test_stream_event_stop_emits_end_and_clears_mapping() {
+        let mut idx = HashMap::new();
+        handle_anthropic_stream_event(
+            &mut idx,
+            event(
+                r#"{"type":"content_block_start","index":0,
+                    "content_block":{"type":"tool_use","id":"toolu_A","name":"f","input":{}}}"#,
+            ),
+        );
+        let out = handle_anthropic_stream_event(
+            &mut idx,
+            event(r#"{"type":"content_block_stop","index":0}"#),
+        );
+        assert_eq!(out.len(), 1);
+        match &out[0] {
+            StreamEvent::ToolCallEnd { id } => assert_eq!(id, "toolu_A"),
+            other => panic!("expected ToolCallEnd, got {other:?}"),
+        }
+        // The mapping is consumed on stop so a reused index can't leak the id.
+        assert!(idx.is_empty(), "index mapping must be cleared on stop");
+    }
+
+    #[test]
+    fn test_stream_event_full_tool_call_lifecycle() {
+        let mut idx = HashMap::new();
+        let mut events = Vec::new();
+        for json in [
+            r#"{"type":"message_start"}"#,
+            r#"{"type":"content_block_start","index":0,
+                "content_block":{"type":"tool_use","id":"toolu_A","name":"f","input":{}}}"#,
+            r#"{"type":"content_block_delta","index":0,
+                "delta":{"type":"input_json_delta","partial_json":"{\"x\":"}}"#,
+            r#"{"type":"content_block_delta","index":0,
+                "delta":{"type":"input_json_delta","partial_json":"1}"}}"#,
+            r#"{"type":"content_block_stop","index":0}"#,
+            r#"{"type":"message_delta"}"#,
+            r#"{"type":"message_stop"}"#,
+        ] {
+            events.extend(handle_anthropic_stream_event(&mut idx, event(json)));
+        }
+        // message_start / message_delta produce nothing; the rest form the
+        // ordered lifecycle: Start, Delta, Delta, End, Done.
+        assert_eq!(events.len(), 5, "got {events:?}");
+        assert!(matches!(&events[0], StreamEvent::ToolCallStart { id, name }
+            if id == "toolu_A" && name == "f"));
+        assert!(matches!(&events[1], StreamEvent::ToolCallDelta { id, .. } if id == "toolu_A"));
+        assert!(matches!(&events[2], StreamEvent::ToolCallDelta { id, .. } if id == "toolu_A"));
+        assert!(matches!(&events[3], StreamEvent::ToolCallEnd { id } if id == "toolu_A"));
+        assert!(matches!(&events[4], StreamEvent::Done));
+    }
+
+    #[test]
+    fn test_stream_event_text_block_index_not_confused_with_tool() {
+        // A text block occupies index 0; a tool_use opens at index 1. The text
+        // index must never be mapped to a tool id, and the tool's deltas at
+        // index 1 must resolve to that tool's id.
+        let mut idx = HashMap::new();
+
+        // Text block at index 0 — start is a no-op for the tool map.
+        let start_text = handle_anthropic_stream_event(
+            &mut idx,
+            event(
+                r#"{"type":"content_block_start","index":0,
+                     "content_block":{"type":"text","text":""}}"#,
+            ),
+        );
+        assert!(
+            start_text.is_empty(),
+            "text block start yields no StreamEvent"
+        );
+        assert!(
+            idx.is_empty(),
+            "text block index must not be mapped to a tool id"
+        );
+
+        // Text delta at index 0.
+        let text_delta = handle_anthropic_stream_event(
+            &mut idx,
+            event(
+                r#"{"type":"content_block_delta","index":0,
+                     "delta":{"type":"text_delta","text":"hi"}}"#,
+            ),
+        );
+        assert!(matches!(text_delta.as_slice(), [StreamEvent::TextDelta(t)] if t == "hi"));
+
+        // tool_use opens at index 1.
+        handle_anthropic_stream_event(
+            &mut idx,
+            event(
+                r#"{"type":"content_block_start","index":1,
+                     "content_block":{"type":"tool_use","id":"toolu_B","name":"g","input":{}}}"#,
+            ),
+        );
+        let tool_delta = handle_anthropic_stream_event(
+            &mut idx,
+            event(
+                r#"{"type":"content_block_delta","index":1,
+                     "delta":{"type":"input_json_delta","partial_json":"{}"}}"#,
+            ),
+        );
+        assert!(
+            matches!(tool_delta.as_slice(), [StreamEvent::ToolCallDelta { id, .. }] if id == "toolu_B"),
+            "tool delta at index 1 must resolve to toolu_B, got {tool_delta:?}"
+        );
+    }
+
+    #[test]
+    fn test_stream_event_interleaved_tool_blocks_route_by_index() {
+        // Two tool_use blocks open at indices 0 and 1; deltas addressed to each
+        // index must route to the correct id even when interleaved.
+        let mut idx = HashMap::new();
+        for json in [
+            r#"{"type":"content_block_start","index":0,
+                "content_block":{"type":"tool_use","id":"toolu_A","name":"f","input":{}}}"#,
+            r#"{"type":"content_block_start","index":1,
+                "content_block":{"type":"tool_use","id":"toolu_B","name":"g","input":{}}}"#,
+        ] {
+            handle_anthropic_stream_event(&mut idx, event(json));
+        }
+
+        let d0 = handle_anthropic_stream_event(
+            &mut idx,
+            event(
+                r#"{"type":"content_block_delta","index":0,
+                     "delta":{"type":"input_json_delta","partial_json":"a"}}"#,
+            ),
+        );
+        let d1 = handle_anthropic_stream_event(
+            &mut idx,
+            event(
+                r#"{"type":"content_block_delta","index":1,
+                     "delta":{"type":"input_json_delta","partial_json":"b"}}"#,
+            ),
+        );
+        let d0b = handle_anthropic_stream_event(
+            &mut idx,
+            event(
+                r#"{"type":"content_block_delta","index":0,
+                     "delta":{"type":"input_json_delta","partial_json":"c"}}"#,
+            ),
+        );
+
+        assert!(matches!(d0.as_slice(),
+            [StreamEvent::ToolCallDelta { id, arguments_delta }] if id == "toolu_A" && arguments_delta == "a"));
+        assert!(matches!(d1.as_slice(),
+            [StreamEvent::ToolCallDelta { id, arguments_delta }] if id == "toolu_B" && arguments_delta == "b"));
+        assert!(matches!(d0b.as_slice(),
+            [StreamEvent::ToolCallDelta { id, arguments_delta }] if id == "toolu_A" && arguments_delta == "c"));
     }
 }

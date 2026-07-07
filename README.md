@@ -22,7 +22,7 @@ Add Daimon to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-daimon = "0.1"
+daimon = "0.17"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -104,7 +104,11 @@ async fn main() -> daimon::Result<()> {
 
 ## Streaming
 
-Stream responses token-by-token with the full ReAct loop:
+Stream responses token-by-token with the full ReAct loop. Streaming is not a
+degraded path: it runs the same loop as `prompt()` — conversation memory is
+loaded and persisted, lifecycle hooks fire, guardrails are enforced, and tool
+calls accumulate and re-invoke the model within a single stream until a final
+response is produced.
 
 ```rust
 use daimon::prelude::*;
@@ -136,20 +140,35 @@ async fn main() -> daimon::Result<()> {
 |---------|---------|-------------|
 | `openai` | Yes | OpenAI Chat Completions API |
 | `anthropic` | Yes | Anthropic Messages API |
+| `macros` | Yes | `#[tool_fn]` proc macro for defining tools |
 | `bedrock` | No | AWS Bedrock Converse API |
-| `full` | No | All providers |
+| `gemini` | No | Google Gemini / Vertex AI provider |
+| `azure` | No | Azure OpenAI Service provider |
+| `ollama` | No | Ollama local model provider |
+| `mcp` | No | Model Context Protocol client & server |
+| `sqlite` | No | SQLite memory backend |
+| `redis` | No | Redis memory backend + task broker + checkpoint |
+| `nats` | No | NATS JetStream task broker + checkpoint |
+| `amqp` | No | RabbitMQ (AMQP) task broker |
+| `qdrant` | No | Qdrant vector store retriever |
+| `pgvector` | No | pgvector-backed vector store (via `daimon-plugin-pgvector`) |
+| `opensearch` | No | OpenSearch k-NN vector store (via `daimon-plugin-opensearch`) |
+| `otel` | No | OpenTelemetry OTLP span export |
+| `http-server` | No | HTTP agent server (`AgentServer`) |
+| `grpc` | No | gRPC transport for distributed execution |
+| `full` | No | All providers + macros + MCP + SQLite + Redis + NATS + AMQP + OTel + HTTP server + Qdrant + pgvector + OpenSearch + gRPC + eval + SQS + Pub/Sub + Service Bus |
 
 The core framework compiles with no features enabled. Enable only the providers you need:
 
 ```toml
 # Only Anthropic
-daimon = { version = "0.1", default-features = false, features = ["anthropic"] }
+daimon = { version = "0.17", default-features = false, features = ["anthropic"] }
 
 # All providers
-daimon = { version = "0.1", features = ["full"] }
+daimon = { version = "0.17", features = ["full"] }
 
 # Core only (bring your own Model impl)
-daimon = { version = "0.1", default-features = false }
+daimon = { version = "0.17", default-features = false }
 ```
 
 ## Provider Configuration

@@ -48,6 +48,18 @@ impl CostTracker {
     pub fn reset(&self) {
         self.cumulative_microdollars.store(0, Ordering::Relaxed);
     }
+
+    /// Reseeds the cumulative cost to a given USD amount (reset-then-set).
+    ///
+    /// Used when resuming a run from a checkpoint: the prior spend is restored
+    /// so that budget enforcement and reported cost account for the full run,
+    /// not just the post-resume portion. Subsequent [`record`](Self::record)
+    /// calls add on top of this baseline.
+    pub fn reseed(&self, usd: f64) {
+        let microdollars = (usd.max(0.0) * 1_000_000.0) as u64;
+        self.cumulative_microdollars
+            .store(microdollars, Ordering::Relaxed);
+    }
 }
 
 #[cfg(test)]

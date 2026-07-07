@@ -33,7 +33,7 @@
 //! assert!(output["result"].as_str().unwrap().contains("parsed"));
 //! ```
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -278,7 +278,12 @@ impl WorkflowBuilder {
             return Err(DaimonError::Orchestration("no edges into END".into()));
         }
 
-        let levels = topological_levels(&all_nodes, &successors, &predecessors)?;
+        let levels = super::toposort::topological_levels(
+            &all_nodes,
+            &successors,
+            &predecessors,
+            "cycle detected in workflow — workflows must be acyclic",
+        )?;
 
         Ok(Workflow {
             nodes: self.nodes,
@@ -436,63 +441,6 @@ impl Workflow {
         let end_input = self.assemble_input(END, &outputs);
         Ok(end_input)
     }
-}
-
-// ---------------------------------------------------------------------------
-// Topological sort (reused pattern from dag.rs)
-// ---------------------------------------------------------------------------
-
-fn topological_levels(
-    all_nodes: &HashSet<String>,
-    successors: &HashMap<String, Vec<String>>,
-    predecessors: &HashMap<String, Vec<String>>,
-) -> Result<Vec<Vec<String>>> {
-    let mut in_degree: HashMap<String, usize> = HashMap::new();
-    for node in all_nodes {
-        in_degree.insert(
-            node.clone(),
-            predecessors.get(node).map(|p| p.len()).unwrap_or(0),
-        );
-    }
-
-    let mut queue: VecDeque<String> = VecDeque::new();
-    for (node, &degree) in &in_degree {
-        if degree == 0 {
-            queue.push_back(node.clone());
-        }
-    }
-
-    let mut levels: Vec<Vec<String>> = Vec::new();
-    let mut visited = 0usize;
-
-    while !queue.is_empty() {
-        let level: Vec<String> = queue.drain(..).collect();
-        visited += level.len();
-
-        let mut next: VecDeque<String> = VecDeque::new();
-        for node in &level {
-            if let Some(succs) = successors.get(node) {
-                for succ in succs {
-                    let deg = in_degree.get_mut(succ).expect("node in in_degree map");
-                    *deg -= 1;
-                    if *deg == 0 {
-                        next.push_back(succ.clone());
-                    }
-                }
-            }
-        }
-
-        levels.push(level);
-        queue = next;
-    }
-
-    if visited != all_nodes.len() {
-        return Err(DaimonError::Orchestration(
-            "cycle detected in workflow — workflows must be acyclic".into(),
-        ));
-    }
-
-    Ok(levels)
 }
 
 // ---------------------------------------------------------------------------

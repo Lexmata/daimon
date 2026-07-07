@@ -1,6 +1,6 @@
 [package]
 name = "daimon-provider-azure"
-version = "0.16.0"
+version = "0.17.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Azure OpenAI provider for the Daimon AI agent framework"
@@ -11,12 +11,15 @@ documentation = "https://docs.rs/daimon-provider-azure"
 keywords = ["ai", "agent", "llm", "azure", "openai"]
 categories = ["asynchronous", "api-bindings"]
 
+[package.metadata.docs.rs]
+all-features = true
+
 [features]
 default = []
 servicebus = []
 
 [dependencies]
-daimon-core = { path = "../daimon-core", version = "0.16.0" }
+daimon-core = { path = "../daimon-core", version = "0.17.0" }
 tokio = { version = "1", features = ["rt", "time", "sync"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
