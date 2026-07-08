@@ -29,13 +29,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use lapin::acker::Acker;
 use lapin::options::{
     BasicAckOptions, BasicConsumeOptions, BasicNackOptions, BasicPublishOptions,
     QueueDeclareOptions,
 };
 use lapin::types::FieldTable;
-use lapin::{BasicProperties, Channel, Connection, ConnectionProperties, Consumer};
+use lapin::{Acker, BasicProperties, Channel, Connection, ConnectionProperties, Consumer};
 use tokio::sync::Mutex;
 
 use crate::error::{DaimonError, Result};
@@ -78,7 +77,7 @@ impl AmqpBroker {
 
         channel
             .queue_declare(
-                &queue_name,
+                queue_name.as_str().into(),
                 QueueDeclareOptions {
                     durable: true,
                     ..Default::default()
@@ -111,8 +110,8 @@ impl AmqpBroker {
         let consumer = self
             .channel
             .basic_consume(
-                &self.queue_name,
-                "daimon-worker",
+                self.queue_name.as_str().into(),
+                "daimon-worker".into(),
                 BasicConsumeOptions {
                     no_ack: false,
                     ..Default::default()
@@ -140,8 +139,8 @@ impl TaskBroker for AmqpBroker {
 
         self.channel
             .basic_publish(
-                "",
-                &self.queue_name,
+                "".into(),
+                self.queue_name.as_str().into(),
                 BasicPublishOptions::default(),
                 json.as_bytes(),
                 BasicProperties::default()

@@ -1,8 +1,8 @@
 [package]
 name = "daimon-core"
-version = "0.17.0"
+version = "0.18.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.95"
 description = "Core traits and types for the Daimon AI agent framework — implement Model to add providers"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Lexmata/daimon"
