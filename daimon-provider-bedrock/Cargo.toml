@@ -24,7 +24,12 @@ tokio = { version = "1", features = ["rt", "time", "sync"] }
 serde_json = "1"
 tracing = "0.1"
 async-stream = "0.3"
-aws-sdk-bedrockruntime = "1"
-aws-config = { version = "1", features = ["behavior-version-latest"] }
+# default-features disabled to drop the legacy hyper 0.14 + rustls 0.21 HTTP
+# client (which pulls the advisory-affected rustls-webpki 0.101). We supply a
+# modern rustls 0.23 / aws-lc client explicitly via aws-smithy-http-client.
+aws-sdk-bedrockruntime = { version = "1", default-features = false, features = ["rt-tokio"] }
+aws-config = { version = "1", default-features = false, features = ["behavior-version-latest", "rt-tokio", "credentials-process", "sso"] }
 aws-smithy-types = "1"
-aws-sdk-sqs = { version = "1", optional = true }
+aws-smithy-http-client = { version = "1", features = ["rustls-aws-lc"] }
+aws-smithy-runtime-api = "1"
+aws-sdk-sqs = { version = "1", default-features = false, features = ["rt-tokio"], optional = true }

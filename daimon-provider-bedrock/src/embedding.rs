@@ -59,7 +59,7 @@ impl BedrockEmbedding {
         if let Some(ref client) = self.client {
             return Ok(client.clone());
         }
-        let mut config_loader = aws_config::from_env();
+        let mut config_loader = aws_config::from_env().http_client(crate::modern_https_client());
         if let Some(ref region) = self.region {
             config_loader = config_loader.region(aws_config::Region::new(region.clone()));
         }

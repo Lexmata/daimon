@@ -107,7 +107,7 @@ impl Bedrock {
             return Ok(client.clone());
         }
 
-        let mut config_loader = aws_config::from_env();
+        let mut config_loader = aws_config::from_env().http_client(modern_https_client());
         if let Some(ref region) = self.region {
             config_loader = config_loader.region(aws_config::Region::new(region.clone()));
         }
@@ -295,6 +295,19 @@ impl Bedrock {
             usage,
         })
     }
+}
+
+/// Builds a modern HTTPS client (hyper 1.x + rustls 0.23 with the aws-lc-rs
+/// crypto provider) for the AWS SDK, replacing the SDK's legacy hyper 0.14 +
+/// rustls 0.21 default. The legacy stack pulls `rustls-webpki` 0.101, which is
+/// subject to unpatched RUSTSEC advisories; the modern stack uses `rustls-webpki`
+/// 0.103. Shared by the Bedrock model, embeddings, and SQS clients.
+pub(crate) fn modern_https_client() -> aws_smithy_runtime_api::client::http::SharedHttpClient {
+    aws_smithy_http_client::Builder::new()
+        .tls_provider(aws_smithy_http_client::tls::Provider::Rustls(
+            aws_smithy_http_client::tls::rustls_provider::CryptoMode::AwsLc,
+        ))
+        .build_https()
 }
 
 fn is_retryable_error(err: impl std::fmt::Display) -> bool {
