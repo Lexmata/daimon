@@ -1428,7 +1428,7 @@ dependencies = [
 
 [[package]]
 name = "daimon"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "async-nats",
  "async-stream",
@@ -1474,7 +1474,7 @@ dependencies = [
 
 [[package]]
 name = "daimon-core"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "async-stream",
  "futures",
@@ -1488,7 +1488,7 @@ dependencies = [
 
 [[package]]
 name = "daimon-macros"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1497,7 +1497,7 @@ dependencies = [
 
 [[package]]
 name = "daimon-plugin-opensearch"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "daimon-core",
  "opensearch",
@@ -1509,7 +1509,7 @@ dependencies = [
 
 [[package]]
 name = "daimon-plugin-pgvector"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "daimon-core",
  "deadpool-postgres",
@@ -1523,7 +1523,7 @@ dependencies = [
 
 [[package]]
 name = "daimon-provider-azure"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "async-stream",
  "daimon-core",
@@ -1537,7 +1537,7 @@ dependencies = [
 
 [[package]]
 name = "daimon-provider-bedrock"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "async-stream",
  "aws-config",
@@ -1552,7 +1552,7 @@ dependencies = [
 
 [[package]]
 name = "daimon-provider-gemini"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "async-stream",
  "base64 0.22.1",
@@ -2266,11 +2266,11 @@ dependencies = [
 
 [[package]]
 name = "hashlink"
-version = "0.11.1"
+version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "824e001ac4f3012dd16a264bec811403a67ca9deb6c102fc5049b32c4574b35f"
+checksum = "32069d97bb81e38fa67eab65e3393bf804bb85969f2bc06bf13f64aef5aba248"
 dependencies = [
- "hashbrown 0.16.1",
+ "hashbrown 0.17.1",
 ]
 
 [[package]]
@@ -2975,9 +2975,9 @@ dependencies = [
 
 [[package]]
 name = "libsqlite3-sys"
-version = "0.37.0"
+version = "0.38.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1f111c8c41e7c61a49cd34e44c7619462967221a6443b0ec299e0ac30cfb9b1"
+checksum = "f6c19a05435c21ac299d71b6a9c13db3e3f47c520517d58990a462a1397a61db"
 dependencies = [
  "cc",
  "pkg-config",
@@ -4327,9 +4327,9 @@ dependencies = [
 
 [[package]]
 name = "rusqlite"
-version = "0.39.0"
+version = "0.40.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a0d2b0146dd9661bf67bb107c0bb2a55064d556eeb3fc314151b957f313bcd4e"
+checksum = "11438310b19e3109b6446c33d1ed5e889428cf2e278407bc7896bc4aaea43323"
 dependencies = [
  "bitflags",
  "fallible-iterator 0.3.0",

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-07-08
+
+### Changed
+
+- **BREAKING: Minimum Supported Rust Version raised to 1.95** (from 1.88). Required by `rusqlite` 0.40, whose `libsqlite3-sys` 0.38.1 build script uses the `cfg_select` macro, stabilized in Rust 1.95.
+- Bumped `rusqlite` 0.37 → 0.40 (SQLite memory backend).
+- Bumped `async-nats` 0.38 → 0.49.
+
+### Security
+
+- Cleared **RUSTSEC-2026-0049** — the `async-nats` bump drops `rustls-webpki` 0.102.8 (faulty CRL distribution-point matching) in favour of rustls 0.23 / webpki 0.103. Its `deny.toml` scope-ignore has been removed. The remaining ignored advisories (`RUSTSEC-2026-0098/0099/0104`, `rustls-webpki` 0.101 via the AWS SDK's rustls 0.21) stay pending an upstream AWS SDK migration.
+
 ## [0.17.0] - 2026-07-06
 
 ### Removed
@@ -421,7 +433,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `commitlint.toml` for Conventional Commits enforcement.
 - `rustfmt.toml` and `clippy.toml` for consistent code style.
 
-[Unreleased]: https://github.com/Lexmata/daimon/compare/v0.17.0...HEAD
+[Unreleased]: https://github.com/Lexmata/daimon/compare/v0.18.0...HEAD
+[0.18.0]: https://github.com/Lexmata/daimon/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/Lexmata/daimon/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/Lexmata/daimon/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/Lexmata/daimon/compare/v0.14.0...v0.15.0

@@ -284,7 +284,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for full testing and development setup.
 
 ## Minimum Supported Rust Version
 
-Rust **1.85** (edition 2024).
+Rust **1.95** (edition 2024).
 
 ## License
 

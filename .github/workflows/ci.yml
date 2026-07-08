@@ -52,7 +52,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        toolchain: [stable, "1.94"]
+        toolchain: [stable, "1.95"]
         features:
           - "--no-default-features"
           - "--features openai"
