@@ -1,6 +1,6 @@
 [package]
 name = "daimon-provider-bedrock"
-version = "0.18.0"
+version = "0.18.1"
 edition = "2024"
 rust-version = "1.95"
 description = "Amazon Bedrock provider for the Daimon AI agent framework"
@@ -19,7 +19,7 @@ default = []
 sqs = ["dep:aws-sdk-sqs"]
 
 [dependencies]
-daimon-core = { path = "../daimon-core", version = "0.18.0" }
+daimon-core = { path = "../daimon-core", version = "0.18.1" }
 tokio = { version = "1", features = ["rt", "time", "sync"] }
 serde_json = "1"
 tracing = "0.1"
