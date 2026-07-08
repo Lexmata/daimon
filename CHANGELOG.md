@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-07-08
+
+### Security
+
+- **Cleared RUSTSEC-2026-0098/0099/0104** (`rustls-webpki` 0.101 name-constraint / CRL-parsing advisories). The Bedrock provider previously pulled the AWS SDK's default hyper 0.14 + rustls 0.21 client, which depends on the vulnerable `rustls-webpki` 0.101; these were scope-ignored pending an upstream fix. The provider now disables the AWS crates' default features and supplies a modern `aws-smithy-http-client` client (hyper 1.x + rustls 0.23 + `rustls-webpki` 0.103) via the `rustls-aws-lc` crypto provider. `rustls 0.21`, `rustls-webpki 0.101`, and `hyper-rustls 0.24` are no longer in the dependency tree, and `deny.toml` no longer ignores any advisories.
+
+### Changed
+
+- `daimon-provider-bedrock` builds its AWS SDK clients (Bedrock, embeddings, SQS) with an explicit modern HTTPS client instead of the SDK default.
+
 ## [0.18.0] - 2026-07-08
 
 ### Changed
@@ -433,7 +443,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `commitlint.toml` for Conventional Commits enforcement.
 - `rustfmt.toml` and `clippy.toml` for consistent code style.
 
-[Unreleased]: https://github.com/Lexmata/daimon/compare/v0.18.0...HEAD
+[Unreleased]: https://github.com/Lexmata/daimon/compare/v0.18.1...HEAD
+[0.18.1]: https://github.com/Lexmata/daimon/compare/v0.18.0...v0.18.1
 [0.18.0]: https://github.com/Lexmata/daimon/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/Lexmata/daimon/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/Lexmata/daimon/compare/v0.15.0...v0.16.0
