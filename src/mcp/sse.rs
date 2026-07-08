@@ -343,10 +343,10 @@ mod tests {
             if trimmed.is_empty() {
                 break;
             }
-            if let Some((key, value)) = trimmed.split_once(':') {
-                if key.eq_ignore_ascii_case("content-length") {
-                    content_length = value.trim().parse().unwrap_or(0);
-                }
+            if let Some((key, value)) = trimmed.split_once(':')
+                && key.eq_ignore_ascii_case("content-length")
+            {
+                content_length = value.trim().parse().unwrap_or(0);
             }
         }
         let mut body = vec![0u8; content_length];
@@ -415,10 +415,10 @@ mod tests {
                     // Every later connection is a POST.
                     let (method, _path, body) = read_http_request(&mut conn).await;
                     if method == "POST" {
-                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
-                            if let Some(id) = json.get("id").and_then(|v| v.as_u64()) {
-                                let _ = posted_tx.send(id);
-                            }
+                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body)
+                            && let Some(id) = json.get("id").and_then(|v| v.as_u64())
+                        {
+                            let _ = posted_tx.send(id);
                         }
                         let _ = write_202_accepted(&mut conn).await;
                     }
@@ -483,5 +483,157 @@ mod tests {
             let _ = write_chunk_end(stream).await;
             let _ = stream.shutdown().await;
         }
+    }
+
+    #[tokio::test]
+    async fn test_endpoint_discovery_updates_post_target() {
+        let server = TestSseServer::start(Some("/messages?sessionId=abc")).await;
+        let connect_url = server.connect_url();
+
+        let transport = SseTransport::connect(connect_url.clone(), HashMap::new())
+            .await
+            .unwrap();
+
+        // Give the reader task a moment to process the endpoint frame sent
+        // during TestSseServer::start before we inspect post_url.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let post_url = transport.post_url.lock().await.clone();
+        assert_eq!(
+            post_url,
+            format!("http://{}/messages?sessionId=abc", server.addr)
+        );
+
+        let _ = transport.close().await;
+        server.close_sse_stream().await;
+    }
+
+    #[tokio::test]
+    async fn test_falls_back_to_connect_url_without_endpoint_frame() {
+        let server = TestSseServer::start(None).await;
+        let connect_url = server.connect_url();
+
+        let transport = SseTransport::connect(connect_url.clone(), HashMap::new())
+            .await
+            .unwrap();
+
+        let post_url = transport.post_url.lock().await.clone();
+        assert_eq!(post_url, connect_url);
+
+        let _ = transport.close().await;
+        server.close_sse_stream().await;
+    }
+
+    #[tokio::test]
+    async fn test_correlates_responses_including_out_of_order() {
+        let mut server = TestSseServer::start(None).await;
+        let connect_url = server.connect_url();
+        let transport = Arc::new(
+            SseTransport::connect(connect_url, HashMap::new())
+                .await
+                .unwrap(),
+        );
+
+        // Fire two concurrent requests, A then B.
+        let req_a = JsonRpcRequest::new(1, "tools/list", None);
+        let req_b = JsonRpcRequest::new(2, "tools/list", None);
+        let ta = transport.clone();
+        let tb = transport.clone();
+        let handle_a = tokio::spawn(async move { ta.send(&req_a).await });
+        let handle_b = tokio::spawn(async move { tb.send(&req_b).await });
+
+        // Wait for both POSTs to land server-side, then reply out of order:
+        // id 2's response before id 1's.
+        let first_posted = server.next_posted_id().await;
+        let second_posted = server.next_posted_id().await;
+        assert_eq!(
+            [first_posted, second_posted]
+                .iter()
+                .collect::<std::collections::HashSet<_>>(),
+            [1u64, 2u64]
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+        );
+
+        server
+            .push_response(r#"{"jsonrpc":"2.0","id":2,"result":{"ok":"b"}}"#)
+            .await;
+        server
+            .push_response(r#"{"jsonrpc":"2.0","id":1,"result":{"ok":"a"}}"#)
+            .await;
+
+        let resp_a = handle_a.await.unwrap().unwrap();
+        let resp_b = handle_b.await.unwrap().unwrap();
+        assert_eq!(resp_a.result.unwrap()["ok"], "a");
+        assert_eq!(resp_b.result.unwrap()["ok"], "b");
+
+        let _ = transport.close().await;
+        server.close_sse_stream().await;
+    }
+
+    #[tokio::test]
+    async fn test_malformed_frame_is_skipped_not_fatal() {
+        let mut server = TestSseServer::start(None).await;
+        let connect_url = server.connect_url();
+        let transport = Arc::new(
+            SseTransport::connect(connect_url, HashMap::new())
+                .await
+                .unwrap(),
+        );
+
+        let req = JsonRpcRequest::new(1, "tools/list", None);
+        let t = transport.clone();
+        let handle = tokio::spawn(async move { t.send(&req).await });
+
+        let posted_id = server.next_posted_id().await;
+        assert_eq!(posted_id, 1);
+
+        // A garbage frame first — must not crash the reader task or corrupt
+        // subsequent frame parsing.
+        server.push_raw("not valid json at all").await;
+        server
+            .push_response(r#"{"jsonrpc":"2.0","id":1,"result":{"ok":true}}"#)
+            .await;
+
+        let resp = handle.await.unwrap().unwrap();
+        assert_eq!(resp.result.unwrap()["ok"], true);
+
+        let _ = transport.close().await;
+        server.close_sse_stream().await;
+    }
+
+    #[tokio::test]
+    async fn test_connect_failure_surfaces_as_mcp_error() {
+        // Port 1: nothing listens here (same convention local-code's
+        // mcp/connect.rs tests use for HTTP).
+        let result = SseTransport::connect("http://127.0.0.1:1/sse", HashMap::new()).await;
+        assert!(matches!(result, Err(DaimonError::Mcp(_))));
+    }
+
+    #[tokio::test]
+    async fn test_close_fails_pending_sends() {
+        let mut server = TestSseServer::start(None).await;
+        let connect_url = server.connect_url();
+        let transport = Arc::new(
+            SseTransport::connect(connect_url, HashMap::new())
+                .await
+                .unwrap(),
+        );
+
+        let req = JsonRpcRequest::new(1, "tools/list", None);
+        let t = transport.clone();
+        let handle = tokio::spawn(async move { t.send(&req).await });
+
+        // Make sure the POST actually landed (the pending sender is
+        // registered) before closing, so this exercises "closed while a
+        // request is in flight" rather than "closed before it started".
+        let _ = server.next_posted_id().await;
+
+        transport.close().await.unwrap();
+
+        let result = handle.await.unwrap();
+        assert!(matches!(result, Err(DaimonError::Mcp(_))));
+
+        server.close_sse_stream().await;
     }
 }
