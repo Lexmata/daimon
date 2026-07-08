@@ -13,7 +13,7 @@ members = [
 name = "daimon"
 version = "0.17.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.94"
 description = "A Rust-native AI agent framework"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Lexmata/daimon"
@@ -48,7 +48,7 @@ http-server = ["dep:axum", "dep:tower-http"]
 qdrant = ["dep:qdrant-client"]
 pgvector = ["dep:daimon-plugin-pgvector"]
 opensearch = ["dep:daimon-plugin-opensearch"]
-grpc = ["dep:tonic", "dep:prost"]
+grpc = ["dep:tonic", "dep:prost", "dep:tonic-prost"]
 eval = []
 full = ["openai", "anthropic", "gemini", "azure", "bedrock", "ollama", "macros", "mcp", "sqlite", "redis", "nats", "amqp", "otel", "http-server", "qdrant", "pgvector", "opensearch", "grpc", "eval", "sqs", "pubsub", "servicebus"]
 
@@ -63,7 +63,7 @@ tracing = "0.1"
 futures = "0.3"
 pin-project-lite = "0.2"
 async-stream = "0.3"
-jsonschema = "0.46"
+jsonschema = "0.47"
 itoa = "1"
 ryu = "1"
 regex-lite = "0.1"
@@ -74,24 +74,27 @@ daimon-provider-gemini = { path = "daimon-provider-gemini", version = "0.17.0", 
 daimon-provider-azure = { path = "daimon-provider-azure", version = "0.17.0", optional = true }
 daimon-plugin-pgvector = { path = "daimon-plugin-pgvector", version = "0.17.0", optional = true }
 daimon-plugin-opensearch = { path = "daimon-plugin-opensearch", version = "0.17.0", optional = true }
-reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"], default-features = false, optional = true }
-rusqlite = { version = "0.37", features = ["bundled"], optional = true }
+reqwest = { version = "0.13", features = ["json", "rustls", "stream", "query"], default-features = false, optional = true }
+# ponytail: held at 0.39 — rusqlite 0.40's libsqlite3-sys 0.38 uses unstable cfg_select!,
+# unbuildable on current stable/nightly; bump to 0.40 once cfg_select stabilizes.
+rusqlite = { version = "0.39", features = ["bundled"], optional = true }
 redis = { version = "1", features = ["tokio-comp", "aio"], optional = true }
-opentelemetry = { version = "0.31", optional = true }
-opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"], optional = true }
-opentelemetry-otlp = { version = "0.31", features = ["http-proto"], optional = true }
-tracing-opentelemetry = { version = "0.32", optional = true }
+opentelemetry = { version = "0.32", optional = true }
+opentelemetry_sdk = { version = "0.32", features = ["rt-tokio"], optional = true }
+opentelemetry-otlp = { version = "0.32", features = ["http-proto"], optional = true }
+tracing-opentelemetry = { version = "0.33", optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 axum = { version = "0.8", optional = true }
-tower-http = { version = "0.6", features = ["cors"], optional = true }
+tower-http = { version = "0.7", features = ["cors"], optional = true }
 qdrant-client = { version = "1", optional = true }
-tonic = { version = "0.12", optional = true }
-prost = { version = "0.13", optional = true }
+tonic = { version = "0.14", optional = true }
+prost = { version = "0.14", optional = true }
+tonic-prost = { version = "0.14", optional = true }
 async-nats = { version = "0.49", optional = true }
-lapin = { version = "2", optional = true }
+lapin = { version = "4", optional = true }
 
 [build-dependencies]
-tonic-build = { version = "0.12", default-features = false, features = ["prost", "transport"] }
+tonic-prost-build = "0.14"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
