@@ -272,3 +272,216 @@ impl McpTransport for SseTransport {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::SocketAddr;
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::mpsc;
+
+    /// Writes one HTTP/1.1 chunked-transfer-encoding chunk.
+    async fn write_chunk(stream: &mut TcpStream, data: &[u8]) -> std::io::Result<()> {
+        stream
+            .write_all(format!("{:x}\r\n", data.len()).as_bytes())
+            .await?;
+        stream.write_all(data).await?;
+        stream.write_all(b"\r\n").await
+    }
+
+    /// Writes the terminating zero-length chunk, ending the response body.
+    async fn write_chunk_end(stream: &mut TcpStream) -> std::io::Result<()> {
+        stream.write_all(b"0\r\n\r\n").await
+    }
+
+    /// Writes one SSE frame (optionally with an explicit `event:` line) as a
+    /// single chunked-transfer-encoding chunk.
+    async fn write_sse_frame(
+        stream: &mut TcpStream,
+        event: Option<&str>,
+        data: &str,
+    ) -> std::io::Result<()> {
+        let mut frame = String::new();
+        if let Some(event) = event {
+            frame.push_str(&format!("event: {event}\n"));
+        }
+        frame.push_str(&format!("data: {data}\n\n"));
+        write_chunk(stream, frame.as_bytes()).await
+    }
+
+    /// Writes the HTTP/1.1 response line + headers that open a chunked
+    /// `text/event-stream` response. Caller writes frames after this via
+    /// `write_sse_frame`, and must eventually call `write_chunk_end`.
+    async fn write_sse_response_head(stream: &mut TcpStream) -> std::io::Result<()> {
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\n\
+                  Content-Type: text/event-stream\r\n\
+                  Transfer-Encoding: chunked\r\n\
+                  Connection: keep-alive\r\n\r\n",
+            )
+            .await
+    }
+
+    /// Reads one HTTP/1.1 request's method, path, and (if `Content-Length`
+    /// is present) body off `stream`. Blocks until the request line and
+    /// headers have arrived.
+    async fn read_http_request(stream: &mut TcpStream) -> (String, String, String) {
+        let mut reader = BufReader::new(&mut *stream);
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).await.unwrap();
+        let mut parts = request_line.split_whitespace();
+        let method = parts.next().unwrap_or("").to_string();
+        let path = parts.next().unwrap_or("").to_string();
+
+        let mut content_length = 0usize;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                break;
+            }
+            if let Some((key, value)) = trimmed.split_once(':') {
+                if key.eq_ignore_ascii_case("content-length") {
+                    content_length = value.trim().parse().unwrap_or(0);
+                }
+            }
+        }
+        let mut body = vec![0u8; content_length];
+        if content_length > 0 {
+            reader.read_exact(&mut body).await.unwrap();
+        }
+        (method, path, String::from_utf8_lossy(&body).into_owned())
+    }
+
+    async fn write_202_accepted(stream: &mut TcpStream) -> std::io::Result<()> {
+        stream
+            .write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n")
+            .await
+    }
+
+    /// A running test SSE server: accepts exactly one long-lived GET
+    /// connection (the SSE stream, lazily obtained the first time a
+    /// `push_*`/`close_sse_stream` call needs it) and any number of POST
+    /// connections (each just parsed for its JSON-RPC `id` and acknowledged
+    /// with a 202 — the id is forwarded over `posted_ids` so the test can
+    /// react to it). The accept loop is fully spawned in the background so
+    /// `start()` can return immediately, before any client has connected —
+    /// otherwise `start()`'s own `.accept().await` would block forever,
+    /// since nothing connects until the caller's subsequent
+    /// `SseTransport::connect(...)` call runs, which can't happen until
+    /// `start()` returns. (The very first version of this harness got this
+    /// wrong and deadlocked every test that used it.)
+    struct TestSseServer {
+        addr: SocketAddr,
+        sse_stream: Option<TcpStream>,
+        sse_stream_rx: Option<tokio::sync::oneshot::Receiver<TcpStream>>,
+        posted_ids: mpsc::UnboundedReceiver<u64>,
+    }
+
+    impl TestSseServer {
+        /// Starts the server in the background and returns immediately —
+        /// does NOT wait for a client to connect. If `endpoint_frame` is
+        /// `Some(data)`, an `event: endpoint` frame with that data is sent
+        /// right after the SSE response head, as soon as the first (SSE)
+        /// connection arrives.
+        async fn start(endpoint_frame: Option<&str>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let (posted_tx, posted_rx) = mpsc::unbounded_channel();
+            let (sse_tx, sse_rx) = tokio::sync::oneshot::channel();
+            let endpoint_frame = endpoint_frame.map(|s| s.to_string());
+
+            tokio::spawn(async move {
+                let mut sse_tx = Some(sse_tx);
+                loop {
+                    let Ok((mut conn, _)) = listener.accept().await else {
+                        break;
+                    };
+                    if let Some(tx) = sse_tx.take() {
+                        // First connection: this is the SSE GET.
+                        let (_method, _path, _body) = read_http_request(&mut conn).await;
+                        write_sse_response_head(&mut conn).await.unwrap();
+                        if let Some(data) = &endpoint_frame {
+                            write_sse_frame(&mut conn, Some("endpoint"), data)
+                                .await
+                                .unwrap();
+                        }
+                        let _ = tx.send(conn);
+                        continue;
+                    }
+                    // Every later connection is a POST.
+                    let (method, _path, body) = read_http_request(&mut conn).await;
+                    if method == "POST" {
+                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+                            if let Some(id) = json.get("id").and_then(|v| v.as_u64()) {
+                                let _ = posted_tx.send(id);
+                            }
+                        }
+                        let _ = write_202_accepted(&mut conn).await;
+                    }
+                }
+            });
+
+            Self {
+                addr,
+                sse_stream: None,
+                sse_stream_rx: Some(sse_rx),
+                posted_ids: posted_rx,
+            }
+        }
+
+        fn connect_url(&self) -> String {
+            format!("http://{}/sse", self.addr)
+        }
+
+        /// Returns the SSE `TcpStream`, awaiting the client's connection the
+        /// first time it's needed (by which point the test has already
+        /// called `SseTransport::connect(...)`, so this resolves promptly).
+        async fn sse_stream(&mut self) -> &mut TcpStream {
+            if self.sse_stream.is_none() {
+                let rx = self
+                    .sse_stream_rx
+                    .take()
+                    .expect("sse_stream already consumed");
+                let stream = tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+                    .await
+                    .expect("timed out waiting for the SSE client to connect")
+                    .expect("sse_stream sender dropped");
+                self.sse_stream = Some(stream);
+            }
+            self.sse_stream.as_mut().unwrap()
+        }
+
+        /// Sends a JSON-RPC response as a `message` SSE frame over the held
+        /// GET stream.
+        async fn push_response(&mut self, response_json: &str) {
+            let stream = self.sse_stream().await;
+            write_sse_frame(stream, None, response_json).await.unwrap();
+        }
+
+        /// Sends a raw (possibly malformed) `data:` payload as a `message`
+        /// frame.
+        async fn push_raw(&mut self, raw_data: &str) {
+            let stream = self.sse_stream().await;
+            write_sse_frame(stream, None, raw_data).await.unwrap();
+        }
+
+        /// Waits for the next POSTed request's JSON-RPC id.
+        async fn next_posted_id(&mut self) -> u64 {
+            tokio::time::timeout(std::time::Duration::from_secs(5), self.posted_ids.recv())
+                .await
+                .expect("timed out waiting for a POST")
+                .expect("posted_ids channel closed")
+        }
+
+        /// Closes the SSE stream (simulates the server hanging up).
+        async fn close_sse_stream(mut self) {
+            let stream = self.sse_stream().await;
+            let _ = write_chunk_end(stream).await;
+            let _ = stream.shutdown().await;
+        }
+    }
+}
