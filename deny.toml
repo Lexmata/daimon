@@ -3,19 +3,7 @@ all-features = true
 
 [advisories]
 unmaintained = "workspace"
-ignore = [
-    # All remaining advisories below are old rustls-webpki lines pinned by
-    # transitive dependencies, not by first-party code. We already updated
-    # the first-party rustls-webpki to 0.103.13 (patched); these instances
-    # can only move once the pinning dependency moves.
-    #
-    # rustls-webpki 0.101.7 via the AWS SDK (aws-smithy-http-client ->
-    # rustls 0.21). No fixed release in that chain; revisit when the AWS
-    # SDK migrates to rustls 0.23.
-    "RUSTSEC-2026-0098",
-    "RUSTSEC-2026-0099",
-    "RUSTSEC-2026-0104",
-]
+ignore = []
 
 [licenses]
 allow = [

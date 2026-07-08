@@ -54,6 +54,7 @@ impl SqsBroker {
     /// Creates a broker with a specific AWS region.
     pub async fn with_region(queue_url: impl Into<String>, region: &str) -> Result<Self> {
         let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .http_client(crate::modern_https_client())
             .region(aws_config::Region::new(region.to_string()))
             .load()
             .await;
