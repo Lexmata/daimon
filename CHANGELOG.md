@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **llama.cpp provider (DAIM-17):** new `daimon-provider-llamacpp` crate
+  (feature `llamacpp`, included in `full`) targeting a running `llama-server`
+  over its OpenAI-compatible `/v1/chat/completions` and `/v1/embeddings`
+  endpoints. `LlamaCpp` implements `Model` (sync + SSE streaming, tool
+  calling via `--jinja` templates) with llama.cpp-native sampling extras
+  (`grammar`, `json_schema`, `min_p`, `top_k`, `repeat_penalty`,
+  `cache_prompt`); `LlamaCppEmbedding` implements `EmbeddingModel`. Server
+  error bodies are surfaced verbatim so grammar/template failures are
+  diagnosable. Re-exported as `daimon::model::llamacpp`.
+
 ### Fixed
 
 - **Distributed (DAIM-10):**

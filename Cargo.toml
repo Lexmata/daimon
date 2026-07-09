@@ -5,6 +5,7 @@ members = [
     "daimon-provider-bedrock",
     "daimon-provider-gemini",
     "daimon-provider-azure",
+    "daimon-provider-llamacpp",
     "daimon-plugin-pgvector",
     "daimon-plugin-opensearch",
 ]
@@ -24,6 +25,7 @@ daimon-macros = { path = "daimon-macros", version = "0.19.0" }
 daimon-provider-bedrock = { path = "daimon-provider-bedrock", version = "0.19.0" }
 daimon-provider-gemini = { path = "daimon-provider-gemini", version = "0.19.0" }
 daimon-provider-azure = { path = "daimon-provider-azure", version = "0.19.0" }
+daimon-provider-llamacpp = { path = "daimon-provider-llamacpp", version = "0.19.0" }
 daimon-plugin-pgvector = { path = "daimon-plugin-pgvector", version = "0.19.0" }
 daimon-plugin-opensearch = { path = "daimon-plugin-opensearch", version = "0.19.0" }
 tokio = { version = "1" }
@@ -60,6 +62,7 @@ openai = ["dep:reqwest"]
 anthropic = ["dep:reqwest"]
 gemini = ["dep:daimon-provider-gemini"]
 azure = ["dep:daimon-provider-azure"]
+llamacpp = ["dep:daimon-provider-llamacpp"]
 bedrock = ["dep:daimon-provider-bedrock"]
 sqs = ["bedrock", "daimon-provider-bedrock/sqs"]
 pubsub = ["gemini", "daimon-provider-gemini/pubsub"]
@@ -77,7 +80,7 @@ pgvector = ["dep:daimon-plugin-pgvector"]
 opensearch = ["dep:daimon-plugin-opensearch"]
 grpc = ["dep:tonic", "dep:prost", "dep:tonic-prost"]
 eval = []
-full = ["openai", "anthropic", "gemini", "azure", "bedrock", "ollama", "macros", "mcp", "sqlite", "redis", "nats", "amqp", "otel", "http-server", "qdrant", "pgvector", "opensearch", "grpc", "eval", "sqs", "pubsub", "servicebus"]
+full = ["openai", "anthropic", "gemini", "azure", "bedrock", "ollama", "llamacpp", "macros", "mcp", "sqlite", "redis", "nats", "amqp", "otel", "http-server", "qdrant", "pgvector", "opensearch", "grpc", "eval", "sqs", "pubsub", "servicebus"]
 
 [dependencies]
 daimon-core = { workspace = true }
@@ -99,6 +102,7 @@ daimon-macros = { workspace = true, optional = true }
 daimon-provider-bedrock = { workspace = true, optional = true }
 daimon-provider-gemini = { workspace = true, optional = true }
 daimon-provider-azure = { workspace = true, optional = true }
+daimon-provider-llamacpp = { workspace = true, optional = true }
 daimon-plugin-pgvector = { workspace = true, optional = true }
 daimon-plugin-opensearch = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }

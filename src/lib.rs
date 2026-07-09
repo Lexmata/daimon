@@ -34,6 +34,7 @@
 //! | `azure` | Azure OpenAI Service provider (via `daimon-provider-azure`) |
 //! | `bedrock` | AWS Bedrock provider (via `daimon-provider-bedrock`) |
 //! | `ollama` | Ollama local model provider |
+//! | `llamacpp` | llama.cpp (llama-server) provider (via `daimon-provider-llamacpp`) |
 //! | `sqlite` | SQLite memory backend |
 //! | `redis` | Redis memory backend + task broker |
 //! | `nats` | NATS JetStream task broker |
