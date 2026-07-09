@@ -286,16 +286,13 @@ impl TaskBroker for NatsBroker {
     }
 
     async fn complete(&self, task_id: &str, result: TaskResult) -> Result<()> {
-        // Ack the message now that the task has been fully processed, so
-        // JetStream can advance and won't redeliver it.
-        let acker = self.in_flight.lock().await.remove(task_id);
-        if let Some(acker) = acker {
-            acker
-                .ack()
-                .await
-                .map_err(|e| DaimonError::Other(format!("nats ack: {e}")))?;
-        }
-
+        // Persist the outcome to KV *before* acking. If the process crashed
+        // between an early ack and the KV writes, JetStream would consider the
+        // message done and never redeliver it while the status bucket still
+        // said "running" — the task would be lost forever. Writing first means
+        // a crash between write and ack merely causes a redelivery, and the
+        // duplicate KV writes on reprocessing are idempotent.
+        //
         // Store the result JSON first, then flip the status marker to
         // "completed" — a reader that observes "completed" is then guaranteed
         // to find the result already present.
@@ -312,13 +309,9 @@ impl TaskBroker for NatsBroker {
             )
             .await
             .map_err(|e| DaimonError::Other(format!("nats kv put completed: {e}")))?;
-        Ok(())
-    }
 
-    async fn fail(&self, task_id: &str, error: String) -> Result<()> {
-        // The task was delivered and processed (it errored); ack it so it is
-        // not redelivered in a loop. The failure is recorded in the KV bucket.
-        // A lost-on-crash task is handled by *not* acking in `receive`.
+        // Ack last, now that the outcome is durably recorded, so JetStream
+        // can advance and won't redeliver the message.
         let acker = self.in_flight.lock().await.remove(task_id);
         if let Some(acker) = acker {
             acker
@@ -326,11 +319,28 @@ impl TaskBroker for NatsBroker {
                 .await
                 .map_err(|e| DaimonError::Other(format!("nats ack: {e}")))?;
         }
+        Ok(())
+    }
 
+    async fn fail(&self, task_id: &str, error: String) -> Result<()> {
+        // Record the failure in KV *before* acking, for the same reason as
+        // `complete`: an early ack followed by a crash would drop the message
+        // from JetStream while the status bucket still read "running".
         self.status_kv
             .put(task_id, status_marker(&TaskStatus::Failed(error)).into())
             .await
             .map_err(|e| DaimonError::Other(format!("nats kv put failed: {e}")))?;
+
+        // The task was delivered and processed (it errored); ack it so it is
+        // not redelivered in a loop. A lost-on-crash task is handled by *not*
+        // acking in `receive`.
+        let acker = self.in_flight.lock().await.remove(task_id);
+        if let Some(acker) = acker {
+            acker
+                .ack()
+                .await
+                .map_err(|e| DaimonError::Other(format!("nats ack: {e}")))?;
+        }
         Ok(())
     }
 }

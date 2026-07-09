@@ -99,17 +99,14 @@ impl Checkpoint for FileCheckpoint {
                     .map_err(|e| DaimonError::Other(format!("failed to write checkpoint: {e}")))?;
                 f.flush()
                     .map_err(|e| DaimonError::Other(format!("failed to flush checkpoint: {e}")))?;
-                // A sync_all failure means the bytes may not be durable on disk.
-                // Surface it (rather than silently discarding the error) so an
-                // fsync problem is at least observable in logs instead of a lost
-                // write masquerading as a committed checkpoint.
-                if let Err(e) = f.sync_all() {
-                    tracing::warn!(
-                        error = %e,
-                        path = %tmp_path.display(),
-                        "failed to fsync checkpoint temp file"
-                    );
-                }
+                // A sync_all failure means the bytes may not be durable on
+                // disk, so treat it as a hard error: returning Ok here would
+                // report a possibly-lost write as a committed checkpoint. The
+                // caller's cleanup removes the temp file and `save` returns
+                // Err, and the previous checkpoint file stays in place because
+                // the rename never happens.
+                f.sync_all()
+                    .map_err(|e| DaimonError::Other(format!("failed to fsync checkpoint: {e}")))?;
                 Ok::<_, DaimonError>(())
             })();
 

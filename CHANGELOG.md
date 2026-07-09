@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Distributed (DAIM-10):**
+  - Workers no longer exit permanently the first time a Redis or NATS queue
+    is idle. `TaskBroker` gains `none_means_closed()` so polling brokers'
+    empty polls are retried while `InProcessBroker`'s channel closure (and
+    AMQP consumer cancellation) still terminate the worker. `InProcessBroker`
+    gains an explicit `close()`.
+  - The NATS broker writes task result/status to KV *before* acking the
+    JetStream message; a crash mid-completion no longer loses the task with
+    its status stuck at `running`.
+  - The AMQP broker sets `basic_qos` (default prefetch 16, configurable via
+    `with_prefetch`); RabbitMQ no longer pushes an entire queue to the first
+    consumer.
+  - `TaskWorker::run_once` and the streaming worker now mark agent-errored
+    tasks `Failed`, matching `run_parallel`, instead of `Completed` with an
+    embedded error.
+  - gRPC broker client: RPCs are no longer serialized behind a mutex.
+- **Checkpoints (DAIM-10):**
+  - `NatsKvCheckpoint::connect` no longer fails when the KV bucket already
+    exists; run ids are validated against the NATS key charset; missing-key
+    detection uses typed errors instead of string matching.
+  - `CheckpointSync`/`CheckpointReplicator` refresh runs that advanced on
+    the source instead of only copying missing ids, and `delete` removes
+    remote before local so a failed remote delete can't resurrect the run.
+  - `FileCheckpoint::save` treats a failed fsync as an error instead of
+    logging a warning and reporting the checkpoint durable.
+- **A2A (DAIM-10):**
+  - `tasks/cancel` actually cancels: the in-flight agent run is aborted via
+    a per-task cancellation token, and a completion racing the cancel can no
+    longer overwrite `Canceled` with `Completed`.
+  - Continuing a task preserves its history and artifacts and sends the
+    full conversation to the agent instead of only the newest message.
+  - Task/request ids are UUID-formatted and collision-resistant under
+    concurrency (previously bare nanosecond timestamps).
 - **MCP (DAIM-11, breaking):**
   - Request ids are now allocated by the transport instead of per
     `McpToolBridge`; two bridges sharing one `SseTransport` no longer send

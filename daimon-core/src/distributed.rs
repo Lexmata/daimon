@@ -29,7 +29,8 @@ pub struct AgentTask {
 }
 
 impl AgentTask {
-    /// Creates a new task with a timestamp-based ID.
+    /// Creates a new task with a unique ID derived from the current time and
+    /// a process-wide counter.
     pub fn new(input: impl Into<String>) -> Self {
         Self {
             task_id: Self::generate_id(),
@@ -51,13 +52,25 @@ impl AgentTask {
         self
     }
 
+    /// Generates a task ID of the form `task-{nanos:x}-{counter:x}`.
+    ///
+    /// The nanosecond timestamp alone is not collision-safe: two tasks created
+    /// within the same clock tick (coarse clocks, concurrent callers) would get
+    /// identical IDs. A process-wide atomic counter is appended so every call
+    /// in a process yields a distinct ID, while the timestamp keeps IDs unique
+    /// across processes and restarts.
     fn generate_id() -> String {
+        use std::sync::atomic::{AtomicU64, Ordering};
         use std::time::{SystemTime, UNIX_EPOCH};
+
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        format!("task-{ts:x}")
+        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+        format!("task-{ts:x}-{seq:x}")
     }
 }
 
@@ -101,9 +114,30 @@ pub trait TaskBroker: Send + Sync {
     /// Queries the current status of a task.
     fn status(&self, task_id: &str) -> impl Future<Output = Result<TaskStatus>> + Send;
 
-    /// Blocks until a task is available and returns it.
-    /// Returns `None` if the broker is closed.
+    /// Waits for a task and returns it.
+    ///
+    /// Returns `Ok(None)` when no task was obtained. What that means depends
+    /// on [`none_means_closed`](Self::none_means_closed):
+    ///
+    /// - `none_means_closed() == true` — the broker is permanently closed and
+    ///   no further tasks will ever arrive; callers should stop polling.
+    /// - `none_means_closed() == false` (the default) — the queue was merely
+    ///   idle for one poll interval (e.g. a blocking-pop timeout or an empty
+    ///   fetch); callers should keep polling.
     fn receive(&self) -> impl Future<Output = Result<Option<AgentTask>>> + Send;
+
+    /// Whether [`receive`](Self::receive) returning `Ok(None)` means the
+    /// broker is permanently closed rather than momentarily idle.
+    ///
+    /// Network brokers (Redis, NATS, SQS, Pub/Sub, Service Bus, …) poll with
+    /// a timeout and legitimately come up empty when the queue is idle, so the
+    /// default is `false`: an empty receive is a transient condition and the
+    /// caller should retry. Brokers with a real end-of-stream signal (e.g. an
+    /// in-process channel whose senders are gone, or a cancelled AMQP
+    /// consumer) override this to `true` so workers can shut down promptly.
+    fn none_means_closed(&self) -> bool {
+        false
+    }
 
     /// Marks a task as completed with the given result.
     fn complete(
@@ -131,6 +165,11 @@ pub trait ErasedTaskBroker: Send + Sync {
     fn receive_erased(
         &self,
     ) -> Pin<Box<dyn Future<Output = Result<Option<AgentTask>>> + Send + '_>>;
+
+    /// Object-safe mirror of [`TaskBroker::none_means_closed`].
+    fn none_means_closed_erased(&self) -> bool {
+        false
+    }
 
     fn complete_erased<'a>(
         &'a self,
@@ -166,6 +205,10 @@ impl<T: TaskBroker> ErasedTaskBroker for T {
         Box::pin(self.receive())
     }
 
+    fn none_means_closed_erased(&self) -> bool {
+        self.none_means_closed()
+    }
+
     fn complete_erased<'a>(
         &'a self,
         task_id: &'a str,
@@ -180,5 +223,33 @@ impl<T: TaskBroker> ErasedTaskBroker for T {
         error: String,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
         Box::pin(self.fail(task_id, error))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_generate_id_unique_across_concurrent_calls() {
+        // Nanosecond timestamps alone can collide under concurrency; the
+        // appended process-wide counter must make every ID distinct.
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    (0..100)
+                        .map(|_| AgentTask::new("x").task_id)
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+
+        let mut ids = std::collections::HashSet::new();
+        for handle in handles {
+            for id in handle.join().expect("thread panicked") {
+                assert!(ids.insert(id.clone()), "duplicate task id generated: {id}");
+            }
+        }
+        assert_eq!(ids.len(), 800);
     }
 }
