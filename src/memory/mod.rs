@@ -28,3 +28,31 @@ mod redis;
 
 #[cfg(feature = "redis")]
 pub use self::redis::RedisMemory;
+
+/// Returns the number of messages forming the eviction group at the front of
+/// the queue.
+///
+/// An assistant message carrying tool calls and its contiguous following
+/// [`Role::Tool`](crate::model::types::Role::Tool) result messages form an
+/// atomic group: evicting the assistant message while keeping the tool
+/// results would leave orphaned tool results, which OpenAI- and
+/// Anthropic-style APIs reject. Any other message is a group of one.
+pub(crate) fn eviction_group_len(
+    messages: &std::collections::VecDeque<crate::model::types::Message>,
+) -> usize {
+    use crate::model::types::Role;
+
+    let Some(first) = messages.front() else {
+        return 0;
+    };
+
+    if first.role != Role::Assistant || first.tool_calls.is_empty() {
+        return 1;
+    }
+
+    let mut len = 1;
+    while messages.get(len).is_some_and(|m| m.role == Role::Tool) {
+        len += 1;
+    }
+    len
+}

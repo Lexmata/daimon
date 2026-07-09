@@ -15,7 +15,7 @@
 //!     .build()?;
 //! ```
 
-use tokio::sync::Mutex;
+use redis::aio::ConnectionManager;
 
 use crate::error::{DaimonError, Result};
 use crate::memory::Memory;
@@ -25,10 +25,14 @@ use crate::model::types::Message;
 ///
 /// Each message is JSON-serialized and appended to a Redis list at the
 /// configured key. Messages are returned in insertion order.
+///
+/// The connection is managed by [`redis::aio::ConnectionManager`], which
+/// transparently reconnects (with retries) when the underlying connection
+/// drops, so a transient network failure never permanently breaks the
+/// memory backend.
 pub struct RedisMemory {
-    client: redis::Client,
+    connection: ConnectionManager,
     key: String,
-    connection: Mutex<Option<redis::aio::MultiplexedConnection>>,
 }
 
 impl RedisMemory {
@@ -40,15 +44,13 @@ impl RedisMemory {
         let client = redis::Client::open(url)
             .map_err(|e| DaimonError::Other(format!("redis connection: {e}")))?;
 
-        let conn: redis::aio::MultiplexedConnection = client
-            .get_multiplexed_async_connection()
+        let connection = ConnectionManager::new(client)
             .await
             .map_err(|e| DaimonError::Other(format!("redis connect: {e}")))?;
 
         Ok(Self {
-            client,
+            connection,
             key: key.into(),
-            connection: Mutex::new(Some(conn)),
         })
     }
 
@@ -57,20 +59,12 @@ impl RedisMemory {
         &self.key
     }
 
-    async fn conn(&self) -> Result<redis::aio::MultiplexedConnection> {
-        let mut guard = self.connection.lock().await;
-        if let Some(conn) = guard.as_ref() {
-            return Ok(conn.clone());
-        }
-
-        let conn: redis::aio::MultiplexedConnection = self
-            .client
-            .get_multiplexed_async_connection()
-            .await
-            .map_err(|e| DaimonError::Other(format!("redis reconnect: {e}")))?;
-
-        *guard = Some(conn.clone());
-        Ok(conn)
+    /// Returns a handle to the managed connection.
+    ///
+    /// `ConnectionManager` is a cheap `Arc`-backed clone; command methods
+    /// take `&mut self`, so each operation clones a handle.
+    fn conn(&self) -> ConnectionManager {
+        self.connection.clone()
     }
 }
 
@@ -79,7 +73,7 @@ impl Memory for RedisMemory {
         use redis::AsyncCommands;
 
         let serialized = serde_json::to_string(&message)?;
-        let mut conn = self.conn().await?;
+        let mut conn = self.conn();
         conn.rpush::<_, _, ()>(&self.key, &serialized)
             .await
             .map_err(|e| DaimonError::Other(format!("redis rpush: {e}")))?;
@@ -89,7 +83,7 @@ impl Memory for RedisMemory {
     async fn get_messages(&self) -> Result<Vec<Message>> {
         use redis::AsyncCommands;
 
-        let mut conn = self.conn().await?;
+        let mut conn = self.conn();
         let items: Vec<String> = conn
             .lrange(&self.key, 0, -1)
             .await
@@ -106,10 +100,44 @@ impl Memory for RedisMemory {
     async fn clear(&self) -> Result<()> {
         use redis::AsyncCommands;
 
-        let mut conn = self.conn().await?;
+        let mut conn = self.conn();
         conn.del::<_, ()>(&self.key)
             .await
             .map_err(|e| DaimonError::Other(format!("redis del: {e}")))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_new_rejects_invalid_url() {
+        let result = RedisMemory::new("not-a-redis-url", "conversation:test").await;
+        let err = result.err().expect("invalid URL must produce an error");
+        assert!(matches!(err, DaimonError::Other(_)));
+        assert!(err.to_string().contains("redis connection"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live Redis at redis://127.0.0.1/"]
+    async fn test_live_round_trip() {
+        let memory = RedisMemory::new("redis://127.0.0.1/", "daimon:test:round_trip")
+            .await
+            .unwrap();
+        memory.clear().await.unwrap();
+
+        memory.add_message(Message::user("hello")).await.unwrap();
+        memory.add_message(Message::assistant("hi")).await.unwrap();
+
+        let messages = memory.get_messages().await.unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].content.as_deref(), Some("hello"));
+        assert_eq!(messages[1].content.as_deref(), Some("hi"));
+        assert_eq!(memory.key(), "daimon:test:round_trip");
+
+        memory.clear().await.unwrap();
+        assert!(memory.get_messages().await.unwrap().is_empty());
     }
 }

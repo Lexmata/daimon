@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Memory (DAIM-12):**
+  - `SummaryMemory` no longer loses messages when the summarizer model call
+    fails — messages are only drained after a successful summary, concurrent
+    summarizations are serialized, and a failed summarization logs a warning
+    instead of aborting the caller's agent run. A `clear()` racing an
+    in-flight summarization no longer resurrects deleted messages.
+  - Sliding-window and token-window eviction now treat an assistant
+    tool-call message and its tool results as an atomic group, so eviction
+    can no longer orphan tool results and produce histories providers
+    reject with a 400.
+  - The Redis memory backend uses `redis::aio::ConnectionManager`; a dropped
+    connection now reconnects instead of failing every subsequent operation.
+  - The SQLite backend surfaces corrupted `tool_calls` JSON as an error
+    instead of silently rewriting history, and session IDs are now
+    collision-resistant across processes.
+- **Guardrails (DAIM-12, breaking):** `RegexFilterGuardrail::block()` /
+  `redact()` return `Result` and reject invalid regex patterns loudly.
+  Previously a pattern that failed to compile was silently dropped — a
+  typo'd credential filter became no filter at all.
+
 ### Added
 
 - **MCP `SseTransport`** — HTTP+SSE client transport for the Model Context
