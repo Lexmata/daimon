@@ -41,7 +41,7 @@ jobs:
         env:
           TAG_VERSION: ${{ steps.version.outputs.version }}
         run: |
-          cargo_version=$(cargo metadata --format-version=1 --no-deps | jq -r '.packages[0].version')
+          cargo_version=$(cargo metadata --format-version=1 --no-deps | jq -r '.packages[] | select(.name == "daimon") | .version')
           if [[ "$cargo_version" != "$TAG_VERSION" ]]; then
             echo "::error::Cargo.toml version ($cargo_version) does not match tag ($TAG_VERSION)"
             exit 1

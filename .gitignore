@@ -7,3 +7,4 @@ web/.angular/
 # Local-only design specs / plans (per work profile rules) — never committed
 docs/superpowers/specs/
 docs/superpowers/plans/
+web/public/docs/*.md

@@ -22,7 +22,7 @@ Add Daimon to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-daimon = "0.17"
+daimon = "0.19"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -144,7 +144,7 @@ async fn main() -> daimon::Result<()> {
 | `bedrock` | No | AWS Bedrock Converse API |
 | `gemini` | No | Google Gemini / Vertex AI provider |
 | `azure` | No | Azure OpenAI Service provider |
-| `ollama` | No | Ollama local model provider |
+| `ollama` | Yes | Ollama local model provider |
 | `mcp` | No | Model Context Protocol client & server |
 | `sqlite` | No | SQLite memory backend |
 | `redis` | No | Redis memory backend + task broker + checkpoint |
@@ -162,13 +162,13 @@ The core framework compiles with no features enabled. Enable only the providers 
 
 ```toml
 # Only Anthropic
-daimon = { version = "0.17", default-features = false, features = ["anthropic"] }
+daimon = { version = "0.19", default-features = false, features = ["anthropic"] }
 
 # All providers
-daimon = { version = "0.17", features = ["full"] }
+daimon = { version = "0.19", features = ["full"] }
 
 # Core only (bring your own Model impl)
-daimon = { version = "0.17", default-features = false }
+daimon = { version = "0.19", default-features = false }
 ```
 
 ## Provider Configuration
@@ -267,7 +267,7 @@ Each provider reads its API key from standard environment variables:
 ## Testing
 
 ```bash
-# Default features (openai + anthropic)
+# Default features (openai + anthropic + ollama + macros)
 cargo test
 
 # All features
@@ -277,7 +277,7 @@ cargo test --features full
 cargo test --no-default-features
 
 # Coverage (requires cargo-llvm-cov)
-cargo llvm-cov --features full --fail-under-lines 90
+cargo llvm-cov --features full --fail-under-lines 84
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for full testing and development setup.

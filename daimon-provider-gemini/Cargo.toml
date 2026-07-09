@@ -1,12 +1,12 @@
 [package]
 name = "daimon-provider-gemini"
-version = "0.18.1"
-edition = "2024"
-rust-version = "1.95"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
 description = "Google Gemini provider for the Daimon AI agent framework"
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/Lexmata/daimon"
-homepage = "https://github.com/Lexmata/daimon"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 documentation = "https://docs.rs/daimon-provider-gemini"
 keywords = ["ai", "agent", "llm", "gemini", "google"]
 categories = ["asynchronous", "api-bindings"]
@@ -19,12 +19,12 @@ default = []
 pubsub = ["dep:base64"]
 
 [dependencies]
-daimon-core = { path = "../daimon-core", version = "0.18.1" }
-tokio = { version = "1", features = ["rt", "time", "sync"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tracing = "0.1"
-async-stream = "0.3"
-futures = "0.3"
-reqwest = { version = "0.13", features = ["json", "rustls", "stream", "query"], default-features = false }
+daimon-core = { workspace = true }
+tokio = { workspace = true, features = ["rt", "time", "sync"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+async-stream = { workspace = true }
+futures = { workspace = true }
+reqwest = { workspace = true }
 base64 = { version = "0.22", optional = true }
