@@ -363,8 +363,7 @@ impl Model for Bedrock {
                 let guardrail_config = GuardrailConfiguration::builder()
                     .guardrail_identifier(id)
                     .guardrail_version(version)
-                    .build()
-                    .expect("valid guardrail config");
+                    .build();
                 req_builder = req_builder.guardrail_config(guardrail_config);
                 tracing::debug!(guardrail_id = %id, "applied guardrail config");
             }
@@ -443,8 +442,7 @@ impl Model for Bedrock {
             let guardrail_config = GuardrailStreamConfiguration::builder()
                 .guardrail_identifier(id)
                 .guardrail_version(version)
-                .build()
-                .expect("valid guardrail stream config");
+                .build();
             req_builder = req_builder.guardrail_config(guardrail_config);
             tracing::debug!(guardrail_id = %id, "applied guardrail config for stream");
         }
