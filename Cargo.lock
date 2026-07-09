@@ -1462,7 +1462,7 @@ dependencies = [
 
 [[package]]
 name = "daimon-core"
-version = "0.18.1"
+version = "0.19.0"
 dependencies = [
  "async-stream",
  "futures",
@@ -1476,7 +1476,7 @@ dependencies = [
 
 [[package]]
 name = "daimon-macros"
-version = "0.18.1"
+version = "0.19.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1485,7 +1485,7 @@ dependencies = [
 
 [[package]]
 name = "daimon-plugin-opensearch"
-version = "0.18.1"
+version = "0.19.0"
 dependencies = [
  "daimon-core",
  "opensearch",
@@ -1497,7 +1497,7 @@ dependencies = [
 
 [[package]]
 name = "daimon-plugin-pgvector"
-version = "0.18.1"
+version = "0.19.0"
 dependencies = [
  "daimon-core",
  "deadpool-postgres",
@@ -1511,7 +1511,7 @@ dependencies = [
 
 [[package]]
 name = "daimon-provider-azure"
-version = "0.18.1"
+version = "0.19.0"
 dependencies = [
  "async-stream",
  "daimon-core",
@@ -1525,7 +1525,7 @@ dependencies = [
 
 [[package]]
 name = "daimon-provider-bedrock"
-version = "0.18.1"
+version = "0.19.0"
 dependencies = [
  "async-stream",
  "aws-config",
@@ -1542,7 +1542,7 @@ dependencies = [
 
 [[package]]
 name = "daimon-provider-gemini"
-version = "0.18.1"
+version = "0.19.0"
 dependencies = [
  "async-stream",
  "base64",
@@ -2864,8 +2864,6 @@ dependencies = [
  "percent-encoding",
  "referencing",
  "regex",
- "reqwest 0.13.2",
- "rustls",
  "serde",
  "serde_json",
  "unicode-general-category",
@@ -4210,7 +4208,6 @@ dependencies = [
  "futures-channel",
  "futures-core",
  "futures-util",
- "h2",
  "http 1.4.0",
  "http-body 1.0.1",
  "http-body-util",

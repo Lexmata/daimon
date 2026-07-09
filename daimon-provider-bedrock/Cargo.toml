@@ -1,12 +1,12 @@
 [package]
 name = "daimon-provider-bedrock"
-version = "0.18.1"
-edition = "2024"
-rust-version = "1.95"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
 description = "Amazon Bedrock provider for the Daimon AI agent framework"
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/Lexmata/daimon"
-homepage = "https://github.com/Lexmata/daimon"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 documentation = "https://docs.rs/daimon-provider-bedrock"
 keywords = ["ai", "agent", "llm", "bedrock", "aws"]
 categories = ["asynchronous", "api-bindings"]
@@ -19,11 +19,11 @@ default = []
 sqs = ["dep:aws-sdk-sqs"]
 
 [dependencies]
-daimon-core = { path = "../daimon-core", version = "0.18.1" }
-tokio = { version = "1", features = ["rt", "time", "sync"] }
-serde_json = "1"
-tracing = "0.1"
-async-stream = "0.3"
+daimon-core = { workspace = true }
+tokio = { workspace = true, features = ["rt", "time", "sync"] }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+async-stream = { workspace = true }
 # default-features disabled to drop the legacy hyper 0.14 + rustls 0.21 HTTP
 # client (which pulls the advisory-affected rustls-webpki 0.101). We supply a
 # modern rustls 0.23 / aws-lc client explicitly via aws-smithy-http-client.

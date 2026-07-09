@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **MCP `SseTransport`** — HTTP+SSE client transport for the Model Context
+  Protocol, with endpoint discovery, out-of-order response correlation, and a
+  real-TCP test harness. **`WebSocketTransport` is restored** (removed in
+  0.17.0); the `mcp` feature therefore depends on `tokio-tungstenite` again.
+
+### Changed
+
+- **Workspace crates now version in lockstep** via `[workspace.package]`; all
+  eight crates share one version (0.19.0) and common dependency declarations
+  moved to `[workspace.dependencies]`. Member crates no longer drift behind
+  the root crate between releases.
+- Bumped the AWS SDK group and adapted the Bedrock provider to the SDK's
+  infallible guardrail builders.
+- `jsonschema` no longer enables default features, dropping `reqwest`/`hyper`
+  from `--no-default-features` builds (remote `$ref` resolution was unused).
+
 ## [0.18.1] - 2026-07-08
 
 ### Security

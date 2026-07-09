@@ -72,6 +72,8 @@
 //! - [`distributed`] — Distributed agent execution across processes
 //! - [`mcp`] — Model Context Protocol client and server (stdio, HTTP)
 //! - [`telemetry`] — OpenTelemetry OTLP export (feature = "otel")
+//! - [`server`] — HTTP agent server (feature = "http-server")
+//! - [`eval`] — evaluation harness for agent behavior (feature = "eval")
 
 pub mod a2a;
 pub mod agent;

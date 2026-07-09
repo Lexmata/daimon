@@ -8,14 +8,14 @@ Add Daimon to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-daimon = "0.16"  # includes openai, anthropic, ollama, macros
+daimon = "0.19"  # includes openai, anthropic, ollama, macros
 ```
 
 To minimize dependencies, enable only what you need:
 
 ```toml
 [dependencies]
-daimon = { version = "0.16", default-features = false, features = ["openai", "macros"] }
+daimon = { version = "0.19", default-features = false, features = ["openai", "macros"] }
 ```
 
 Optional providers and plugins:
@@ -34,7 +34,7 @@ Optional providers and plugins:
 Example with Gemini and pgvector:
 
 ```toml
-daimon = { version = "0.16", features = ["openai", "gemini", "pgvector"] }
+daimon = { version = "0.19", features = ["openai", "gemini", "pgvector"] }
 ```
 
 ---

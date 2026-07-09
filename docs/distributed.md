@@ -533,13 +533,13 @@ Enable the broker you need:
 
 ```toml
 [dependencies]
-daimon = { version = "0.16", features = ["redis"] }   # RedisBroker
-daimon = { version = "0.16", features = ["nats"] }     # NatsBroker
-daimon = { version = "0.16", features = ["amqp"] }     # AmqpBroker
-daimon = { version = "0.16", features = ["grpc"] }     # GrpcBrokerServer/Client
-daimon = { version = "0.16", features = ["sqs"] }      # SqsBroker (via daimon-provider-bedrock)
-daimon = { version = "0.16", features = ["pubsub"] }   # PubSubBroker (via daimon-provider-gemini)
-daimon = { version = "0.16", features = ["servicebus"] }  # ServiceBusBroker (via daimon-provider-azure)
+daimon = { version = "0.19", features = ["redis"] }   # RedisBroker
+daimon = { version = "0.19", features = ["nats"] }     # NatsBroker
+daimon = { version = "0.19", features = ["amqp"] }     # AmqpBroker
+daimon = { version = "0.19", features = ["grpc"] }     # GrpcBrokerServer/Client
+daimon = { version = "0.19", features = ["sqs"] }      # SqsBroker (via daimon-provider-bedrock)
+daimon = { version = "0.19", features = ["pubsub"] }   # PubSubBroker (via daimon-provider-gemini)
+daimon = { version = "0.19", features = ["servicebus"] }  # ServiceBusBroker (via daimon-provider-azure)
 ```
 
 InProcessBroker is always available (no feature).
