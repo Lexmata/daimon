@@ -1,6 +1,6 @@
 [package]
 name = "daimon-provider-gemini"
-version = "0.18.0"
+version = "0.18.1"
 edition = "2024"
 rust-version = "1.95"
 description = "Google Gemini provider for the Daimon AI agent framework"
@@ -19,7 +19,7 @@ default = []
 pubsub = ["dep:base64"]
 
 [dependencies]
-daimon-core = { path = "../daimon-core", version = "0.18.0" }
+daimon-core = { path = "../daimon-core", version = "0.18.1" }
 tokio = { version = "1", features = ["rt", "time", "sync"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
