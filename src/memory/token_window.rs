@@ -80,6 +80,12 @@ type TokenCounterFn = Box<dyn Fn(&Message) -> usize + Send + Sync>;
 /// messages, this implementation estimates token usage and evicts the oldest
 /// messages when the total exceeds the configured budget.
 ///
+/// Eviction is group-aware: an assistant message carrying tool calls and its
+/// contiguous following tool result messages are evicted together, never
+/// split, so the history never contains orphaned tool results. If such a
+/// group spans the entire window it is kept even while over budget, matching
+/// the existing guarantee that the newest message is never evicted.
+///
 /// # Token Estimation
 ///
 /// By default, tokens are estimated at ~4 characters per token (a reasonable
@@ -152,10 +158,19 @@ impl Memory for TokenWindowMemory {
         inner.token_counts.push_back(tokens);
         inner.total_tokens += tokens;
 
-        while inner.total_tokens > self.max_tokens && inner.messages.len() > 1 {
-            if let Some(removed_tokens) = inner.token_counts.pop_front() {
+        while inner.total_tokens > self.max_tokens {
+            let group = crate::memory::eviction_group_len(&inner.messages);
+            if group == 0 || group >= inner.messages.len() {
+                // Never evict the entire history: keep at least the newest
+                // message, or the atomic tool-call group spanning the window,
+                // even when it exceeds the budget.
+                break;
+            }
+            for _ in 0..group {
                 inner.messages.pop_front();
-                inner.total_tokens -= removed_tokens;
+                if let Some(removed_tokens) = inner.token_counts.pop_front() {
+                    inner.total_tokens -= removed_tokens;
+                }
             }
         }
 
@@ -283,6 +298,74 @@ mod tests {
         let msgs = memory.get_messages().await.unwrap();
         assert_eq!(msgs.len(), 5);
         assert_eq!(msgs[0].content.as_deref(), Some("msg2"));
+    }
+
+    #[tokio::test]
+    async fn test_eviction_drops_tool_call_group_atomically() {
+        // 1 token per message for predictable eviction boundaries.
+        let memory = TokenWindowMemory::new(3).with_token_counter(|_| 1);
+        let tool_call = ToolCall {
+            id: "tc_1".into(),
+            name: "calc".into(),
+            arguments: serde_json::json!({"expr": "1+1"}),
+        };
+
+        memory.add_message(Message::user("question")).await.unwrap();
+        memory
+            .add_message(Message::assistant_with_tool_calls(vec![tool_call]))
+            .await
+            .unwrap();
+        memory
+            .add_message(Message::tool_result("tc_1", "result one"))
+            .await
+            .unwrap();
+        // 4 tokens > 3: evicts the lone user message first.
+        memory
+            .add_message(Message::tool_result("tc_1", "result two"))
+            .await
+            .unwrap();
+        // 4 tokens > 3 again: the front group is assistant + 2 tool results,
+        // which must be evicted as a whole.
+        memory
+            .add_message(Message::assistant("final answer"))
+            .await
+            .unwrap();
+
+        let msgs = memory.get_messages().await.unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].role, Role::Assistant);
+        assert_eq!(msgs[0].content.as_deref(), Some("final answer"));
+        assert!(msgs.iter().all(|m| m.role != Role::Tool));
+        assert_eq!(memory.current_tokens().await, 1);
+    }
+
+    #[tokio::test]
+    async fn test_tool_call_group_spanning_window_is_kept() {
+        let memory = TokenWindowMemory::new(2).with_token_counter(|_| 1);
+        let tool_call = ToolCall {
+            id: "tc_1".into(),
+            name: "calc".into(),
+            arguments: serde_json::json!({"expr": "1+1"}),
+        };
+
+        memory
+            .add_message(Message::assistant_with_tool_calls(vec![tool_call]))
+            .await
+            .unwrap();
+        memory
+            .add_message(Message::tool_result("tc_1", "result one"))
+            .await
+            .unwrap();
+        memory
+            .add_message(Message::tool_result("tc_1", "result two"))
+            .await
+            .unwrap();
+
+        // The group covers the whole window: it must not be split, so the
+        // memory temporarily exceeds the token budget.
+        let msgs = memory.get_messages().await.unwrap();
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(memory.current_tokens().await, 3);
     }
 
     #[tokio::test]

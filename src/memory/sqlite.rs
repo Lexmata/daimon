@@ -43,7 +43,7 @@ impl SqliteMemory {
 
         let mem = Self {
             conn: Arc::new(Mutex::new(conn)),
-            session_id: uuid_v4(),
+            session_id: generate_session_id(),
         };
         mem.create_tables().await?;
         Ok(mem)
@@ -56,7 +56,7 @@ impl SqliteMemory {
 
         let mem = Self {
             conn: Arc::new(Mutex::new(conn)),
-            session_id: uuid_v4(),
+            session_id: generate_session_id(),
         };
         mem.create_tables().await?;
         Ok(mem)
@@ -153,10 +153,16 @@ impl Memory for SqliteMemory {
                     row.map_err(|e| DaimonError::Other(format!("sqlite row: {e}")))?;
 
                 let role = str_to_role(&role_str);
-                let tool_calls: Vec<ToolCall> = tc_json
-                    .as_deref()
-                    .map(|s| serde_json::from_str(s).unwrap_or_default())
-                    .unwrap_or_default();
+                let tool_calls: Vec<ToolCall> = match tc_json.as_deref() {
+                    // Corrupted tool_calls JSON must surface as an error:
+                    // silently returning an empty vec would rewrite history
+                    // (an assistant message losing its tool calls while the
+                    // tool results remain).
+                    Some(s) => serde_json::from_str(s).map_err(|e| {
+                        DaimonError::Other(format!("corrupted tool_calls in stored message: {e}"))
+                    })?,
+                    None => Vec::new(),
+                };
 
                 messages.push(Message {
                     role,
@@ -209,13 +215,35 @@ fn str_to_role(s: &str) -> Role {
     }
 }
 
-fn uuid_v4() -> String {
+/// Generates a collision-resistant session identifier without a `uuid`
+/// dependency.
+///
+/// Mixes a nanosecond timestamp, the process id, a process-wide atomic
+/// counter, and a randomly seeded hash from [`RandomState`] (std's only
+/// source of randomness). The counter makes ids unique within a process
+/// even when the clock returns the same instant; the pid and random
+/// component keep two processes started in the same instant from sharing
+/// an id.
+///
+/// [`RandomState`]: std::collections::hash_map::RandomState
+fn generate_session_id() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    format!("{ts:032x}")
+    let pid = std::process::id();
+    let count = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let random = std::collections::hash_map::RandomState::new()
+        .build_hasher()
+        .finish();
+
+    format!("{ts:032x}-{pid:08x}-{count:016x}-{random:016x}")
 }
 
 #[cfg(test)]
@@ -304,5 +332,55 @@ mod tests {
             let round_tripped = str_to_role(s);
             assert_eq!(role, round_tripped);
         }
+    }
+
+    #[tokio::test]
+    async fn test_corrupted_tool_calls_json_surfaces_error() {
+        let mem = SqliteMemory::in_memory().await.unwrap();
+        mem.add_message(Message::user("hello")).await.unwrap();
+
+        // Hand-corrupt a row's tool_calls JSON directly.
+        {
+            let conn = mem.conn.lock().await;
+            conn.execute(
+                "INSERT INTO messages (session_id, role, content, tool_calls, tool_call_id)
+                 VALUES (?1, 'assistant', NULL, '{not valid json', NULL)",
+                params![mem.session_id],
+            )
+            .unwrap();
+        }
+
+        let err = mem
+            .get_messages()
+            .await
+            .expect_err("corrupted tool_calls must produce an error, not empty history");
+        assert!(matches!(err, DaimonError::Other(_)));
+        assert!(err.to_string().contains("corrupted tool_calls"));
+    }
+
+    #[test]
+    fn test_session_ids_unique_across_concurrent_calls() {
+        use std::collections::HashSet;
+
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    (0..250)
+                        .map(|_| generate_session_id())
+                        .collect::<Vec<String>>()
+                })
+            })
+            .collect();
+
+        let mut all = HashSet::new();
+        let mut total = 0usize;
+        for handle in handles {
+            for id in handle.join().unwrap() {
+                total += 1;
+                all.insert(id);
+            }
+        }
+
+        assert_eq!(all.len(), total, "session ids must never collide");
     }
 }

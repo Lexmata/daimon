@@ -103,7 +103,7 @@ daimon-plugin-pgvector = { workspace = true, optional = true }
 daimon-plugin-opensearch = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
 rusqlite = { version = "0.40", features = ["bundled"], optional = true }
-redis = { version = "1", features = ["tokio-comp", "aio"], optional = true }
+redis = { version = "1", features = ["tokio-comp", "aio", "connection-manager"], optional = true }
 opentelemetry = { version = "0.32", optional = true }
 opentelemetry_sdk = { version = "0.32", features = ["rt-tokio"], optional = true }
 opentelemetry-otlp = { version = "0.32", features = ["http-proto"], optional = true }

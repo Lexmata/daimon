@@ -1,6 +1,6 @@
 //! Built-in guardrail implementations.
 
-use crate::error::Result;
+use crate::error::{DaimonError, Result};
 use crate::guardrails::traits::{GuardrailResult, InputGuardrail};
 use crate::model::types::Message;
 
@@ -51,22 +51,38 @@ impl RegexFilterGuardrail {
     }
 
     /// Adds a pattern that blocks the input when matched.
-    pub fn block(mut self, pattern: &str, message: impl Into<String>) -> Self {
-        if let Ok(re) = regex_lite::Regex::new(pattern) {
-            self.patterns
-                .push((re, FilterAction::Block(message.into())));
-        }
-        self
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaimonError::Builder`] if `pattern` is not a valid regex.
+    /// A filter pattern that fails to compile must never be silently
+    /// dropped — that would turn a security filter into no filter at all.
+    pub fn block(mut self, pattern: &str, message: impl Into<String>) -> Result<Self> {
+        let re = compile_pattern(pattern)?;
+        self.patterns
+            .push((re, FilterAction::Block(message.into())));
+        Ok(self)
     }
 
     /// Adds a pattern that redacts matched text with a replacement.
-    pub fn redact(mut self, pattern: &str, replacement: impl Into<String>) -> Self {
-        if let Ok(re) = regex_lite::Regex::new(pattern) {
-            self.patterns
-                .push((re, FilterAction::Redact(replacement.into())));
-        }
-        self
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaimonError::Builder`] if `pattern` is not a valid regex.
+    /// A filter pattern that fails to compile must never be silently
+    /// dropped — that would turn a security filter into no filter at all.
+    pub fn redact(mut self, pattern: &str, replacement: impl Into<String>) -> Result<Self> {
+        let re = compile_pattern(pattern)?;
+        self.patterns
+            .push((re, FilterAction::Redact(replacement.into())));
+        Ok(self)
     }
+}
+
+fn compile_pattern(pattern: &str) -> Result<regex_lite::Regex> {
+    regex_lite::Regex::new(pattern).map_err(|e| {
+        DaimonError::Builder(format!("invalid guardrail regex pattern '{pattern}': {e}"))
+    })
 }
 
 impl Default for RegexFilterGuardrail {
@@ -122,15 +138,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_regex_filter_block() {
-        let guard =
-            RegexFilterGuardrail::new().block(r"(?i)password\s*[:=]", "potential credential leak");
+        let guard = RegexFilterGuardrail::new()
+            .block(r"(?i)password\s*[:=]", "potential credential leak")
+            .unwrap();
         let result = guard.check("my password: secret123", &[]).await.unwrap();
         assert!(matches!(result, GuardrailResult::Block(_)));
     }
 
     #[tokio::test]
     async fn test_regex_filter_redact() {
-        let guard = RegexFilterGuardrail::new().redact(r"\b\d{3}-\d{2}-\d{4}\b", "[SSN REDACTED]");
+        let guard = RegexFilterGuardrail::new()
+            .redact(r"\b\d{3}-\d{2}-\d{4}\b", "[SSN REDACTED]")
+            .unwrap();
         let result = guard.check("my ssn is 123-45-6789", &[]).await.unwrap();
         match result {
             GuardrailResult::Transform(s) => {
@@ -142,8 +161,45 @@ mod tests {
 
     #[tokio::test]
     async fn test_regex_filter_pass() {
-        let guard = RegexFilterGuardrail::new().block(r"badword", "blocked");
+        let guard = RegexFilterGuardrail::new()
+            .block(r"badword", "blocked")
+            .unwrap();
         let result = guard.check("totally fine input", &[]).await.unwrap();
         assert!(matches!(result, GuardrailResult::Pass));
+    }
+
+    #[test]
+    fn test_regex_filter_block_invalid_pattern_errors() {
+        let err = RegexFilterGuardrail::new()
+            .block(r"(unclosed", "blocked")
+            .err()
+            .expect("invalid pattern must produce an error");
+        assert!(matches!(err, DaimonError::Builder(_)));
+        assert!(err.to_string().contains("(unclosed"));
+    }
+
+    #[test]
+    fn test_regex_filter_redact_invalid_pattern_errors() {
+        let err = RegexFilterGuardrail::new()
+            .redact(r"[a-", "[REDACTED]")
+            .err()
+            .expect("invalid pattern must produce an error");
+        assert!(matches!(err, DaimonError::Builder(_)));
+        assert!(err.to_string().contains("[a-"));
+    }
+
+    #[tokio::test]
+    async fn test_regex_filter_chained_builders() {
+        let guard = RegexFilterGuardrail::new()
+            .block(r"badword", "blocked")
+            .unwrap()
+            .redact(r"\b\d{3}-\d{2}-\d{4}\b", "[SSN REDACTED]")
+            .unwrap();
+
+        let blocked = guard.check("this has a badword in it", &[]).await.unwrap();
+        assert!(matches!(blocked, GuardrailResult::Block(_)));
+
+        let redacted = guard.check("ssn 123-45-6789", &[]).await.unwrap();
+        assert!(matches!(redacted, GuardrailResult::Transform(_)));
     }
 }
