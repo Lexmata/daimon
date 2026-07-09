@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **MCP (DAIM-11, breaking):**
+  - Request ids are now allocated by the transport instead of per
+    `McpToolBridge`; two bridges sharing one `SseTransport` no longer send
+    colliding ids that misroute or hang responses. `McpTransport::send` is
+    replaced by `McpTransport::request(method, params)`.
+  - The stdio and WebSocket transports match responses by JSON-RPC id and
+    skip server notifications instead of returning the next frame blindly.
+  - `SseTransport` fails fast after the event stream dies (previously every
+    subsequent call hung forever), validates the server-sent `endpoint` URL
+    against the connection origin per the MCP spec (a malicious server can
+    no longer redirect authenticated POSTs off-origin), and aborts its
+    reader task on drop.
+  - The MCP server's stdio framing tolerates additional headers
+    (`Content-Type` no longer desyncs the stream), rejects unparseable
+    `Content-Length`, and answers malformed JSON with a spec-compliant
+    `-32700` Parse Error instead of silence.
+  - `McpClient::list_tools` surfaces deserialization failures instead of
+    returning a silently empty tool list, and follows `nextCursor`
+    pagination.
+  - HTTP-based transports apply a 30s default request timeout
+    (configurable); response ids may be numbers or numeric strings.
 - **Memory (DAIM-12):**
   - `SummaryMemory` no longer loses messages when the summarizer model call
     fails — messages are only drained after a successful summary, concurrent

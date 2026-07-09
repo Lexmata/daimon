@@ -26,10 +26,27 @@ impl JsonRpcRequest {
 pub struct JsonRpcResponse {
     #[allow(dead_code)]
     pub jsonrpc: String,
-    #[allow(dead_code)]
+    /// The request id this response answers, if any. Outgoing requests always
+    /// use numeric ids, but the JSON-RPC spec also allows string ids and some
+    /// servers echo the id back as a string (e.g. `"1000"`), so both forms
+    /// are accepted and normalized to `u64` for correlation. A string that is
+    /// not a valid `u64` cannot match any id we issued and maps to `None`.
+    #[serde(default, deserialize_with = "deserialize_response_id")]
     pub id: Option<u64>,
     pub result: Option<serde_json::Value>,
     pub error: Option<JsonRpcError>,
+}
+
+fn deserialize_response_id<'de, D>(deserializer: D) -> std::result::Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(match value {
+        Some(serde_json::Value::Number(n)) => n.as_u64(),
+        Some(serde_json::Value::String(s)) => s.parse().ok(),
+        _ => None,
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -133,6 +150,34 @@ mod tests {
         let info: McpToolInfo = serde_json::from_str(json).unwrap();
         assert_eq!(info.name, "read_file");
         assert_eq!(info.description.as_deref(), Some("Read a file"));
+    }
+
+    #[test]
+    fn test_response_string_id_normalized_to_u64() {
+        // Some servers echo a numeric request id back as a string; it must
+        // still correlate with the u64 id the client issued.
+        let json = r#"{"jsonrpc":"2.0","id":"1000","result":{}}"#;
+        let resp: JsonRpcResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.id, Some(1000));
+    }
+
+    #[test]
+    fn test_response_non_numeric_string_id_maps_to_none() {
+        // A string id that isn't a u64 can't match any id we issued.
+        let json = r#"{"jsonrpc":"2.0","id":"abc","result":{}}"#;
+        let resp: JsonRpcResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.id, None);
+    }
+
+    #[test]
+    fn test_response_missing_and_null_id_map_to_none() {
+        let json = r#"{"jsonrpc":"2.0","result":{}}"#;
+        let resp: JsonRpcResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.id, None);
+
+        let json = r#"{"jsonrpc":"2.0","id":null,"result":{}}"#;
+        let resp: JsonRpcResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.id, None);
     }
 
     #[test]
