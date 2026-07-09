@@ -34,6 +34,18 @@ impl InProcessBroker {
             statuses: Arc::new(Mutex::new(HashMap::new())),
         }
     }
+
+    /// Closes the broker: no further submissions are accepted, but already
+    /// queued tasks can still be received and drained.
+    ///
+    /// Once the queue is drained, [`receive`](TaskBroker::receive) returns
+    /// `Ok(None)`, which for this broker means "closed forever" (see
+    /// [`TaskBroker::none_means_closed`]) — workers running against it exit
+    /// their loops. Every clone shares the same channel, so closing any clone
+    /// closes them all.
+    pub async fn close(&self) {
+        self.rx.lock().await.close();
+    }
 }
 
 impl Clone for InProcessBroker {
@@ -78,6 +90,13 @@ impl TaskBroker for InProcessBroker {
             }
             None => Ok(None),
         }
+    }
+
+    /// An in-process channel has a real end-of-stream signal: `recv()` only
+    /// yields `None` once the channel is closed and drained, never on an idle
+    /// poll. `None` therefore means "closed forever" here.
+    fn none_means_closed(&self) -> bool {
+        true
     }
 
     async fn complete(&self, task_id: &str, result: TaskResult) -> Result<()> {
@@ -176,5 +195,29 @@ mod tests {
         assert_eq!(t1.task_id, id1);
         assert_eq!(t2.task_id, id2);
         assert_eq!(t3.task_id, id3);
+    }
+
+    #[tokio::test]
+    async fn test_close_drains_then_returns_none() {
+        let broker = InProcessBroker::new(16);
+
+        let id = broker.submit(AgentTask::new("queued")).await.unwrap();
+        broker.close().await;
+
+        // Already-queued tasks are still delivered after close…
+        let received = broker.receive().await.unwrap().unwrap();
+        assert_eq!(received.task_id, id);
+
+        // …then the drained, closed channel signals end-of-stream.
+        assert!(broker.receive().await.unwrap().is_none());
+
+        // And new submissions are rejected.
+        assert!(broker.submit(AgentTask::new("late")).await.is_err());
+    }
+
+    #[test]
+    fn test_none_means_closed_for_in_process() {
+        let broker = InProcessBroker::new(1);
+        assert!(broker.none_means_closed());
     }
 }

@@ -153,8 +153,13 @@ impl TaskBrokerService for GrpcBrokerSvc {
 }
 
 /// A [`TaskBroker`] that delegates to a remote gRPC broker server.
+///
+/// Tonic clients are cheap to clone (they share the underlying HTTP/2
+/// channel), so each RPC clones the stored client instead of serializing all
+/// calls through a mutex — concurrent submits/status queries proceed in
+/// parallel over the multiplexed connection.
 pub struct GrpcBrokerClient {
-    inner: tokio::sync::Mutex<TaskBrokerServiceClient<tonic::transport::Channel>>,
+    inner: TaskBrokerServiceClient<tonic::transport::Channel>,
 }
 
 impl GrpcBrokerClient {
@@ -169,9 +174,7 @@ impl GrpcBrokerClient {
             .await
             .map_err(|e| DaimonError::Other(format!("grpc connect: {e}")))?;
 
-        Ok(Self {
-            inner: tokio::sync::Mutex::new(client),
-        })
+        Ok(Self { inner: client })
     }
 }
 
@@ -182,8 +185,7 @@ impl TaskBroker for GrpcBrokerClient {
 
         let resp = self
             .inner
-            .lock()
-            .await
+            .clone()
             .submit(Request::new(proto::SubmitRequest { task_json }))
             .await
             .map_err(|e| DaimonError::Other(format!("grpc submit: {e}")))?;
@@ -194,8 +196,7 @@ impl TaskBroker for GrpcBrokerClient {
     async fn status(&self, task_id: &str) -> Result<TaskStatus> {
         let resp = self
             .inner
-            .lock()
-            .await
+            .clone()
             .get_status(Request::new(proto::StatusRequest {
                 task_id: task_id.to_string(),
             }))
@@ -219,8 +220,7 @@ impl TaskBroker for GrpcBrokerClient {
             .map_err(|e| DaimonError::Other(format!("serialize result: {e}")))?;
 
         self.inner
-            .lock()
-            .await
+            .clone()
             .complete(Request::new(proto::CompleteRequest {
                 task_id: task_id.to_string(),
                 result_json,
@@ -233,8 +233,7 @@ impl TaskBroker for GrpcBrokerClient {
 
     async fn fail(&self, task_id: &str, error: String) -> Result<()> {
         self.inner
-            .lock()
-            .await
+            .clone()
             .fail(Request::new(proto::FailRequest {
                 task_id: task_id.to_string(),
                 error,
@@ -250,25 +249,6 @@ impl TaskBroker for GrpcBrokerClient {
 mod tests {
     use super::*;
     use crate::distributed::InProcessBroker;
-
-    #[tokio::test]
-    async fn test_grpc_roundtrip() {
-        let broker = InProcessBroker::new(32);
-        let broker_clone = broker.clone();
-
-        let server_handle = tokio::spawn(async move {
-            GrpcBrokerServer::new(broker_clone)
-                .serve("[::1]:0")
-                .await
-                .ok();
-        });
-
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        // The test just ensures the types compile and the server starts.
-        // A real integration test would bind to a known port.
-        server_handle.abort();
-    }
 
     #[test]
     fn test_proto_types_compile() {
@@ -325,6 +305,32 @@ mod tests {
         assert!(
             matches!(status, TaskStatus::Pending | TaskStatus::Running),
             "expected pending or running, got {status:?}"
+        );
+
+        // Complete the task over gRPC and confirm the status transition
+        // round-trips through the remote broker.
+        let result = TaskResult {
+            task_id: task_id.clone(),
+            output: "done via grpc".into(),
+            iterations: 1,
+            cost: 0.0,
+            error: None,
+        };
+        client.complete(&task_id, result).await.unwrap();
+
+        let status = client.status(&task_id).await.unwrap();
+        assert!(
+            matches!(status, TaskStatus::Completed(ref r) if r.output == "done via grpc"),
+            "expected completed, got {status:?}"
+        );
+
+        // And fail() must round-trip too.
+        let task_id2 = client.submit(AgentTask::new("second")).await.unwrap();
+        client.fail(&task_id2, "remote boom".into()).await.unwrap();
+        let status = client.status(&task_id2).await.unwrap();
+        assert!(
+            matches!(status, TaskStatus::Failed(ref msg) if msg == "remote boom"),
+            "expected failed, got {status:?}"
         );
     }
 }

@@ -30,7 +30,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use lapin::options::{
-    BasicAckOptions, BasicConsumeOptions, BasicNackOptions, BasicPublishOptions,
+    BasicAckOptions, BasicConsumeOptions, BasicNackOptions, BasicPublishOptions, BasicQosOptions,
     QueueDeclareOptions,
 };
 use lapin::types::FieldTable;
@@ -42,6 +42,12 @@ use crate::error::{DaimonError, Result};
 use super::broker::TaskBroker;
 use super::types::{AgentTask, TaskResult, TaskStatus};
 
+/// Default per-consumer prefetch count (`basic.qos`). Bounds how many
+/// unacknowledged deliveries RabbitMQ pushes to a single consumer, so tasks
+/// are distributed across workers instead of all being buffered by the first
+/// consumer to attach. Override with [`AmqpBroker::with_prefetch`].
+pub const DEFAULT_PREFETCH: u16 = 16;
+
 /// Distributes agent tasks via RabbitMQ (AMQP 0-9-1).
 ///
 /// Tasks are published to a durable queue. Workers consume with manual,
@@ -51,6 +57,10 @@ use super::types::{AgentTask, TaskResult, TaskStatus};
 pub struct AmqpBroker {
     channel: Channel,
     queue_name: String,
+    /// Per-consumer prefetch (`basic.qos`) applied before consuming. Without
+    /// it RabbitMQ pushes every ready message to the first consumer, which
+    /// buffers the whole queue in client memory and starves other workers.
+    prefetch: u16,
     statuses: Arc<Mutex<HashMap<String, TaskStatus>>>,
     consumer: Arc<Mutex<Option<Consumer>>>,
     /// Ack handles for deliveries received but not yet completed/failed, keyed
@@ -90,10 +100,20 @@ impl AmqpBroker {
         Ok(Self {
             channel,
             queue_name,
+            prefetch: DEFAULT_PREFETCH,
             statuses: Arc::new(Mutex::new(HashMap::new())),
             consumer: Arc::new(Mutex::new(None)),
             in_flight: Arc::new(Mutex::new(HashMap::new())),
         })
+    }
+
+    /// Sets the per-consumer prefetch count (`basic.qos`) used when the
+    /// consumer is created. Defaults to [`DEFAULT_PREFETCH`]. Must be called
+    /// before the first [`receive`](TaskBroker::receive), which lazily creates
+    /// the consumer.
+    pub fn with_prefetch(mut self, prefetch: u16) -> Self {
+        self.prefetch = prefetch;
+        self
     }
 
     /// Returns a reference to the underlying AMQP channel.
@@ -106,6 +126,15 @@ impl AmqpBroker {
         if let Some(ref consumer) = *guard {
             return Ok(consumer.clone());
         }
+
+        // Bound the number of unacked deliveries pushed to this consumer.
+        // Without basic.qos RabbitMQ sends the entire ready queue to the first
+        // consumer that attaches: unbounded client-side memory and zero work
+        // distribution across additional workers.
+        self.channel
+            .basic_qos(self.prefetch, BasicQosOptions::default())
+            .await
+            .map_err(|e| DaimonError::Other(format!("amqp basic_qos: {e}")))?;
 
         let consumer = self
             .channel
@@ -225,6 +254,14 @@ impl TaskBroker for AmqpBroker {
         }
     }
 
+    /// A lapin consumer stream only ends (`next()` returning `None`) when the
+    /// consumer is cancelled or the channel/connection is closed — never on an
+    /// idle queue, where `next()` simply keeps waiting. `None` therefore means
+    /// "closed forever" here.
+    fn none_means_closed(&self) -> bool {
+        true
+    }
+
     async fn complete(&self, task_id: &str, result: TaskResult) -> Result<()> {
         // Ack the delivery now that the task has been fully processed.
         let acker = self.in_flight.lock().await.remove(task_id);
@@ -293,5 +330,14 @@ mod tests {
     fn test_status_tracking_in_memory() {
         let statuses: HashMap<String, TaskStatus> = HashMap::new();
         assert!(!statuses.contains_key("unknown"));
+    }
+
+    #[test]
+    fn test_default_prefetch_is_bounded() {
+        // basic.qos must always be applied with a non-zero prefetch: a value
+        // of 0 means "unlimited" in AMQP, which is exactly the unbounded
+        // delivery behavior the qos call exists to prevent.
+        assert_eq!(DEFAULT_PREFETCH, 16);
+        assert_ne!(DEFAULT_PREFETCH, 0);
     }
 }

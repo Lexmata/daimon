@@ -30,19 +30,31 @@ impl NatsKvCheckpoint {
     /// * `url` — NATS server URL (e.g. `nats://127.0.0.1:4222`)
     /// * `bucket` — KV bucket name (e.g. `daimon-checkpoints`)
     pub async fn connect(url: &str, bucket: impl Into<String>) -> Result<Self> {
+        let bucket = bucket.into();
         let client = async_nats::connect(url)
             .await
             .map_err(|e| DaimonError::Other(format!("nats kv connect: {e}")))?;
 
         let jetstream = async_nats::jetstream::new(client);
 
-        let kv = jetstream
+        // Create-or-open the bucket. `create_key_value` fails if the
+        // underlying KV stream already exists (e.g. a second process
+        // connecting to the same checkpoint bucket), so on error we fall back
+        // to opening the existing bucket — mirroring the NATS task broker's
+        // status-bucket setup.
+        let kv = match jetstream
             .create_key_value(async_nats::jetstream::kv::Config {
-                bucket: bucket.into(),
+                bucket: bucket.clone(),
                 ..Default::default()
             })
             .await
-            .map_err(|e| DaimonError::Other(format!("nats kv create bucket: {e}")))?;
+        {
+            Ok(store) => store,
+            Err(_) => jetstream
+                .get_key_value(&bucket)
+                .await
+                .map_err(|e| DaimonError::Other(format!("nats kv open bucket: {e}")))?,
+        };
 
         Ok(Self { kv })
     }
@@ -52,37 +64,67 @@ impl NatsKvCheckpoint {
         Self { kv }
     }
 
-    fn key(run_id: &str) -> String {
-        format!("cp.{run_id}")
+    /// Validates that `run_id` is safe to embed in a NATS KV key.
+    ///
+    /// KV keys are subject tokens: `.` is the token separator, so a run_id
+    /// containing dots would silently create extra subject tokens under the
+    /// `cp.` prefix (and `..` produces an outright invalid key), while
+    /// characters outside the NATS key charset are rejected by the server
+    /// with an opaque error. Following the allowlist approach of
+    /// [`FileCheckpoint`](super::FileCheckpoint)'s run-id validation, we
+    /// restrict ids to `[A-Za-z0-9_-]` and reject the empty string, failing
+    /// fast with a clear error instead.
+    fn validate_run_id(run_id: &str) -> Result<()> {
+        if run_id.is_empty() {
+            return Err(DaimonError::Other(
+                "invalid run_id: must not be empty".to_string(),
+            ));
+        }
+        if !run_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+        {
+            return Err(DaimonError::Other(format!(
+                "invalid run_id '{run_id}': only [A-Za-z0-9_-] characters are allowed in NATS KV keys"
+            )));
+        }
+        Ok(())
+    }
+
+    fn key(run_id: &str) -> Result<String> {
+        Self::validate_run_id(run_id)?;
+        Ok(format!("cp.{run_id}"))
     }
 }
 
 impl Checkpoint for NatsKvCheckpoint {
     async fn save(&self, state: &CheckpointState) -> Result<()> {
+        let key = Self::key(&state.run_id)?;
         let json = serde_json::to_string(state)?;
         self.kv
-            .put(Self::key(&state.run_id), json.into())
+            .put(key, json.into())
             .await
             .map_err(|e| DaimonError::Other(format!("nats kv put: {e}")))?;
         Ok(())
     }
 
     async fn load(&self, run_id: &str) -> Result<Option<CheckpointState>> {
-        match self.kv.get(Self::key(run_id)).await {
+        // `Store::get` already maps a missing key to `Ok(None)`; an `Err` is
+        // always a real failure (invalid key, timeout, JetStream error), so it
+        // is propagated with its typed kind rather than string-matched — the
+        // previous `contains("not found")` check could swallow genuine errors
+        // whose message happened to contain that text.
+        match self.kv.get(Self::key(run_id)?).await {
             Ok(Some(bytes)) => {
                 let state: CheckpointState = serde_json::from_slice(&bytes)
                     .map_err(|e| DaimonError::Other(format!("nats kv deserialize: {e}")))?;
                 Ok(Some(state))
             }
             Ok(None) => Ok(None),
-            Err(e) => {
-                let msg = e.to_string();
-                if msg.contains("not found") || msg.contains("no message") {
-                    Ok(None)
-                } else {
-                    Err(DaimonError::Other(format!("nats kv get: {e}")))
-                }
-            }
+            Err(e) => Err(DaimonError::Other(format!(
+                "nats kv get ({kind:?}): {e}",
+                kind = e.kind()
+            ))),
         }
     }
 
@@ -109,7 +151,7 @@ impl Checkpoint for NatsKvCheckpoint {
 
     async fn delete(&self, run_id: &str) -> Result<()> {
         self.kv
-            .purge(Self::key(run_id))
+            .purge(Self::key(run_id)?)
             .await
             .map_err(|e| DaimonError::Other(format!("nats kv delete: {e}")))?;
         Ok(())
@@ -122,8 +164,34 @@ mod tests {
 
     #[test]
     fn test_key_format() {
-        assert_eq!(NatsKvCheckpoint::key("run-1"), "cp.run-1");
-        assert_eq!(NatsKvCheckpoint::key("abc"), "cp.abc");
+        assert_eq!(NatsKvCheckpoint::key("run-1").unwrap(), "cp.run-1");
+        assert_eq!(NatsKvCheckpoint::key("abc").unwrap(), "cp.abc");
+    }
+
+    #[test]
+    fn test_validate_run_id_accepts_safe_ids() {
+        assert!(NatsKvCheckpoint::validate_run_id("run-1").is_ok());
+        assert!(NatsKvCheckpoint::validate_run_id("Run_2").is_ok());
+        assert!(NatsKvCheckpoint::validate_run_id("abc123").is_ok());
+    }
+
+    #[test]
+    fn test_validate_run_id_rejects_unsafe_ids() {
+        // `.` is the NATS subject token separator — a run_id containing dots
+        // would create extra tokens under the `cp.` prefix.
+        assert!(NatsKvCheckpoint::validate_run_id("a.b").is_err());
+        assert!(NatsKvCheckpoint::validate_run_id("..").is_err());
+        assert!(NatsKvCheckpoint::validate_run_id("").is_err());
+        assert!(NatsKvCheckpoint::validate_run_id("run 1").is_err());
+        assert!(NatsKvCheckpoint::validate_run_id("run/1").is_err());
+        assert!(NatsKvCheckpoint::validate_run_id("run*").is_err());
+        assert!(NatsKvCheckpoint::validate_run_id("run>").is_err());
+    }
+
+    #[test]
+    fn test_key_rejects_invalid_run_id() {
+        assert!(NatsKvCheckpoint::key("a.b").is_err());
+        assert!(NatsKvCheckpoint::key("").is_err());
     }
 
     #[test]
