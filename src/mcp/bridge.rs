@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use crate::error::{DaimonError, Result};
-use crate::mcp::protocol::{JsonRpcRequest, McpContentBlock, McpToolCallResult, McpToolInfo};
+use crate::mcp::protocol::{McpContentBlock, McpToolCallResult, McpToolInfo};
 use crate::mcp::transport::McpTransport;
 use crate::tool::{Tool, ToolOutput};
 
@@ -11,25 +11,19 @@ use crate::tool::{Tool, ToolOutput};
 ///
 /// Created by [`McpClient::tools()`](super::client::McpClient::tools). Register
 /// these with an agent's builder just like any other tool.
+///
+/// Request ids are allocated by the shared transport, not per bridge, so any
+/// number of bridges over one transport get collision-free ids and correct
+/// response correlation.
 pub struct McpToolBridge {
     transport: Arc<dyn McpTransport>,
     info: McpToolInfo,
-    call_counter: std::sync::atomic::AtomicU64,
 }
 
 impl McpToolBridge {
     /// Creates a bridge for a single MCP tool.
     pub fn new(transport: Arc<dyn McpTransport>, info: McpToolInfo) -> Self {
-        Self {
-            transport,
-            info,
-            call_counter: std::sync::atomic::AtomicU64::new(1000),
-        }
-    }
-
-    fn next_id(&self) -> u64 {
-        self.call_counter
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        Self { transport, info }
     }
 }
 
@@ -51,16 +45,16 @@ impl Tool for McpToolBridge {
     }
 
     async fn execute(&self, input: &serde_json::Value) -> Result<ToolOutput> {
-        let request = JsonRpcRequest::new(
-            self.next_id(),
-            "tools/call",
-            Some(serde_json::json!({
-                "name": self.info.name,
-                "arguments": input,
-            })),
-        );
-
-        let response = self.transport.send(&request).await?;
+        let response = self
+            .transport
+            .request(
+                "tools/call",
+                Some(serde_json::json!({
+                    "name": self.info.name,
+                    "arguments": input,
+                })),
+            )
+            .await?;
 
         if let Some(err) = response.error {
             return Ok(ToolOutput::error(format!(
@@ -144,9 +138,10 @@ mod tests {
     struct NullTransport;
 
     impl McpTransport for NullTransport {
-        fn send<'a>(
+        fn request<'a>(
             &'a self,
-            _request: &'a crate::mcp::protocol::JsonRpcRequest,
+            _method: &'a str,
+            _params: Option<serde_json::Value>,
         ) -> std::pin::Pin<
             Box<
                 dyn std::future::Future<Output = Result<crate::mcp::protocol::JsonRpcResponse>>
