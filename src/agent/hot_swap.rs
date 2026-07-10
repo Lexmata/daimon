@@ -1,8 +1,11 @@
 //! Hot-reloadable agent wrapper.
 //!
-//! [`HotSwapAgent`] wraps an [`Agent`] behind a `RwLock`, allowing you to
-//! swap the model, tools, system prompt, or other configuration at runtime
-//! without restarting or rebuilding the agent.
+//! [`HotSwapAgent`] wraps an [`Agent`] behind an `RwLock<Arc<Agent>>`,
+//! allowing you to swap the model, tools, system prompt, or other
+//! configuration at runtime without restarting or rebuilding the agent.
+//! Prompts run on an `Arc` snapshot taken at call time, so in-flight
+//! prompts never block a swap (they simply finish on the old
+//! configuration).
 //!
 //! ```ignore
 //! use daimon::prelude::*;
@@ -26,6 +29,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::agent::{Agent, AgentResponse};
+use crate::cost::CostTracker;
 use crate::error::Result;
 use crate::guardrails::{InputGuardrail, OutputGuardrail};
 use crate::hooks::AgentHook;
@@ -37,164 +41,235 @@ use crate::tool::{Tool, ToolRetryPolicy};
 
 /// An agent wrapper that supports hot-reloading configuration at runtime.
 ///
-/// All prompt operations acquire a read lock, so they can run concurrently.
-/// Swap operations acquire a write lock, blocking only during the brief
-/// pointer swap. Ongoing prompts complete with their original configuration.
+/// The current agent lives behind an `RwLock<Arc<Agent>>`. Prompt operations
+/// clone the `Arc` under a briefly-held read guard and run on that snapshot
+/// **without holding the lock**, so a long multi-iteration ReAct loop never
+/// blocks a swap, and a pending swap never stalls new prompts.
+///
+/// Swap operations build an updated agent and replace the `Arc` under a
+/// write lock, blocking only for the duration of that pointer swap.
+/// In-flight prompts complete on the configuration that was current when
+/// they started; prompts issued after the swap see the new configuration.
+/// Conversation memory is shared across swaps (unless explicitly replaced
+/// via [`swap_memory`](HotSwapAgent::swap_memory) or
+/// [`replace`](HotSwapAgent::replace)).
 pub struct HotSwapAgent {
-    inner: Arc<RwLock<Agent>>,
+    inner: Arc<RwLock<Arc<Agent>>>,
+}
+
+/// Builds an updated copy of `agent` sharing all of its `Arc`-backed parts
+/// (model, tools, memory, hooks, middleware, guardrails).
+///
+/// The cost tracker cannot be shared (it holds an atomic accumulator), so a
+/// fresh one is seeded from the same cost model. This preserves semantics:
+/// budget enforcement is per-run (see [`Agent::new_run_tracker`]), and the
+/// agent-level tracker only serves as the cost-model holder.
+fn clone_agent(agent: &Agent) -> Agent {
+    Agent {
+        model: agent.model.clone(),
+        system_prompt: agent.system_prompt.clone(),
+        tools: agent.tools.clone(),
+        memory: agent.memory.clone(),
+        hooks: agent.hooks.clone(),
+        middleware: agent.middleware.clone(),
+        input_guardrails: agent.input_guardrails.clone(),
+        output_guardrails: agent.output_guardrails.clone(),
+        max_iterations: agent.max_iterations,
+        temperature: agent.temperature,
+        max_tokens: agent.max_tokens,
+        validate_tool_inputs: agent.validate_tool_inputs,
+        cost_tracker: agent
+            .cost_tracker
+            .as_ref()
+            .map(|t| CostTracker::new(Arc::clone(&t.cost_model))),
+        max_budget: agent.max_budget,
+        tool_retry_policy: agent.tool_retry_policy.clone(),
+    }
 }
 
 impl HotSwapAgent {
     /// Wraps an existing agent for hot-reload support.
     pub fn new(agent: Agent) -> Self {
         Self {
-            inner: Arc::new(RwLock::new(agent)),
+            inner: Arc::new(RwLock::new(Arc::new(agent))),
         }
     }
 
+    /// Returns the current agent snapshot, holding the read lock only for
+    /// the duration of the `Arc` clone.
+    async fn snapshot(&self) -> Arc<Agent> {
+        Arc::clone(&*self.inner.read().await)
+    }
+
+    /// Applies a configuration update by cloning the current agent, mutating
+    /// the clone, and swapping it in. The write lock is held only for the
+    /// clone-and-swap, never across a model call.
+    async fn update(&self, apply: impl FnOnce(&mut Agent)) {
+        let mut guard = self.inner.write().await;
+        let mut next = clone_agent(&guard);
+        apply(&mut next);
+        *guard = Arc::new(next);
+    }
+
     /// Runs a prompt through the agent.
+    ///
+    /// The prompt executes on a snapshot of the configuration taken at call
+    /// time; swaps performed while it is running do not affect it.
     pub async fn prompt(&self, input: &str) -> Result<AgentResponse> {
-        let agent = self.inner.read().await;
+        let agent = self.snapshot().await;
         agent.prompt(input).await
     }
 
     /// Runs a streaming prompt through the agent.
+    ///
+    /// Like [`prompt`](HotSwapAgent::prompt), the stream is bound to the
+    /// configuration current at call time.
     pub async fn prompt_stream(&self, input: &str) -> Result<ResponseStream> {
-        let agent = self.inner.read().await;
+        let agent = self.snapshot().await;
         agent.prompt_stream(input).await
     }
 
     /// Replaces the LLM model at runtime.
     pub async fn swap_model<M: Model + 'static>(&self, model: M) {
-        let mut agent = self.inner.write().await;
-        agent.model = Arc::new(model);
+        let model: SharedModel = Arc::new(model);
+        self.update(move |agent| agent.model = model).await;
     }
 
     /// Replaces the model with a pre-boxed shared model.
     pub async fn swap_shared_model(&self, model: SharedModel) {
-        let mut agent = self.inner.write().await;
-        agent.model = model;
+        self.update(move |agent| agent.model = model).await;
     }
 
     /// Replaces the system prompt.
     pub async fn swap_system_prompt(&self, prompt: Option<String>) {
-        let mut agent = self.inner.write().await;
-        agent.system_prompt = prompt;
+        self.update(move |agent| agent.system_prompt = prompt).await;
     }
 
     /// Adds a tool to the agent's registry.
     /// Returns `true` if the tool was added (no duplicate name).
     pub async fn add_tool<T: Tool + 'static>(&self, tool: T) -> bool {
-        let mut agent = self.inner.write().await;
-        agent.tools.register(tool).is_ok()
+        let mut guard = self.inner.write().await;
+        let mut next = clone_agent(&guard);
+        let added = next.tools.register(tool).is_ok();
+        if added {
+            // Re-warm the spec/validator caches so post-swap prompts don't
+            // pay a rebuild on their first iteration.
+            next.tools.warm_cache();
+            *guard = Arc::new(next);
+        }
+        added
     }
 
     /// Removes a tool by name. Returns `true` if it was present.
     pub async fn remove_tool(&self, name: &str) -> bool {
-        let mut agent = self.inner.write().await;
-        agent.tools.unregister(name)
+        let mut guard = self.inner.write().await;
+        let mut next = clone_agent(&guard);
+        let removed = next.tools.unregister(name);
+        if removed {
+            next.tools.warm_cache();
+            *guard = Arc::new(next);
+        }
+        removed
     }
 
     /// Replaces the conversation memory backend.
     pub async fn swap_memory<M: Memory + 'static>(&self, memory: M) {
-        let mut agent = self.inner.write().await;
-        agent.memory = Arc::new(memory);
+        let memory = Arc::new(memory);
+        self.update(move |agent| agent.memory = memory).await;
     }
 
     /// Replaces the lifecycle hooks.
     pub async fn swap_hooks<H: AgentHook + 'static>(&self, hooks: H) {
-        let mut agent = self.inner.write().await;
-        agent.hooks = Arc::new(hooks);
+        let hooks = Arc::new(hooks);
+        self.update(move |agent| agent.hooks = hooks).await;
     }
 
     /// Replaces the entire middleware stack.
     pub async fn swap_middleware(&self, stack: crate::middleware::MiddlewareStack) {
-        let mut agent = self.inner.write().await;
-        agent.middleware = stack;
+        self.update(move |agent| agent.middleware = stack).await;
     }
 
     /// Adds a middleware layer to the existing stack.
     pub async fn add_middleware<M: Middleware + 'static>(&self, mw: M) {
-        let mut agent = self.inner.write().await;
-        agent.middleware.push(mw);
+        self.update(move |agent| agent.middleware.push(mw)).await;
     }
 
     /// Adds an input guardrail.
     pub async fn add_input_guardrail<G: InputGuardrail + 'static>(&self, guard: G) {
-        let mut agent = self.inner.write().await;
-        agent.input_guardrails.push(Arc::new(guard));
+        let guard = Arc::new(guard);
+        self.update(move |agent| agent.input_guardrails.push(guard))
+            .await;
     }
 
     /// Adds an output guardrail.
     pub async fn add_output_guardrail<G: OutputGuardrail + 'static>(&self, guard: G) {
-        let mut agent = self.inner.write().await;
-        agent.output_guardrails.push(Arc::new(guard));
+        let guard = Arc::new(guard);
+        self.update(move |agent| agent.output_guardrails.push(guard))
+            .await;
     }
 
     /// Clears all input guardrails.
     pub async fn clear_input_guardrails(&self) {
-        let mut agent = self.inner.write().await;
-        agent.input_guardrails.clear();
+        self.update(|agent| agent.input_guardrails.clear()).await;
     }
 
     /// Clears all output guardrails.
     pub async fn clear_output_guardrails(&self) {
-        let mut agent = self.inner.write().await;
-        agent.output_guardrails.clear();
+        self.update(|agent| agent.output_guardrails.clear()).await;
     }
 
     /// Updates the maximum number of ReAct iterations.
     pub async fn set_max_iterations(&self, max: usize) {
-        let mut agent = self.inner.write().await;
-        agent.max_iterations = max;
+        self.update(move |agent| agent.max_iterations = max).await;
     }
 
     /// Updates the model temperature.
     pub async fn set_temperature(&self, temp: Option<f32>) {
-        let mut agent = self.inner.write().await;
-        agent.temperature = temp;
+        self.update(move |agent| agent.temperature = temp).await;
     }
 
     /// Updates the max tokens setting.
     pub async fn set_max_tokens(&self, tokens: Option<u32>) {
-        let mut agent = self.inner.write().await;
-        agent.max_tokens = tokens;
+        self.update(move |agent| agent.max_tokens = tokens).await;
     }
 
     /// Enables or disables tool input validation.
     pub async fn set_validate_tool_inputs(&self, enabled: bool) {
-        let mut agent = self.inner.write().await;
-        agent.validate_tool_inputs = enabled;
+        self.update(move |agent| agent.validate_tool_inputs = enabled)
+            .await;
     }
 
     /// Updates the tool retry policy.
     pub async fn set_tool_retry_policy(&self, policy: Option<ToolRetryPolicy>) {
-        let mut agent = self.inner.write().await;
-        agent.tool_retry_policy = policy;
+        self.update(move |agent| agent.tool_retry_policy = policy)
+            .await;
     }
 
     /// Replaces the entire agent atomically.
     pub async fn replace(&self, agent: Agent) {
         let mut inner = self.inner.write().await;
-        *inner = agent;
+        *inner = Arc::new(agent);
     }
 
     /// Returns a snapshot of the current system prompt.
     pub async fn system_prompt(&self) -> Option<String> {
-        let agent = self.inner.read().await;
-        agent.system_prompt.clone()
+        self.snapshot().await.system_prompt.clone()
     }
 
     /// Returns the number of registered tools.
     pub async fn tool_count(&self) -> usize {
-        let agent = self.inner.read().await;
-        agent.tools.len()
+        self.snapshot().await.tools.len()
     }
 
     /// Returns the names of all registered tools.
     pub async fn tool_names(&self) -> Vec<String> {
-        let agent = self.inner.read().await;
-        agent.tools.list().into_iter().map(String::from).collect()
+        self.snapshot()
+            .await
+            .tools
+            .list()
+            .into_iter()
+            .map(String::from)
+            .collect()
     }
 }
 
@@ -370,6 +445,87 @@ mod tests {
         assert_eq!(hot.system_prompt().await.as_deref(), Some("B"));
         let r = hot.prompt("test").await.unwrap();
         assert_eq!(r.final_text, "from-B");
+    }
+
+    /// A model that signals when `generate` has started and then blocks until
+    /// released, so tests can deterministically hold a prompt "in flight".
+    struct GatedModel {
+        started: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    impl Model for GatedModel {
+        async fn generate(&self, _request: &ChatRequest) -> DResult<ChatResponse> {
+            self.started.notify_one();
+            self.release.notified().await;
+            Ok(ChatResponse {
+                message: Message::assistant("from-gated"),
+                stop_reason: StopReason::EndTurn,
+                usage: Some(Usage::default()),
+            })
+        }
+        async fn generate_stream(&self, _request: &ChatRequest) -> DResult<ResponseStream> {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_swap_does_not_block_on_inflight_prompt() {
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+
+        let agent = Agent::builder()
+            .model(GatedModel {
+                started: Arc::clone(&started),
+                release: Arc::clone(&release),
+            })
+            .build()
+            .unwrap();
+        let hot = HotSwapAgent::new(agent);
+
+        // Start a prompt and wait until it is inside the model call.
+        let hot_for_prompt = hot.clone();
+        let inflight = tokio::spawn(async move { hot_for_prompt.prompt("hi").await });
+        started.notified().await;
+
+        // The swap must complete promptly even though a prompt is mid-flight.
+        tokio::time::timeout(std::time::Duration::from_secs(1), hot.swap_model(ModelB))
+            .await
+            .expect("swap must not block on an in-flight prompt");
+
+        // A new prompt sees the new model while the old one is still pending.
+        let fresh = tokio::time::timeout(std::time::Duration::from_secs(1), hot.prompt("hi"))
+            .await
+            .expect("new prompt must not block behind the in-flight one")
+            .unwrap();
+        assert_eq!(fresh.final_text, "from-B");
+
+        // The in-flight prompt completes on the OLD configuration.
+        release.notify_one();
+        let old = inflight.await.unwrap().unwrap();
+        assert_eq!(old.final_text, "from-gated");
+    }
+
+    #[tokio::test]
+    async fn test_add_tool_after_swap_serves_warm_specs() {
+        let agent = Agent::builder().model(ModelA).build().unwrap();
+        let hot = HotSwapAgent::new(agent);
+
+        assert!(
+            hot.add_tool(TestTool {
+                tool_name: "alpha".into(),
+            })
+            .await
+        );
+
+        // The swapped-in agent must have a pre-warmed spec cache: repeated
+        // calls return the same allocation instead of recomputing per call.
+        let agent = hot.snapshot().await;
+        let first = agent.tools.tool_specs();
+        let second = agent.tools.tool_specs();
+        assert!(std::sync::Arc::ptr_eq(&first, &second));
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].name, "alpha");
     }
 
     #[tokio::test]

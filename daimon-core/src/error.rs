@@ -84,10 +84,76 @@ pub enum DaimonError {
     #[error("guardrail blocked: {0}")]
     GuardrailBlocked(String),
 
+    /// A storage backend operation failed (checkpoint store, memory backend,
+    /// broker state, or another persistence layer).
+    ///
+    /// `transient` distinguishes failures that may succeed on retry
+    /// (connection refused, timeout, I/O contention) from permanent ones
+    /// (corrupt data, invalid keys, misconfiguration), so callers can decide
+    /// whether retrying is worthwhile without string-matching the message.
+    #[error("storage error: {message}")]
+    Storage {
+        /// Description of the storage failure.
+        message: String,
+        /// `true` when retrying the operation may succeed.
+        transient: bool,
+    },
+
     /// A catch-all for other errors.
     #[error("{0}")]
     Other(String),
 }
 
+impl DaimonError {
+    /// Creates a permanent (non-retryable) [`DaimonError::Storage`] error,
+    /// e.g. corrupt persisted data or an invalid storage key.
+    pub fn storage(message: impl Into<String>) -> Self {
+        Self::Storage {
+            message: message.into(),
+            transient: false,
+        }
+    }
+
+    /// Creates a transient (retryable) [`DaimonError::Storage`] error,
+    /// e.g. a connection failure, timeout, or I/O error.
+    pub fn storage_transient(message: impl Into<String>) -> Self {
+        Self::Storage {
+            message: message.into(),
+            transient: true,
+        }
+    }
+}
+
 /// A type alias for `Result<T, DaimonError>`.
 pub type Result<T> = std::result::Result<T, DaimonError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_storage_constructor_is_permanent() {
+        let err = DaimonError::storage("corrupt checkpoint");
+        assert!(matches!(
+            err,
+            DaimonError::Storage {
+                transient: false,
+                ..
+            }
+        ));
+        assert_eq!(err.to_string(), "storage error: corrupt checkpoint");
+    }
+
+    #[test]
+    fn test_storage_transient_constructor_is_retryable() {
+        let err = DaimonError::storage_transient("connection refused");
+        assert!(matches!(
+            err,
+            DaimonError::Storage {
+                transient: true,
+                ..
+            }
+        ));
+        assert_eq!(err.to_string(), "storage error: connection refused");
+    }
+}

@@ -157,11 +157,21 @@ pub struct FieldMapping {
 // WorkflowEdge
 // ---------------------------------------------------------------------------
 
+/// How an edge wires the source node's output into the target's input.
+#[derive(Debug, Clone)]
+enum EdgeMapping {
+    /// Copy every field of the source output (identity mapping).
+    Passthrough,
+    /// Map exactly these fields — possibly none, in which case the edge
+    /// contributes nothing to the target's input.
+    Fields(Vec<FieldMapping>),
+}
+
 #[derive(Debug, Clone)]
 struct WorkflowEdge {
     from: String,
     to: String,
-    mappings: Vec<FieldMapping>,
+    mapping: EdgeMapping,
 }
 
 // ---------------------------------------------------------------------------
@@ -193,6 +203,11 @@ impl WorkflowBuilder {
     /// `mappings` is a slice of `(source_field, target_field)` pairs
     /// describing how to wire the source node's output fields into the
     /// target node's input fields.
+    ///
+    /// An **empty** `mappings` slice maps zero fields: the edge establishes
+    /// scheduling order but contributes nothing to the target's input. To
+    /// copy every field through unchanged, use
+    /// [`edge_passthrough`](Self::edge_passthrough).
     pub fn edge(
         mut self,
         from: impl Into<String>,
@@ -202,13 +217,15 @@ impl WorkflowBuilder {
         self.edges.push(WorkflowEdge {
             from: from.into(),
             to: to.into(),
-            mappings: mappings
-                .iter()
-                .map(|(s, t)| FieldMapping {
-                    source_field: s.to_string(),
-                    target_field: t.to_string(),
-                })
-                .collect(),
+            mapping: EdgeMapping::Fields(
+                mappings
+                    .iter()
+                    .map(|(s, t)| FieldMapping {
+                        source_field: s.to_string(),
+                        target_field: t.to_string(),
+                    })
+                    .collect(),
+            ),
         });
         self
     }
@@ -219,7 +236,7 @@ impl WorkflowBuilder {
         self.edges.push(WorkflowEdge {
             from: from.into(),
             to: to.into(),
-            mappings: Vec::new(),
+            mapping: EdgeMapping::Passthrough,
         });
         self
     }
@@ -241,7 +258,7 @@ impl WorkflowBuilder {
 
         let mut successors: HashMap<String, Vec<String>> = HashMap::new();
         let mut predecessors: HashMap<String, Vec<String>> = HashMap::new();
-        let mut edge_mappings: HashMap<(String, String), Vec<FieldMapping>> = HashMap::new();
+        let mut edge_mappings: HashMap<(String, String), EdgeMapping> = HashMap::new();
 
         for edge in &self.edges {
             if edge.from != START && !self.nodes.contains_key(&edge.from) {
@@ -265,10 +282,24 @@ impl WorkflowBuilder {
                 .entry(edge.to.clone())
                 .or_default()
                 .push(edge.from.clone());
-            edge_mappings
-                .entry((edge.from.clone(), edge.to.clone()))
-                .or_default()
-                .extend(edge.mappings.clone());
+
+            // Combine duplicate edges between the same node pair: a
+            // passthrough absorbs field mappings (it already copies every
+            // field); two field-mapped edges concatenate their mappings.
+            match edge_mappings.entry((edge.from.clone(), edge.to.clone())) {
+                std::collections::hash_map::Entry::Vacant(vacant) => {
+                    vacant.insert(edge.mapping.clone());
+                }
+                std::collections::hash_map::Entry::Occupied(mut occupied) => {
+                    match (occupied.get_mut(), &edge.mapping) {
+                        (EdgeMapping::Passthrough, _) => {}
+                        (slot, EdgeMapping::Passthrough) => *slot = EdgeMapping::Passthrough,
+                        (EdgeMapping::Fields(existing), EdgeMapping::Fields(new)) => {
+                            existing.extend(new.iter().cloned());
+                        }
+                    }
+                }
+            }
         }
 
         if !successors.contains_key(START) {
@@ -276,6 +307,36 @@ impl WorkflowBuilder {
         }
         if !predecessors.contains_key(END) {
             return Err(DaimonError::Orchestration("no edges into END".into()));
+        }
+
+        // A registered node that cannot be reached from START would silently
+        // never be scheduled — its output would just be missing downstream.
+        // Reject the build and name the offenders instead.
+        let mut reachable: HashSet<&str> = HashSet::new();
+        let mut stack: Vec<&str> = vec![START];
+        while let Some(current) = stack.pop() {
+            if !reachable.insert(current) {
+                continue;
+            }
+            if let Some(succs) = successors.get(current) {
+                for succ in succs {
+                    stack.push(succ.as_str());
+                }
+            }
+        }
+        let mut unreachable: Vec<&str> = self
+            .nodes
+            .keys()
+            .map(String::as_str)
+            .filter(|name| !reachable.contains(name))
+            .collect();
+        if !unreachable.is_empty() {
+            unreachable.sort_unstable();
+            return Err(DaimonError::Orchestration(format!(
+                "node(s) not reachable from START would never be scheduled: [{}]; \
+                 connect them with an edge or remove them",
+                unreachable.join(", ")
+            )));
         }
 
         let levels = super::toposort::topological_levels(
@@ -309,7 +370,7 @@ pub struct Workflow {
     levels: Vec<Vec<String>>,
     successors: HashMap<String, Vec<String>>,
     predecessors: HashMap<String, Vec<String>>,
-    edge_mappings: HashMap<(String, String), Vec<FieldMapping>>,
+    edge_mappings: HashMap<(String, String), EdgeMapping>,
 }
 
 impl std::fmt::Debug for Workflow {
@@ -351,23 +412,25 @@ impl Workflow {
                 None => continue,
             };
 
-            let mappings = self.edge_mappings.get(&(pred.clone(), node.to_string()));
-
-            match mappings {
-                Some(maps) if !maps.is_empty() => {
-                    for m in maps {
-                        if let Some(val) = pred_output.get(&m.source_field) {
-                            input.insert(m.target_field.clone(), val.clone());
-                        }
-                    }
-                }
-                _ => {
+            match self.edge_mappings.get(&(pred.clone(), node.to_string())) {
+                Some(EdgeMapping::Passthrough) => {
                     if let serde_json::Value::Object(map) = pred_output {
                         for (k, v) in map {
                             input.insert(k.clone(), v.clone());
                         }
                     }
                 }
+                Some(EdgeMapping::Fields(maps)) => {
+                    for m in maps {
+                        if let Some(val) = pred_output.get(&m.source_field) {
+                            input.insert(m.target_field.clone(), val.clone());
+                        }
+                    }
+                }
+                // Predecessors are derived from edges, so a mapping always
+                // exists; if it somehow doesn't, contribute nothing rather
+                // than silently copying everything.
+                None => {}
             }
         }
 
@@ -616,6 +679,91 @@ mod tests {
             )
             .build();
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_empty_mapping_maps_zero_fields() {
+        // `.edge(a, b, &[])` must mean "map zero fields", not the silent
+        // copy-everything that made it indistinguishable from
+        // `edge_passthrough` and left "pass nothing" inexpressible.
+        let wf = Workflow::builder()
+            .node(
+                "producer",
+                FnWorkflowNode::new(|_| Box::pin(async { Ok(json!({ "a": 1, "b": 2 })) })),
+            )
+            .node(
+                "consumer",
+                FnWorkflowNode::new(|input| {
+                    Box::pin(async move {
+                        let keys: Vec<String> = input
+                            .as_object()
+                            .map(|m| m.keys().cloned().collect())
+                            .unwrap_or_default();
+                        Ok(json!({ "received_keys": keys }))
+                    })
+                }),
+            )
+            .edge(START, "producer", &[])
+            .edge("producer", "consumer", &[])
+            .edge("consumer", END, &[("received_keys", "keys")])
+            .build()
+            .unwrap();
+
+        let out = wf.run(json!({ "seed": true })).await.unwrap();
+        let keys = out["keys"].as_array().unwrap();
+        assert!(
+            keys.is_empty(),
+            "an empty mapping must pass no fields, got: {keys:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_passthrough_still_copies_everything() {
+        let wf = Workflow::builder()
+            .node(
+                "producer",
+                FnWorkflowNode::new(|_| Box::pin(async { Ok(json!({ "a": 1, "b": 2 })) })),
+            )
+            .node(
+                "echo",
+                FnWorkflowNode::new(|input| Box::pin(async move { Ok(input) })),
+            )
+            .edge(START, "producer", &[])
+            .edge_passthrough("producer", "echo")
+            .edge_passthrough("echo", END)
+            .build()
+            .unwrap();
+
+        let out = wf.run(json!({})).await.unwrap();
+        assert_eq!(out["a"], 1);
+        assert_eq!(out["b"], 2);
+    }
+
+    #[tokio::test]
+    async fn test_unreachable_node_fails_build() {
+        let result = Workflow::builder()
+            .node(
+                "reached",
+                FnWorkflowNode::new(|_| Box::pin(async { Ok(json!({})) })),
+            )
+            .node(
+                "orphan",
+                FnWorkflowNode::new(|_| Box::pin(async { Ok(json!({})) })),
+            )
+            .edge(START, "reached", &[])
+            .edge("reached", END, &[])
+            .build();
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("orphan"),
+            "error must name the unreachable node, got: {err}"
+        );
+        assert!(
+            !err.contains("reached,"),
+            "reachable nodes must not be flagged, got: {err}"
+        );
     }
 
     #[tokio::test]

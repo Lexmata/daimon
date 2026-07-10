@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Cleanups (DAIM-14):**
+  - `HotSwapAgent` no longer holds its lock across the whole ReAct loop —
+    prompts run on an `Arc` snapshot, so a swap never waits for in-flight
+    prompts (which finish on the old agent, now documented) and new prompts
+    never stall behind a queued writer. `add_tool` pre-warms the registry
+    caches on the swapped-in agent.
+  - The tool registry's spec cache actually caches for `&self` callers, and
+    `validate_input` on an unregistered tool reports an error instead of
+    silently passing validation.
+  - DAG and graph parallel-branch merges are deterministic (registration /
+    declaration order, later wins — documented) instead of last-writer-wins
+    in completion order; a DAG branch selecting a non-successor and a graph
+    fan-out branch returning a non-`Continue` outcome are now descriptive
+    errors instead of silent no-ops.
+  - Workflow `.edge(a, b, &[])` now maps zero fields (previously it silently
+    behaved like `edge_passthrough`), and builds fail on nodes unreachable
+    from START.
+  - The HTTP agent server's SSE events are serialized via
+    `SerializableStreamEvent` JSON instead of Rust `Debug` strings, and
+    `serve()` warns when starting without an API key.
+  - `DaimonError` gains a `Storage { transient }` variant; file and NATS KV
+    checkpoint errors are classified so callers can make retry decisions.
 - **Cost tracking (DAIM-13):**
   - Costs are recorded against the provider's real model id instead of the
     literal `"default"`, which made every per-model pricing row unreachable.
