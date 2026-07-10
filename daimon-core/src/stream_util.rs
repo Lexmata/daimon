@@ -82,15 +82,25 @@ pub fn parse_retry_after_secs(value: &str) -> Option<u64> {
 /// newline-terminated lines. A `\n` (0x0A) byte can never appear inside a
 /// multi-byte UTF-8 sequence, so decoding a whole line is always safe even when
 /// the underlying chunk boundary fell mid-character.
+///
+/// Consumed bytes are tracked with a cursor rather than drained per line:
+/// draining left-shifts every remaining byte, which turns a chunk carrying K
+/// lines into O(K·chunk) work. The buffer compacts once the consumed prefix
+/// grows past a threshold, so memory stays bounded over a long stream.
 #[derive(Default)]
 pub struct LineBuffer {
     buf: Vec<u8>,
+    /// Bytes before this offset have already been yielded as lines.
+    cursor: usize,
 }
+
+/// Consumed-prefix size that triggers compaction in [`LineBuffer::next_line`].
+const COMPACT_THRESHOLD: usize = 8 * 1024;
 
 impl LineBuffer {
     /// Creates an empty buffer.
     pub fn new() -> Self {
-        Self { buf: Vec::new() }
+        Self::default()
     }
 
     /// Appends a raw byte chunk from the stream.
@@ -101,10 +111,22 @@ impl LineBuffer {
     /// Removes and returns the next complete line (trailing `\n` stripped),
     /// or `None` when no complete line is buffered yet.
     pub fn next_line(&mut self) -> Option<String> {
-        let pos = self.buf.iter().position(|&b| b == b'\n')?;
-        let line: Vec<u8> = self.buf.drain(..=pos).collect();
-        // Strip the trailing newline; a complete line never splits a code point.
-        Some(String::from_utf8_lossy(&line[..line.len() - 1]).into_owned())
+        let rel = self.buf[self.cursor..].iter().position(|&b| b == b'\n')?;
+        let end = self.cursor + rel;
+        // Decode straight from the slice; a complete line never splits a
+        // code point, and the trailing newline is excluded by `end`.
+        let line = String::from_utf8_lossy(&self.buf[self.cursor..end]).into_owned();
+        self.cursor = end + 1;
+
+        if self.cursor == self.buf.len() {
+            self.buf.clear();
+            self.cursor = 0;
+        } else if self.cursor >= COMPACT_THRESHOLD {
+            self.buf.drain(..self.cursor);
+            self.cursor = 0;
+        }
+
+        Some(line)
     }
 
     /// Drains and returns whatever bytes remain after the last complete line.
@@ -114,11 +136,12 @@ impl LineBuffer {
     /// Call this once at end-of-stream to recover it. Returns `None` when the
     /// buffer is empty or the remainder is only whitespace.
     pub fn take_remaining(&mut self) -> Option<String> {
-        if self.buf.is_empty() {
+        let bytes = std::mem::take(&mut self.buf);
+        let start = std::mem::take(&mut self.cursor);
+        if start >= bytes.len() {
             return None;
         }
-        let bytes = std::mem::take(&mut self.buf);
-        let trimmed = String::from_utf8_lossy(&bytes).trim().to_string();
+        let trimmed = String::from_utf8_lossy(&bytes[start..]).trim().to_string();
         if trimmed.is_empty() {
             None
         } else {
@@ -265,6 +288,41 @@ mod tests {
         assert_eq!(lb.next_line(), None, "no complete line without a newline");
         assert_eq!(lb.take_remaining().as_deref(), Some("data: {\"ok\":true}"));
         assert_eq!(lb.take_remaining(), None, "buffer drained after take");
+    }
+
+    #[test]
+    fn test_many_lines_one_chunk_and_compaction() {
+        // Push enough newline-terminated lines in one chunk to cross the
+        // compaction threshold mid-drain, with a trailing partial line that
+        // must survive compaction intact.
+        let mut data = Vec::new();
+        let line_count = COMPACT_THRESHOLD / 8 + 16;
+        for i in 0..line_count {
+            data.extend_from_slice(format!("line-{i:04}\n").as_bytes());
+        }
+        data.extend_from_slice(b"partial");
+
+        let mut lb = LineBuffer::new();
+        lb.push(&data);
+        for i in 0..line_count {
+            assert_eq!(
+                lb.next_line().as_deref(),
+                Some(format!("line-{i:04}").as_str())
+            );
+        }
+        assert_eq!(lb.next_line(), None);
+        lb.push(b" tail\n");
+        assert_eq!(lb.next_line().as_deref(), Some("partial tail"));
+    }
+
+    #[test]
+    fn test_take_remaining_after_consumed_lines() {
+        let mut lb = LineBuffer::new();
+        lb.push(b"first\nleftover");
+        assert_eq!(lb.next_line().as_deref(), Some("first"));
+        assert_eq!(lb.take_remaining().as_deref(), Some("leftover"));
+        assert_eq!(lb.take_remaining(), None);
+        assert_eq!(lb.next_line(), None);
     }
 
     #[test]
