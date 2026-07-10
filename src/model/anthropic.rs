@@ -18,20 +18,31 @@ use crate::tool::ToolCall;
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const API_VERSION: &str = "2023-06-01";
-const PROMPT_CACHING_BETA: &str = "prompt-caching-2024-07-31";
 
-/// Upper bound on establishing a TCP connection. Applied unconditionally so
-/// a dead or unreachable upstream fails fast instead of blocking forever; it
-/// does not bound the request itself, so long streaming generations are
-/// unaffected.
-const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Default `max_tokens` sent when the request does not specify one.
+///
+/// The Anthropic API requires `max_tokens` on every request; 4096 is a
+/// conservative ceiling that every Claude model supports.
+const DEFAULT_MAX_TOKENS: u32 = 4096;
 
-fn build_client(timeout: Option<Duration>) -> Client {
-    let mut builder = Client::builder().connect_timeout(DEFAULT_CONNECT_TIMEOUT);
-    if let Some(t) = timeout {
-        builder = builder.timeout(t);
-    }
-    builder.build().expect("failed to build HTTP client")
+/// Default whole-request timeout applied to non-streaming `generate` calls.
+///
+/// Long completions can legitimately take minutes, so this is deliberately
+/// generous. Override with [`Anthropic::with_timeout`].
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Default TCP/TLS connect timeout applied to the underlying HTTP client.
+///
+/// This bounds only connection establishment, so it is safe for the
+/// long-lived SSE streams produced by `generate_stream` (a whole-request
+/// timeout would kill a healthy stream mid-response).
+const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn build_client() -> Client {
+    Client::builder()
+        .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
+        .build()
+        .expect("failed to build HTTP client")
 }
 
 /// Anthropic Claude model provider for the Daimon agent framework.
@@ -48,17 +59,41 @@ pub struct Anthropic {
     use_prompt_caching: bool,
 }
 
+impl std::fmt::Debug for Anthropic {
+    /// Hand-written to avoid leaking the plaintext API key in logs or panic
+    /// output; a derived `Debug` would print `api_key` verbatim.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Anthropic")
+            .field("client", &self.client)
+            .field("api_key", &"[redacted]")
+            .field("model_id", &self.model_id)
+            .field("base_url", &self.base_url)
+            .field("timeout", &self.timeout)
+            .field("max_retries", &self.max_retries)
+            .field("use_prompt_caching", &self.use_prompt_caching)
+            .finish()
+    }
+}
+
 impl Anthropic {
     /// Creates a new Anthropic client using `ANTHROPIC_API_KEY` from the environment.
+    ///
+    /// The constructor never fails; if the environment variable is unset or
+    /// empty a warning is logged and requests will fail with an auth error.
     pub fn new(model_id: impl Into<String>) -> Self {
         let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
+        if api_key.is_empty() {
+            tracing::warn!(
+                "ANTHROPIC_API_KEY is not set or empty; Anthropic requests will fail authentication"
+            );
+        }
         Self::with_api_key(model_id, api_key)
     }
 
     /// Creates a new Anthropic client with an explicit API key.
     pub fn with_api_key(model_id: impl Into<String>, api_key: impl Into<String>) -> Self {
         Self {
-            client: build_client(None),
+            client: build_client(),
             api_key: api_key.into(),
             model_id: model_id.into(),
             base_url: DEFAULT_BASE_URL.to_string(),
@@ -74,10 +109,14 @@ impl Anthropic {
         self
     }
 
-    /// Sets a timeout for HTTP requests.
+    /// Sets a timeout for non-streaming HTTP requests (default: 120s).
+    ///
+    /// The timeout applies per-request to `generate`; `generate_stream` is a
+    /// long-lived SSE connection and is protected only by the client's
+    /// connect timeout, since a whole-request deadline would abort healthy
+    /// streams.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
-        self.client = build_client(Some(timeout));
         self
     }
 
@@ -87,7 +126,10 @@ impl Anthropic {
         self
     }
 
-    /// Enables prompt caching via the `anthropic-beta` header.
+    /// Enables prompt caching by attaching `cache_control` breakpoints.
+    ///
+    /// Prompt caching is generally available; the request needs no
+    /// `anthropic-beta` header, only the `cache_control` blocks this enables.
     pub fn with_prompt_caching(mut self) -> Self {
         self.use_prompt_caching = true;
         self
@@ -182,7 +224,7 @@ impl Anthropic {
             system,
             messages,
             tools,
-            max_tokens: request.max_tokens.unwrap_or(4096),
+            max_tokens: request.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
             temperature: request.temperature,
             stream: false,
         }
@@ -200,20 +242,18 @@ impl Model for Anthropic {
         let url = format!("{}/v1/messages", self.base_url);
 
         tracing::debug!("building request for non-streaming generate");
+        let timeout = self.timeout.unwrap_or(DEFAULT_REQUEST_TIMEOUT);
         let mut attempt = 0u32;
 
         loop {
-            let mut req_builder = self
+            let req_builder = self
                 .client
                 .post(&url)
+                .timeout(timeout)
                 .header("x-api-key", &self.api_key)
                 .header("anthropic-version", API_VERSION)
                 .header("content-type", "application/json")
                 .json(&body);
-
-            if self.use_prompt_caching {
-                req_builder = req_builder.header("anthropic-beta", PROMPT_CACHING_BETA);
-            }
 
             tracing::debug!(attempt = attempt, "sending request to Anthropic API");
             let response = req_builder
@@ -259,31 +299,47 @@ impl Model for Anthropic {
         let url = format!("{}/v1/messages", self.base_url);
 
         tracing::debug!("building request for streaming generate");
-        let mut req_builder = self
-            .client
-            .post(&url)
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", API_VERSION)
-            .header("content-type", "application/json")
-            .json(&body);
+        // Retry only the initial POST/handshake — once the stream is
+        // established, mid-stream failures must never be retried (the
+        // consumer has already observed a partial response).
+        let mut response = None;
+        for attempt in 0..=self.max_retries {
+            let req_builder = self
+                .client
+                .post(&url)
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", API_VERSION)
+                .header("content-type", "application/json")
+                .json(&body);
 
-        if self.use_prompt_caching {
-            req_builder = req_builder.header("anthropic-beta", PROMPT_CACHING_BETA);
+            tracing::debug!(attempt, "sending streaming request to Anthropic API");
+            let resp = req_builder
+                .send()
+                .await
+                .map_err(|e| DaimonError::Model(format!("Anthropic HTTP error: {e}")))?;
+            let status = resp.status();
+
+            if status.is_success() {
+                response = Some(resp);
+                break;
+            }
+
+            let retry_after = crate::model::retry::parse_retry_after(resp.headers());
+            let text = resp.text().await.unwrap_or_default();
+            let code = status.as_u16();
+            let is_retriable = code == 429 || code == 529 || (500..600).contains(&code);
+
+            if is_retriable && attempt < self.max_retries {
+                let delay = crate::model::retry::backoff_delay(attempt, retry_after);
+                tracing::debug!(status = %status, attempt, delay_ms = delay.as_millis(), "retriable error on stream handshake, backing off");
+                tokio::time::sleep(delay).await;
+            } else {
+                return Err(DaimonError::Model(format!(
+                    "Anthropic API error ({status}): {text}"
+                )));
+            }
         }
-
-        tracing::debug!("sending streaming request to Anthropic API");
-        let response = req_builder
-            .send()
-            .await
-            .map_err(|e| DaimonError::Model(format!("Anthropic HTTP error: {e}")))?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            return Err(DaimonError::Model(format!(
-                "Anthropic API error ({status}): {text}"
-            )));
-        }
+        let response = response.expect("loop breaks with a response or returns an error");
 
         tracing::debug!("stream established, processing events");
         let byte_stream = response.bytes_stream();
@@ -317,13 +373,21 @@ impl Model for Anthropic {
                         continue;
                     }
 
-                    if let Some(data) = line.strip_prefix("data: ")
-                        && let Ok(event) = serde_json::from_str::<AnthropicStreamEvent>(data) {
-                            handle_anthropic_stream_event_into(&mut index_to_id, event, &mut events);
-                            for stream_event in events.drain(..) {
-                                yield stream_event;
+                    if let Some(data) = line.strip_prefix("data: ") {
+                        match serde_json::from_str::<AnthropicStreamEvent>(data) {
+                            Ok(event) => {
+                                // Fill the reusable buffer (no per-event Vec
+                                // allocation), then drain it into the stream.
+                                handle_anthropic_stream_event_into(&mut index_to_id, event, &mut events);
+                                for stream_event in events.drain(..) {
+                                    yield stream_event;
+                                }
+                            }
+                            Err(e) => {
+                                tracing::debug!(error = %e, "dropping undeserializable Anthropic SSE event");
                             }
                         }
+                    }
                 }
             }
 
@@ -332,29 +396,25 @@ impl Model for Anthropic {
             // that last event would otherwise be silently dropped. Drain the
             // buffered remainder and run it through the identical SSE parse path.
             if let Some(line) = buffer.take_remaining()
-                && let Some(data) = line.strip_prefix("data: ")
-                    && let Ok(event) = serde_json::from_str::<AnthropicStreamEvent>(data) {
-                        handle_anthropic_stream_event_into(&mut index_to_id, event, &mut events);
-                        for stream_event in events.drain(..) {
-                            yield stream_event;
+                && let Some(data) = line.strip_prefix("data: ") {
+                    match serde_json::from_str::<AnthropicStreamEvent>(data) {
+                        Ok(event) => {
+                            handle_anthropic_stream_event_into(&mut index_to_id, event, &mut events);
+                            for stream_event in events.drain(..) {
+                                yield stream_event;
+                            }
+                        }
+                        Err(e) => {
+                            tracing::debug!(error = %e, "dropping undeserializable Anthropic SSE event");
                         }
                     }
+                }
         };
 
         Ok(Box::pin(stream))
     }
 }
 
-/// Advances the Anthropic streaming state machine by one SSE event and returns
-/// the [`StreamEvent`]s it produces (in order).
-///
-/// This is the correctness-critical core of `generate_stream`: it maintains the
-/// `index -> tool_use id` correlation map so that `content_block_delta`
-/// (partial JSON arguments) and `content_block_stop` events — which carry only
-/// a block `index`, never the id — are attributed to the tool call opened at
-/// that index by the earlier `content_block_start`. Extracted from the
-/// `async_stream::try_stream!` block so it can be unit-tested without a live
-/// HTTP stream; the streaming loop simply yields whatever this returns.
 /// Test-facing wrapper around [`handle_anthropic_stream_event_into`] that
 /// returns the produced events; the streaming loop reuses one buffer via the
 /// `_into` variant instead, avoiding a fresh `Vec` allocation per SSE event.
@@ -368,6 +428,24 @@ fn handle_anthropic_stream_event(
     events
 }
 
+/// Advances the Anthropic streaming state machine by one SSE event, appending
+/// the [`StreamEvent`]s it produces (in order) to `events`.
+///
+/// This is the correctness-critical core of `generate_stream`: it maintains the
+/// `index -> tool_use id` correlation map so that `content_block_delta`
+/// (partial JSON arguments) and `content_block_stop` events — which carry only
+/// a block `index`, never the id — are attributed to the tool call opened at
+/// that index by the earlier `content_block_start`. Extracted from the
+/// `async_stream::try_stream!` block so it can be unit-tested without a live
+/// HTTP stream; the streaming loop drains whatever this appends.
+///
+/// Terminal handling: `message_delta` carries the final `stop_reason` and
+/// usage. [`StreamEvent::Done`] cannot carry either, so usage is logged at
+/// debug level and abnormal stop reasons (`refusal`, `pause_turn`) surface as
+/// an in-band [`StreamEvent::Error`] — the only channel that keeps them from
+/// ending the stream indistinguishably from a normal turn. Server-sent
+/// `{"type":"error"}` events (e.g. `overloaded_error` mid-stream) also become
+/// [`StreamEvent::Error`] items instead of being silently dropped.
 fn handle_anthropic_stream_event_into(
     index_to_id: &mut HashMap<u64, String>,
     event: AnthropicStreamEvent,
@@ -414,10 +492,49 @@ fn handle_anthropic_stream_event_into(
                 events.push(StreamEvent::ToolCallEnd { id });
             }
         }
+        "message_delta" => {
+            if let Some(usage) = event.usage {
+                tracing::debug!(
+                    output_tokens = usage.output_tokens,
+                    "Anthropic stream usage (message_delta)"
+                );
+            }
+            match event.delta.as_ref().and_then(|d| d.stop_reason.as_deref()) {
+                Some("refusal") => {
+                    events.push(StreamEvent::Error(
+                        "Anthropic ended the stream with stop_reason=refusal (the model declined to answer)"
+                            .to_string(),
+                    ));
+                }
+                Some("pause_turn") => {
+                    events.push(StreamEvent::Error(
+                        "Anthropic paused the turn (stop_reason=pause_turn); continue it with a follow-up request"
+                            .to_string(),
+                    ));
+                }
+                _ => {}
+            }
+        }
+        "error" => {
+            // Mid-stream server errors (e.g. overloaded_error) arrive as SSE
+            // events with HTTP 200; dropping them ended streams silently.
+            let detail = event
+                .error
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "unknown error".to_string());
+            events.push(StreamEvent::Error(format!(
+                "Anthropic stream error event: {detail}"
+            )));
+        }
         "message_stop" => {
             events.push(StreamEvent::Done);
         }
-        _ => {}
+        other => {
+            tracing::debug!(
+                event_type = other,
+                "ignoring unhandled Anthropic SSE event type"
+            );
+        }
     }
 }
 
@@ -443,6 +560,8 @@ fn parse_response(response: AnthropicResponse) -> Result<ChatResponse> {
     let stop_reason = match response.stop_reason.as_deref() {
         Some("tool_use") => StopReason::ToolUse,
         Some("max_tokens") => StopReason::MaxTokens,
+        Some("refusal") => StopReason::Refusal,
+        Some("pause_turn") => StopReason::PauseTurn,
         _ => StopReason::EndTurn,
     };
 
@@ -588,6 +707,12 @@ struct AnthropicStreamEvent {
     index: Option<u64>,
     content_block: Option<AnthropicStreamBlock>,
     delta: Option<AnthropicStreamDelta>,
+    /// Cumulative usage, present on `message_delta`.
+    #[serde(default)]
+    usage: Option<AnthropicStreamUsage>,
+    /// Error payload, present on `{"type":"error"}` events.
+    #[serde(default)]
+    error: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -601,6 +726,15 @@ struct AnthropicStreamBlock {
 struct AnthropicStreamDelta {
     text: Option<String>,
     partial_json: Option<String>,
+    /// Final stop reason, present on `message_delta`.
+    #[serde(default)]
+    stop_reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct AnthropicStreamUsage {
+    #[serde(default)]
+    output_tokens: u32,
 }
 
 #[cfg(test)]
@@ -667,8 +801,8 @@ mod tests {
 
     #[test]
     fn test_anthropic_new_default() {
-        let model = Anthropic::new("claude-sonnet-4-20250514");
-        assert_eq!(model.model_id, "claude-sonnet-4-20250514");
+        let model = Anthropic::new("claude-sonnet-5");
+        assert_eq!(model.model_id, "claude-sonnet-5");
         assert_eq!(model.base_url, DEFAULT_BASE_URL);
     }
 
@@ -1016,6 +1150,93 @@ mod tests {
             matches!(tool_delta.as_slice(), [StreamEvent::ToolCallDelta { id, .. }] if id == "toolu_B"),
             "tool delta at index 1 must resolve to toolu_B, got {tool_delta:?}"
         );
+    }
+
+    #[test]
+    fn test_parse_response_refusal_maps_to_refusal() {
+        let raw = AnthropicResponse {
+            content: vec![],
+            stop_reason: Some("refusal".into()),
+            usage: None,
+        };
+        let resp = parse_response(raw).unwrap();
+        assert_eq!(resp.stop_reason, StopReason::Refusal);
+    }
+
+    #[test]
+    fn test_parse_response_pause_turn_maps_to_pause_turn() {
+        let raw = AnthropicResponse {
+            content: vec![],
+            stop_reason: Some("pause_turn".into()),
+            usage: None,
+        };
+        let resp = parse_response(raw).unwrap();
+        assert_eq!(resp.stop_reason, StopReason::PauseTurn);
+    }
+
+    #[test]
+    fn test_debug_redacts_api_key() {
+        let model = Anthropic::with_api_key("claude-sonnet-5", "sk-ant-supersecret-key");
+        let dbg = format!("{model:?}");
+        assert!(
+            !dbg.contains("sk-ant-supersecret-key"),
+            "Debug output must not contain the plaintext API key: {dbg}"
+        );
+        assert!(dbg.contains("[redacted]"));
+    }
+
+    #[test]
+    fn test_stream_event_error_is_surfaced() {
+        // {"type":"error"} events (e.g. overloaded_error mid-stream) were
+        // previously dropped by the `_ => {}` arm, ending streams silently.
+        let mut idx = HashMap::new();
+        let out = handle_anthropic_stream_event(
+            &mut idx,
+            event(r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#),
+        );
+        assert_eq!(out.len(), 1, "got {out:?}");
+        assert!(
+            matches!(&out[0], StreamEvent::Error(msg) if msg.contains("overloaded_error")),
+            "expected an in-band Error event, got {out:?}"
+        );
+    }
+
+    #[test]
+    fn test_stream_message_delta_refusal_emits_error() {
+        let mut idx = HashMap::new();
+        let out = handle_anthropic_stream_event(
+            &mut idx,
+            event(
+                r#"{"type":"message_delta","delta":{"stop_reason":"refusal"},"usage":{"output_tokens":3}}"#,
+            ),
+        );
+        assert_eq!(out.len(), 1, "got {out:?}");
+        assert!(matches!(&out[0], StreamEvent::Error(msg) if msg.contains("refusal")));
+    }
+
+    #[test]
+    fn test_stream_message_delta_pause_turn_emits_error() {
+        let mut idx = HashMap::new();
+        let out = handle_anthropic_stream_event(
+            &mut idx,
+            event(r#"{"type":"message_delta","delta":{"stop_reason":"pause_turn"}}"#),
+        );
+        assert_eq!(out.len(), 1, "got {out:?}");
+        assert!(matches!(&out[0], StreamEvent::Error(msg) if msg.contains("pause_turn")));
+    }
+
+    #[test]
+    fn test_stream_message_delta_normal_stop_is_silent() {
+        // end_turn / tool_use terminations are the normal path; message_stop
+        // provides the Done, so message_delta must not add events.
+        let mut idx = HashMap::new();
+        let out = handle_anthropic_stream_event(
+            &mut idx,
+            event(
+                r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":12}}"#,
+            ),
+        );
+        assert!(out.is_empty(), "got {out:?}");
     }
 
     #[test]

@@ -54,6 +54,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Providers (DAIM-9):**
+  - **Gemini multi-turn tool use works.** Synthetic tool-call ids are now
+    `gemini_{seq}_{name}` and `functionResponse.name` resolves back to the
+    real function name (previously the synthetic id was sent verbatim and
+    Gemini rejected or misattributed the response); parallel calls to the
+    same function get distinct ids in both streaming and non-streaming
+    paths.
+  - Safety terminations stop masquerading as normal completions: Gemini
+    SAFETY/RECITATION/prompt-block, Anthropic `refusal`/`pause_turn`,
+    OpenAI/Azure `content_filter`, and Bedrock guardrail interventions map
+    to `StopReason::ContentFiltered`/`Refusal`/`PauseTurn` (non-streaming)
+    or an in-band stream error before `Done` (streaming).
+  - The Gemini API key moved from the `?key=` query parameter to the
+    `x-goog-api-key` header — reqwest error strings include the full URL,
+    so any transport error was logging the live key.
+  - Default HTTP timeouts everywhere: chat `generate` gets a 120s
+    per-request default (connect timeout 30s; SSE streams deliberately get
+    no whole-request deadline), embeddings/queue clients get 60s/30s with
+    `with_timeout` builders.
+  - OpenAI/Azure streaming: real `call_…` tool ids are used when present
+    (previously the chunk index), `ToolCallEnd` is emitted, `finish_reason`
+    is honored, and the duplicated SSE parsing is extracted into tested
+    handlers; malformed tool arguments surface an error instead of
+    silently becoming `null`. OpenAI sends `max_completion_tokens`.
+  - Anthropic: obsolete `prompt-caching-2024-07-31` beta header removed
+    (caching is GA), mid-stream `error` events surface instead of being
+    dropped, `message_delta` stop reasons are handled, and the client gains
+    a redacting `Debug` impl.
+  - Bedrock: retryability is classified via typed AWS error codes instead
+    of string-matching `Display` output (real throttling errors were not
+    retried), backoff uses the shared jittered helper, and the seven
+    `.build().expect(...)` panics in the request path are proper errors.
+  - Embeddings: OpenAI/Azure `with_dimensions()` is actually sent to the
+    API (previously vectors came back full-size while `dimensions()`
+    reported the truncated size); Bedrock errors on non-numeric embedding
+    elements instead of returning silently short vectors; all embedding
+    clients retry transient failures like their chat siblings.
+  - Ollama tool-call ids no longer collide across turns, and tool messages
+    carry `tool_name` for newer Ollama versions.
+  - Deprecated `claude-sonnet-4-20250514` model ids in docs, tests, and
+    examples replaced with current-generation ids.
 - **Cleanups (DAIM-14):**
   - `HotSwapAgent` no longer holds its lock across the whole ReAct loop —
     prompts run on an `Arc` snapshot, so a swap never waits for in-flight

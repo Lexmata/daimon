@@ -15,6 +15,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use std::time::Duration;
+
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -23,6 +25,21 @@ use daimon_core::distributed::{AgentTask, TaskBroker, TaskResult, TaskStatus};
 use daimon_core::{DaimonError, Result};
 
 const PUBSUB_BASE_URL: &str = "https://pubsub.googleapis.com/v1";
+
+/// Default whole-request timeout for Pub/Sub REST calls.
+///
+/// Pub/Sub `pull` may long-poll when no messages are available; a `receive`
+/// call that hits this deadline is treated as an empty poll (`Ok(None)`)
+/// rather than an error, so the bound only protects against wedged
+/// connections on publish/ack paths.
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn build_client() -> Client {
+    Client::builder()
+        .timeout(DEFAULT_TIMEOUT)
+        .build()
+        .expect("failed to build HTTP client")
+}
 
 /// Distributes agent tasks via Google Cloud Pub/Sub.
 ///
@@ -53,7 +70,7 @@ impl PubSubBroker {
         api_key: impl Into<String>,
     ) -> Self {
         Self {
-            client: Client::new(),
+            client: build_client(),
             project: project.into(),
             topic: topic.into(),
             subscription: subscription.into(),
@@ -72,7 +89,7 @@ impl PubSubBroker {
         token: impl Into<String>,
     ) -> Self {
         Self {
-            client: Client::new(),
+            client: build_client(),
             project: project.into(),
             topic: topic.into(),
             subscription: subscription.into(),
@@ -102,9 +119,14 @@ impl PubSubBroker {
         )
     }
 
+    /// Attaches credentials to a request.
+    ///
+    /// API keys ride in the `x-goog-api-key` header rather than a `?key=`
+    /// query parameter, which would leak into logs via reqwest error messages
+    /// that include the full URL.
     async fn auth_request(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         if let Some(ref key) = self.api_key {
-            builder.query(&[("key", key.as_str())])
+            builder.header("x-goog-api-key", key.as_str())
         } else if let Some(ref token_lock) = self.bearer_token {
             let token = token_lock.lock().await;
             builder.bearer_auth(token.clone())
@@ -202,10 +224,13 @@ impl TaskBroker for PubSubBroker {
         let req = self.client.post(&url).json(&body);
         let req = self.auth_request(req).await;
 
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| DaimonError::Other(format!("pubsub pull: {e}")))?;
+        let resp = match req.send().await {
+            Ok(resp) => resp,
+            // A pull that idles past the client timeout is an empty poll, not
+            // a failure; callers poll `receive` in a loop.
+            Err(e) if e.is_timeout() => return Ok(None),
+            Err(e) => return Err(DaimonError::Other(format!("pubsub pull: {e}"))),
+        };
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -302,6 +327,24 @@ mod tests {
         assert_eq!(
             broker.subscription_path(),
             "projects/my-project/subscriptions/my-sub"
+        );
+    }
+
+    #[test]
+    fn test_api_key_sent_as_header_not_query_param() {
+        let broker = PubSubBroker::with_api_key("proj", "topic", "sub", "pubsub-secret-key");
+        let builder = broker.client.post("https://example.com/v1");
+        let req = futures::executor::block_on(broker.auth_request(builder))
+            .build()
+            .unwrap();
+        assert!(
+            !req.url().as_str().contains("pubsub-secret-key"),
+            "API key must not appear in the request URL: {}",
+            req.url()
+        );
+        assert_eq!(
+            req.headers().get("x-goog-api-key").unwrap(),
+            "pubsub-secret-key"
         );
     }
 

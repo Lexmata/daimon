@@ -7,7 +7,7 @@
 mod traits;
 pub mod types;
 
-#[cfg(any(feature = "openai", feature = "anthropic"))]
+#[cfg(any(feature = "openai", feature = "anthropic", feature = "ollama"))]
 pub(crate) mod retry;
 
 #[cfg(any(feature = "openai", feature = "anthropic", feature = "ollama"))]

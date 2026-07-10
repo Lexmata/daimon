@@ -19,6 +19,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use reqwest::Client;
 use serde::Deserialize;
@@ -26,6 +27,21 @@ use tokio::sync::Mutex;
 
 use daimon_core::distributed::{AgentTask, TaskBroker, TaskResult, TaskStatus};
 use daimon_core::{DaimonError, Result};
+
+/// Default whole-request timeout for Service Bus REST calls.
+///
+/// Applies to send/complete/fail requests. The `receive` path long-polls
+/// server-side for up to `lock_duration` seconds, so it uses a per-request
+/// timeout of `lock_duration` plus this margin instead — a flat client
+/// timeout shorter than the long poll would abort every empty poll.
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn build_client() -> Client {
+    Client::builder()
+        .timeout(DEFAULT_TIMEOUT)
+        .build()
+        .expect("failed to build HTTP client")
+}
 
 /// Distributes agent tasks via Azure Service Bus REST API.
 ///
@@ -67,7 +83,7 @@ impl ServiceBusBroker {
         sas_token: impl Into<String>,
     ) -> Self {
         Self {
-            client: Client::new(),
+            client: build_client(),
             namespace_url: namespace_url.into().trim_end_matches('/').to_string(),
             queue_name: queue_name.into(),
             sas_token: sas_token.into(),
@@ -155,9 +171,13 @@ impl TaskBroker for ServiceBusBroker {
     }
 
     async fn receive(&self) -> Result<Option<AgentTask>> {
+        // The server long-polls for up to `lock_duration` seconds before
+        // answering 204; the request timeout must comfortably exceed that.
+        let receive_timeout = DEFAULT_TIMEOUT + Duration::from_secs(u64::from(self.lock_duration));
         let resp = self
             .client
             .post(self.receive_url())
+            .timeout(receive_timeout)
             .header("Authorization", self.auth_header())
             .send()
             .await
