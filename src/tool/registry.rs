@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::error::{DaimonError, Result};
 use crate::model::types::ToolSpec;
-use crate::tool::traits::{SharedTool, Tool};
+use crate::tool::{SharedTool, Tool};
 
 /// A tool-spec snapshot tagged with the registry generation it was built from.
 #[derive(Clone)]

@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 use tokio::sync::Mutex;
 
 use crate::error::Result;
-use crate::memory::traits::Memory;
+use crate::memory::Memory;
 use crate::model::types::Message;
 
 /// Estimates the byte-length of a JSON value without allocating a String.

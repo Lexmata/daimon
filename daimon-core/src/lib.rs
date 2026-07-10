@@ -31,9 +31,11 @@ pub mod distributed;
 mod document;
 mod embedding;
 mod error;
+mod memory;
 mod model;
 mod stream;
 pub mod stream_util;
+mod tool;
 mod tool_types;
 mod types;
 pub mod vector_store;
@@ -42,8 +44,12 @@ pub use distributed::{AgentTask, ErasedTaskBroker, TaskBroker, TaskResult, TaskS
 pub use document::{Document, ScoredDocument};
 pub use embedding::{EmbeddingModel, ErasedEmbeddingModel, SharedEmbeddingModel};
 pub use error::{DaimonError, Result};
+pub use memory::{ErasedMemory, Memory, SharedMemory};
 pub use model::{ErasedModel, Model, SharedModel};
 pub use stream::{ResponseStream, StreamEvent};
+pub use tool::{
+    BackoffStrategy, ErasedTool, SharedTool, Tool, ToolChoice, ToolOutput, ToolRetryPolicy,
+};
 pub use tool_types::ToolCall;
 pub use types::{ChatRequest, ChatResponse, Message, Role, StopReason, ToolSpec, Usage};
 pub use vector_store::{ErasedVectorStore, SharedVectorStore, VectorStore};

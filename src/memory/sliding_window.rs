@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use tokio::sync::Mutex;
 
 use crate::error::Result;
-use crate::memory::traits::Memory;
+use crate::memory::Memory;
 use crate::model::types::Message;
 
 /// In-memory conversation storage that keeps only the most recent N messages.
