@@ -36,8 +36,14 @@ use daimon_core::{
 
 const DEFAULT_BASE_URL: &str = "http://localhost:8080";
 
+/// Upper bound on establishing a TCP connection. Applied unconditionally so
+/// a dead or unreachable upstream fails fast instead of blocking forever; it
+/// does not bound the request itself, so long streaming generations are
+/// unaffected.
+const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
 fn build_client(timeout: Option<Duration>) -> Client {
-    let mut builder = Client::builder();
+    let mut builder = Client::builder().connect_timeout(DEFAULT_CONNECT_TIMEOUT);
     if let Some(t) = timeout {
         builder = builder.timeout(t);
     }
@@ -280,6 +286,9 @@ impl Model for LlamaCpp {
 
             let mut buffer = LineBuffer::new();
             let mut byte_stream = Box::pin(byte_stream);
+            // Reused across the whole stream so the parse path allocates no
+            // per-line Vec; drained after each line.
+            let mut events: Vec<StreamEvent> = Vec::new();
 
             while let Some(chunk) = byte_stream.next().await {
                 let chunk = chunk
@@ -287,7 +296,8 @@ impl Model for LlamaCpp {
                 buffer.push(&chunk);
 
                 while let Some(line) = buffer.next_line() {
-                    for event in sse_line_events(&line) {
+                    sse_line_events_into(&line, &mut events);
+                    for event in events.drain(..) {
                         yield event;
                     }
                 }
@@ -296,7 +306,8 @@ impl Model for LlamaCpp {
             // A stream may end without a trailing newline, leaving a final SSE
             // record buffered. Recover it through the identical parse path.
             if let Some(line) = buffer.take_remaining() {
-                for event in sse_line_events(&line) {
+                sse_line_events_into(&line, &mut events);
+                for event in events.drain(..) {
                     yield event;
                 }
             }
@@ -306,25 +317,35 @@ impl Model for LlamaCpp {
     }
 }
 
-/// Parses one SSE line into the stream events it carries.
+/// Test-facing wrapper around [`sse_line_events_into`] that returns the
+/// produced events; the streaming loop reuses one buffer via the `_into`
+/// variant instead, avoiding a fresh `Vec` allocation per SSE line.
+#[cfg(test)]
+fn sse_line_events(line: &str) -> Vec<StreamEvent> {
+    let mut events = Vec::new();
+    sse_line_events_into(line, &mut events);
+    events
+}
+
+/// Parses one SSE line into the stream events it carries, appending them to
+/// `events`.
 ///
 /// Non-`data:` lines (comments, blank keep-alives) and unparseable payloads
 /// yield no events, matching the other providers' tolerance for unknown
 /// server chatter.
-fn sse_line_events(line: &str) -> Vec<StreamEvent> {
+fn sse_line_events_into(line: &str, events: &mut Vec<StreamEvent>) {
     let line = line.trim();
-    let mut events = Vec::new();
 
     if line == "data: [DONE]" {
         events.push(StreamEvent::Done);
-        return events;
+        return;
     }
 
     let Some(data) = line.strip_prefix("data: ") else {
-        return events;
+        return;
     };
     let Ok(chunk) = serde_json::from_str::<StreamChunk>(data) else {
-        return events;
+        return;
     };
 
     for choice in &chunk.choices {
@@ -354,8 +375,6 @@ fn sse_line_events(line: &str) -> Vec<StreamEvent> {
             }
         }
     }
-
-    events
 }
 
 fn parse_response(response: LlamaCppResponse) -> Result<ChatResponse> {

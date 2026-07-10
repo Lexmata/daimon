@@ -40,7 +40,12 @@ impl Ollama {
         Self {
             model: model.into(),
             base_url: "http://localhost:11434".to_string(),
-            client: Client::new(),
+            // A dead or unreachable server fails fast at connect time instead
+            // of blocking; the request itself is bounded by `timeout` below.
+            client: Client::builder()
+                .connect_timeout(Duration::from_secs(10))
+                .build()
+                .expect("failed to build HTTP client"),
             timeout: Duration::from_secs(300),
             keep_alive: None,
         }
