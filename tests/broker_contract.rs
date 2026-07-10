@@ -77,6 +77,11 @@ async fn contract_fail(broker: &impl TaskBroker) {
 /// Polling brokers: an empty queue is an idle poll (`Ok(None)`), and
 /// `none_means_closed()` must say so — otherwise `TaskWorker::run` exits
 /// permanently the first moment the queue is quiet.
+///
+/// Only the feature-gated live suites exercise this (the in-process broker
+/// blocks instead of idle-polling), so it is gated with them to stay out of
+/// dead-code territory under `--no-default-features`.
+#[cfg(any(feature = "redis", feature = "nats"))]
 async fn contract_idle_poll(broker: &impl TaskBroker) {
     assert!(
         !broker.none_means_closed(),
