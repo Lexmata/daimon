@@ -71,6 +71,26 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - run: cargo check ${{ matrix.features }}
 
+  # ── Feature-flag isolation ────────────────────────────────────────
+  # Compiles every feature of the root crate in isolation so a feature
+  # that only builds when another happens to be enabled can't slip in.
+  hack:
+    name: Feature matrix (cargo hack)
+    runs-on: ubuntu-latest
+    needs: [fmt]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: hack
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-hack
+      - run: cargo hack check --each-feature --no-dev-deps -p daimon
+
   # ── Linting ───────────────────────────────────────────────────────
   clippy:
     name: Clippy
@@ -87,9 +107,9 @@ jobs:
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - name: Clippy (no default features)
-        run: cargo clippy --no-default-features --all-targets -- -D warnings
+        run: cargo clippy --workspace --no-default-features --all-targets -- -D warnings
       - name: Clippy (full features)
-        run: cargo clippy --features full --all-targets -- -D warnings
+        run: cargo clippy --workspace --features full --all-targets -- -D warnings
 
   # ── Tests ─────────────────────────────────────────────────────────
   test:
@@ -110,11 +130,11 @@ jobs:
           key: test-${{ matrix.features }}
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      - run: cargo test ${{ matrix.features }} -- --nocapture
+      - run: cargo test --workspace ${{ matrix.features }} -- --nocapture
 
   # ── Coverage ──────────────────────────────────────────────────────
   coverage:
-    name: Coverage (≥84%)
+    name: Coverage (≥80%, full features)
     runs-on: ubuntu-latest
     needs: [test]
     steps:
@@ -128,8 +148,13 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      # Full features so feature-gated code (mcp, http-server, distributed
+      # backends, providers) is inside the gate; the previous 84% gate
+      # measured --no-default-features only. Full-feature baseline: 81.2%.
       - name: Generate coverage
-        run: cargo llvm-cov --no-default-features --fail-under-lines 84 --lcov --output-path lcov.info
+        run: cargo llvm-cov --features full --fail-under-lines 80 --lcov --output-path lcov.info
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v4
         with:
@@ -148,14 +173,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: examples
-      - name: Check simple_agent
-        run: cargo check --example simple_agent --features openai
-      - name: Check with_tools
-        run: cargo check --example with_tools --features openai
-      - name: Check streaming
-        run: cargo check --example streaming --features openai
-      - name: Check bedrock_agent
-        run: cargo check --example bedrock_agent --features bedrock
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Check all examples
+        run: cargo check --examples --features full
 
   # ── Documentation ─────────────────────────────────────────────────
   docs:
@@ -172,7 +193,7 @@ jobs:
           key: docs
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      - run: cargo doc --features full --no-deps --document-private-items
+      - run: cargo doc --workspace --features full --no-deps --document-private-items
 
   # ── Dependency audit ──────────────────────────────────────────────
   deny:
@@ -188,7 +209,7 @@ jobs:
   ci-pass:
     name: CI passed
     if: always()
-    needs: [fmt, check, clippy, test, coverage, examples, docs, deny]
+    needs: [fmt, check, hack, clippy, test, coverage, examples, docs, deny]
     runs-on: ubuntu-latest
     steps:
       - name: Verify all jobs succeeded
@@ -196,6 +217,7 @@ jobs:
           results=( \
             "${{ needs.fmt.result }}" \
             "${{ needs.check.result }}" \
+            "${{ needs.hack.result }}" \
             "${{ needs.clippy.result }}" \
             "${{ needs.test.result }}" \
             "${{ needs.coverage.result }}" \
