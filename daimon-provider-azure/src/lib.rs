@@ -167,6 +167,10 @@ impl AzureOpenAi {
 }
 
 impl Model for AzureOpenAi {
+    fn model_id(&self) -> &str {
+        &self.deployment_id
+    }
+
     #[tracing::instrument(skip_all, fields(deployment = %self.deployment_id))]
     async fn generate(&self, request: &ChatRequest) -> Result<ChatResponse> {
         let body = self.build_request_body(request, false);
