@@ -56,7 +56,7 @@ impl ServiceBusBroker {
     /// * `sas_token` — a Shared Access Signature token for authentication
     ///
     /// Generate a SAS token from the Azure portal or via the Azure CLI:
-    /// ```ignore
+    /// ```text
     /// az servicebus queue authorization-rule keys list \
     ///     --resource-group my-rg --namespace my-ns --queue my-queue \
     ///     --name my-rule --query primaryKey -o tsv

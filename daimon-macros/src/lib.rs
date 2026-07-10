@@ -76,7 +76,7 @@ struct ParamInfo {
     inner_ty: Option<Type>,
 }
 
-/// Derives a [`Tool`] implementation from an async function.
+/// Derives a `Tool` implementation from an async function.
 ///
 /// The function's parameters become the tool's JSON Schema properties.
 /// Doc comments on the function become the tool description; doc comments

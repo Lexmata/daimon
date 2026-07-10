@@ -99,16 +99,21 @@ impl Agent {
                 (msgs, 0, false, Usage::default(), 0.0f64)
             };
 
-        // On a fresh run, reset the cumulative cost. On a genuine resume,
-        // reseed the tracker with the spend recorded in the checkpoint so that
+        // A checkpoint saved at the iteration limit has no budget left: without
+        // this guard each resume would increment past the limit only AFTER
+        // burning a full model iteration, failing again and wasting spend on
+        // every retry.
+        if resuming && start_iteration >= self.max_iterations {
+            return Err(DaimonError::MaxIterations(self.max_iterations));
+        }
+
+        // Per-run cost tracker (see `Agent::new_run_tracker`). On a genuine
+        // resume, reseed it with the spend recorded in the checkpoint so that
         // `max_budget` is enforced against the combined pre- and post-resume
         // total, and the returned cost reflects the whole run.
-        if let Some(ref tracker) = self.cost_tracker {
-            if resuming {
-                tracker.reseed(initial_cost);
-            } else {
-                tracker.reset();
-            }
+        let run_tracker = self.new_run_tracker();
+        if resuming && let Some(ref tracker) = run_tracker {
+            tracker.reseed(initial_cost);
         }
 
         let mut tool_specs_vec: Vec<crate::model::types::ToolSpec> =
@@ -137,6 +142,7 @@ impl Agent {
                     &mut tool_specs_vec,
                     &mut total_usage,
                     &mut total_cost,
+                    run_tracker.as_ref(),
                     cancel,
                 )
                 .await
@@ -167,22 +173,19 @@ impl Agent {
                     }
                 }
                 StepOutcome::Final(final_text) => {
-                    let mut response = AgentResponse {
+                    // Output guardrails already ran inside `run_iteration`: a
+                    // Block surfaced as an error above (so no completed
+                    // checkpoint gets saved for a rejected answer), and both
+                    // `final_text` and the final message in `messages` are
+                    // post-transform. The completed checkpoint therefore
+                    // persists exactly what the caller receives.
+                    let response = AgentResponse {
                         messages,
                         final_text,
                         iterations: iteration,
                         usage: total_usage,
                         cost: total_cost,
                     };
-
-                    // Run output guardrails BEFORE persisting a completed
-                    // checkpoint. If a guardrail blocks (or errors), the run did
-                    // not actually produce an acceptable answer, so the
-                    // checkpoint must not be marked completed — otherwise a
-                    // later resume would short-circuit and replay a response the
-                    // guardrail rejected. On error we return without saving a
-                    // completed checkpoint.
-                    self.run_output_guardrails(&mut response).await?;
 
                     let completed_state =
                         CheckpointState::new(run_id, response.messages.clone(), iteration)
@@ -231,11 +234,8 @@ impl Agent {
             "replaying from checkpoint"
         );
 
-        let mut response = self
-            .run_react_loop(messages, &CancellationToken::new())
-            .await?;
-        self.run_output_guardrails(&mut response).await?;
-        Ok(response)
+        self.run_react_loop(messages, &CancellationToken::new())
+            .await
     }
 }
 
@@ -661,5 +661,100 @@ mod tests {
             }
             other => panic!("expected BudgetExceeded, got {other:?}"),
         }
+    }
+
+    /// Counts model invocations and always answers in one turn.
+    struct CountingModel {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl Model for CountingModel {
+        async fn generate(&self, _request: &ChatRequest) -> Result<ChatResponse> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(ChatResponse {
+                message: Message::assistant("done"),
+                stop_reason: StopReason::EndTurn,
+                usage: Some(Usage::default()),
+            })
+        }
+
+        async fn generate_stream(&self, _request: &ChatRequest) -> Result<ResponseStream> {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_resume_at_max_iterations_fails_without_calling_model() {
+        // A checkpoint saved at the iteration limit has no budget left: the
+        // resume must fail with MaxIterations immediately instead of burning
+        // one more full model iteration and then failing anyway.
+        let checkpoint = cp();
+        let state = CheckpointState::new("run-h", vec![Message::user("orig")], 3);
+        checkpoint.save_erased(&state).await.unwrap();
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let agent = Agent::builder()
+            .model(CountingModel {
+                calls: Arc::clone(&calls),
+            })
+            .max_iterations(3)
+            .build()
+            .unwrap();
+
+        let result = agent.prompt_resumable("go", "run-h", &checkpoint).await;
+
+        assert!(matches!(result, Err(DaimonError::MaxIterations(3))));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "the model must not be invoked when the checkpoint is already at the limit"
+        );
+    }
+
+    struct RewriteOutputGuardrail;
+
+    impl crate::guardrails::OutputGuardrail for RewriteOutputGuardrail {
+        async fn check(
+            &self,
+            _response: &ChatResponse,
+        ) -> Result<crate::guardrails::GuardrailResult> {
+            Ok(crate::guardrails::GuardrailResult::Transform(
+                "SANITIZED".into(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_completed_checkpoint_stores_post_transform_messages() {
+        // The completed checkpoint's messages must hold the guardrail-
+        // transformed text: otherwise a later resume replays the pre-transform
+        // answer verbatim, bypassing the guardrail.
+        let checkpoint = cp();
+        let agent = Agent::builder()
+            .model(EchoModel)
+            .output_guardrail(RewriteOutputGuardrail)
+            .build()
+            .unwrap();
+
+        let resp = agent
+            .prompt_resumable("hello", "run-t", &checkpoint)
+            .await
+            .unwrap();
+        assert_eq!(resp.final_text, "SANITIZED");
+
+        let saved = checkpoint.load_erased("run-t").await.unwrap().unwrap();
+        assert!(saved.completed);
+        assert_eq!(
+            saved.messages.last().and_then(|m| m.content.as_deref()),
+            Some("SANITIZED"),
+            "the checkpoint must persist the post-guardrail message"
+        );
+
+        // A replay of the completed checkpoint returns the transformed text.
+        let replayed = agent
+            .prompt_resumable("ignored", "run-t", &checkpoint)
+            .await
+            .unwrap();
+        assert_eq!(replayed.final_text, "SANITIZED");
     }
 }
