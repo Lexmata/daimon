@@ -10,8 +10,22 @@ import { isPlatformBrowser } from '@angular/common';
 import { ActivatedRoute, RouterLink } from '@angular/router';
 import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
 import { marked } from 'marked';
-import hljs from 'highlight.js';
+import hljs from 'highlight.js/lib/core';
+import rust from 'highlight.js/lib/languages/rust';
+import bash from 'highlight.js/lib/languages/bash';
+import json from 'highlight.js/lib/languages/json';
+import ini from 'highlight.js/lib/languages/ini';
+import plaintext from 'highlight.js/lib/languages/plaintext';
 import type { Tokens } from 'marked';
+
+// Core build + only the grammars the docs use (~200kB gzipped lighter than
+// the full all-languages build). Unregistered languages fall back to
+// plaintext below, same as before. `ini` declares the `toml` alias.
+hljs.registerLanguage('rust', rust);
+hljs.registerLanguage('bash', bash);
+hljs.registerLanguage('json', json);
+hljs.registerLanguage('ini', ini);
+hljs.registerLanguage('plaintext', plaintext);
 
 type DocState = 'loading' | 'ready' | 'not-found' | 'error';
 
