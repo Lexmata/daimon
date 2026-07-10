@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **llama.cpp provider (DAIM-17):** new `daimon-provider-llamacpp` crate
+  (feature `llamacpp`, included in `full`) targeting a running `llama-server`
+  over its OpenAI-compatible `/v1/chat/completions` and `/v1/embeddings`
+  endpoints. `LlamaCpp` implements `Model` (sync + SSE streaming, tool
+  calling via `--jinja` templates) with llama.cpp-native sampling extras
+  (`grammar`, `json_schema`, `min_p`, `top_k`, `repeat_penalty`,
+  `cache_prompt`); `LlamaCppEmbedding` implements `EmbeddingModel`. Server
+  error bodies are surfaced verbatim so grammar/template failures are
+  diagnosable. Re-exported as `daimon::model::llamacpp`.
+
+### Changed
+
+- **Performance (DAIM-18):**
+  - `LineBuffer` (shared by every streaming provider) splits lines with a
+    cursor instead of draining per line — per-chunk work is now linear and
+    each line costs one allocation instead of two; the anthropic and
+    llama.cpp SSE parsers additionally reuse one event buffer across the
+    stream instead of allocating a `Vec` per token.
+  - `VectorStore` gains `upsert_many` (default: loop `upsert`); knowledge-base
+    ingest batches through it, pgvector overrides it with chunked multi-row
+    `INSERT ... ON CONFLICT`, and OpenSearch with a single `_bulk` request —
+    N-document ingest drops from N roundtrips to one (or a few chunks).
+  - `RedisBroker` and `RedisCheckpoint` reuse a `ConnectionManager` instead of
+    opening a TCP connection per operation (`BRPOP` polling gets a dedicated
+    connection so the blocking wait can't stall other commands), and the
+    broker's submit/complete write pairs are atomic single-roundtrip
+    pipelines.
+  - `RedisMemory::get_messages` reads only the tail appended since the last
+    call (with full refetch if the list shrinks externally) instead of
+    re-transferring and re-parsing the whole history every iteration.
+  - `InProcessBroker` retains at most 1024 terminal task statuses (oldest
+    evicted; evicted ids read as `Pending`) instead of growing without bound.
+  - `EvalRunner` actually honors `concurrency`: scenario chunks and
+    per-scenario scorers are polled with `join_all` instead of being awaited
+    serially.
+  - All chat providers apply a 10s connect timeout (dead upstreams fail fast;
+    streaming generations remain unbounded). Embedding clients (`openai`,
+    `ollama`, `gemini`, `azure`) get a 60s default request timeout, a connect
+    timeout, and a `with_timeout` builder — previously they could hang
+    forever with no way to configure a bound.
+  - Docs site: highlight.js now bundles only the grammars the docs use
+    (~200 kB gzipped smaller docs chunk).
+
 ### Fixed
 
 - **Cost tracking (DAIM-13):**

@@ -20,8 +20,14 @@ const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const API_VERSION: &str = "2023-06-01";
 const PROMPT_CACHING_BETA: &str = "prompt-caching-2024-07-31";
 
+/// Upper bound on establishing a TCP connection. Applied unconditionally so
+/// a dead or unreachable upstream fails fast instead of blocking forever; it
+/// does not bound the request itself, so long streaming generations are
+/// unaffected.
+const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
 fn build_client(timeout: Option<Duration>) -> Client {
-    let mut builder = Client::builder();
+    let mut builder = Client::builder().connect_timeout(DEFAULT_CONNECT_TIMEOUT);
     if let Some(t) = timeout {
         builder = builder.timeout(t);
     }
@@ -296,6 +302,9 @@ impl Model for Anthropic {
             // `content_block_start`.
             let mut index_to_id: HashMap<u64, String> = HashMap::new();
             let mut stream = Box::pin(byte_stream);
+            // Reused across the whole stream so the parse path allocates no
+            // per-event Vec; drained after each event.
+            let mut events: Vec<StreamEvent> = Vec::new();
 
             while let Some(chunk) = stream.next().await {
                 let chunk = chunk.map_err(|e| DaimonError::Model(format!("Anthropic stream error: {e}")))?;
@@ -310,7 +319,8 @@ impl Model for Anthropic {
 
                     if let Some(data) = line.strip_prefix("data: ")
                         && let Ok(event) = serde_json::from_str::<AnthropicStreamEvent>(data) {
-                            for stream_event in handle_anthropic_stream_event(&mut index_to_id, event) {
+                            handle_anthropic_stream_event_into(&mut index_to_id, event, &mut events);
+                            for stream_event in events.drain(..) {
                                 yield stream_event;
                             }
                         }
@@ -324,7 +334,8 @@ impl Model for Anthropic {
             if let Some(line) = buffer.take_remaining()
                 && let Some(data) = line.strip_prefix("data: ")
                     && let Ok(event) = serde_json::from_str::<AnthropicStreamEvent>(data) {
-                        for stream_event in handle_anthropic_stream_event(&mut index_to_id, event) {
+                        handle_anthropic_stream_event_into(&mut index_to_id, event, &mut events);
+                        for stream_event in events.drain(..) {
                             yield stream_event;
                         }
                     }
@@ -344,11 +355,24 @@ impl Model for Anthropic {
 /// that index by the earlier `content_block_start`. Extracted from the
 /// `async_stream::try_stream!` block so it can be unit-tested without a live
 /// HTTP stream; the streaming loop simply yields whatever this returns.
+/// Test-facing wrapper around [`handle_anthropic_stream_event_into`] that
+/// returns the produced events; the streaming loop reuses one buffer via the
+/// `_into` variant instead, avoiding a fresh `Vec` allocation per SSE event.
+#[cfg(test)]
 fn handle_anthropic_stream_event(
     index_to_id: &mut HashMap<u64, String>,
     event: AnthropicStreamEvent,
 ) -> Vec<StreamEvent> {
     let mut events = Vec::new();
+    handle_anthropic_stream_event_into(index_to_id, event, &mut events);
+    events
+}
+
+fn handle_anthropic_stream_event_into(
+    index_to_id: &mut HashMap<u64, String>,
+    event: AnthropicStreamEvent,
+    events: &mut Vec<StreamEvent>,
+) {
     match event.r#type.as_str() {
         "content_block_start" => {
             if let Some(block) = event.content_block
@@ -395,7 +419,6 @@ fn handle_anthropic_stream_event(
         }
         _ => {}
     }
-    events
 }
 
 fn parse_response(response: AnthropicResponse) -> Result<ChatResponse> {

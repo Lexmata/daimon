@@ -10,6 +10,8 @@
 //! broker.submit(AgentTask::new("Summarize this")).await?;
 //! ```
 
+use redis::aio::ConnectionManager;
+
 use crate::error::{DaimonError, Result};
 
 use super::broker::TaskBroker;
@@ -20,8 +22,17 @@ use super::types::{AgentTask, TaskResult, TaskStatus};
 /// Tasks are pushed onto a Redis list (`{prefix}:queue`) and consumed
 /// via blocking pop. Status is tracked in a Redis hash (`{prefix}:status`).
 /// Results are stored in a separate hash (`{prefix}:results`).
+///
+/// Connections are established once at construction and reused (with
+/// transparent reconnection via [`ConnectionManager`]) instead of paying a
+/// TCP connect + handshake on every operation. `BRPOP` blocks the whole
+/// multiplexed pipeline while it waits, so polling runs on its own dedicated
+/// connection rather than the one shared by the non-blocking commands.
 pub struct RedisBroker {
-    client: redis::Client,
+    /// Shared connection for non-blocking commands.
+    connection: ConnectionManager,
+    /// Dedicated connection for the blocking `BRPOP` poll.
+    poll_connection: tokio::sync::Mutex<ConnectionManager>,
     prefix: String,
 }
 
@@ -34,18 +45,22 @@ impl RedisBroker {
         let client = redis::Client::open(url)
             .map_err(|e| DaimonError::Other(format!("redis broker connection: {e}")))?;
 
-        let mut conn = client
-            .get_multiplexed_async_connection()
+        let mut connection = ConnectionManager::new(client.clone())
             .await
             .map_err(|e| DaimonError::Other(format!("redis broker connect: {e}")))?;
 
         redis::cmd("PING")
-            .query_async::<String>(&mut conn)
+            .query_async::<String>(&mut connection)
             .await
             .map_err(|e| DaimonError::Other(format!("redis broker ping: {e}")))?;
 
+        let poll_connection = ConnectionManager::new(client)
+            .await
+            .map_err(|e| DaimonError::Other(format!("redis broker connect: {e}")))?;
+
         Ok(Self {
-            client,
+            connection,
+            poll_connection: tokio::sync::Mutex::new(poll_connection),
             prefix: prefix.into(),
         })
     }
@@ -62,31 +77,34 @@ impl RedisBroker {
         format!("{}:results", self.prefix)
     }
 
-    async fn conn(&self) -> Result<redis::aio::MultiplexedConnection> {
-        self.client
-            .get_multiplexed_async_connection()
-            .await
-            .map_err(|e| DaimonError::Other(format!("redis broker conn: {e}")))
+    /// Returns a handle to the shared managed connection.
+    ///
+    /// `ConnectionManager` is a cheap `Arc`-backed clone; command methods
+    /// take `&mut self`, so each operation clones a handle.
+    fn conn(&self) -> ConnectionManager {
+        self.connection.clone()
     }
 }
 
 impl TaskBroker for RedisBroker {
     async fn submit(&self, task: AgentTask) -> Result<String> {
-        use redis::AsyncCommands;
-
         let id = task.task_id.clone();
         let json = serde_json::to_string(&task)
             .map_err(|e| DaimonError::Other(format!("serialize task: {e}")))?;
 
-        let mut conn = self.conn().await?;
+        let mut conn = self.conn();
 
-        conn.hset::<_, _, _, ()>(&self.status_key(), &id, "pending")
+        // One atomic roundtrip: the status write and the enqueue can't be
+        // observed half-done, and the submit path pays a single RTT.
+        redis::pipe()
+            .atomic()
+            .hset(self.status_key(), &id, "pending")
+            .ignore()
+            .lpush(self.queue_key(), &json)
+            .ignore()
+            .query_async::<()>(&mut conn)
             .await
-            .map_err(|e| DaimonError::Other(format!("redis hset status: {e}")))?;
-
-        conn.lpush::<_, _, ()>(&self.queue_key(), &json)
-            .await
-            .map_err(|e| DaimonError::Other(format!("redis lpush: {e}")))?;
+            .map_err(|e| DaimonError::Other(format!("redis submit pipeline: {e}")))?;
 
         Ok(id)
     }
@@ -94,7 +112,7 @@ impl TaskBroker for RedisBroker {
     async fn status(&self, task_id: &str) -> Result<TaskStatus> {
         use redis::AsyncCommands;
 
-        let mut conn = self.conn().await?;
+        let mut conn = self.conn();
 
         let status_str: Option<String> = conn
             .hget(self.status_key(), task_id)
@@ -131,14 +149,15 @@ impl TaskBroker for RedisBroker {
     }
 
     async fn receive(&self) -> Result<Option<AgentTask>> {
-        let mut conn = self.conn().await?;
-
-        let result: Option<(String, String)> = redis::cmd("BRPOP")
-            .arg(self.queue_key())
-            .arg(1)
-            .query_async(&mut conn)
-            .await
-            .map_err(|e| DaimonError::Other(format!("redis brpop: {e}")))?;
+        let result: Option<(String, String)> = {
+            let mut poll_conn = self.poll_connection.lock().await;
+            redis::cmd("BRPOP")
+                .arg(self.queue_key())
+                .arg(1)
+                .query_async(&mut *poll_conn)
+                .await
+                .map_err(|e| DaimonError::Other(format!("redis brpop: {e}")))?
+        };
 
         match result {
             Some((_key, json)) => {
@@ -146,6 +165,7 @@ impl TaskBroker for RedisBroker {
                     .map_err(|e| DaimonError::Other(format!("deserialize task: {e}")))?;
 
                 use redis::AsyncCommands;
+                let mut conn = self.conn();
                 conn.hset::<_, _, _, ()>(&self.status_key(), &task.task_id, "running")
                     .await
                     .map_err(|e| DaimonError::Other(format!("redis hset running: {e}")))?;
@@ -157,20 +177,22 @@ impl TaskBroker for RedisBroker {
     }
 
     async fn complete(&self, task_id: &str, result: TaskResult) -> Result<()> {
-        use redis::AsyncCommands;
-
         let json = serde_json::to_string(&result)
             .map_err(|e| DaimonError::Other(format!("serialize result: {e}")))?;
 
-        let mut conn = self.conn().await?;
+        let mut conn = self.conn();
 
-        conn.hset::<_, _, _, ()>(&self.result_key(), task_id, &json)
+        // Atomic pipeline: a task can never be observed "completed" without
+        // its result already written, and both writes share one RTT.
+        redis::pipe()
+            .atomic()
+            .hset(self.result_key(), task_id, &json)
+            .ignore()
+            .hset(self.status_key(), task_id, "completed")
+            .ignore()
+            .query_async::<()>(&mut conn)
             .await
-            .map_err(|e| DaimonError::Other(format!("redis hset result: {e}")))?;
-
-        conn.hset::<_, _, _, ()>(&self.status_key(), task_id, "completed")
-            .await
-            .map_err(|e| DaimonError::Other(format!("redis hset status: {e}")))?;
+            .map_err(|e| DaimonError::Other(format!("redis complete pipeline: {e}")))?;
 
         Ok(())
     }
@@ -178,7 +200,7 @@ impl TaskBroker for RedisBroker {
     async fn fail(&self, task_id: &str, error: String) -> Result<()> {
         use redis::AsyncCommands;
 
-        let mut conn = self.conn().await?;
+        let mut conn = self.conn();
 
         conn.hset::<_, _, _, ()>(&self.status_key(), task_id, format!("failed:{error}"))
             .await

@@ -1,5 +1,7 @@
 use std::time::Instant;
 
+use futures::future::join_all;
+
 use crate::agent::Agent;
 use crate::eval::scenario::EvalScenario;
 
@@ -44,17 +46,16 @@ impl<'a> EvalRunner<'a> {
         self
     }
 
-    /// Runs all scenarios and returns results.
+    /// Runs all scenarios and returns results, in scenario order.
+    ///
+    /// Scenarios run `concurrency` at a time: futures are lazy, so they must
+    /// be polled together (`join_all`) to actually overlap — awaiting them
+    /// one-by-one would run the whole suite serially regardless of the
+    /// configured concurrency.
     pub async fn run(&self, scenarios: &[EvalScenario]) -> Vec<EvalResult> {
         let mut results = Vec::with_capacity(scenarios.len());
         for chunk in scenarios.chunks(self.concurrency) {
-            let mut handles = Vec::with_capacity(chunk.len());
-            for scenario in chunk {
-                handles.push(self.run_one(scenario));
-            }
-            for handle in handles {
-                results.push(handle.await);
-            }
+            results.extend(join_all(chunk.iter().map(|s| self.run_one(s))).await);
         }
         results
     }
@@ -66,10 +67,15 @@ impl<'a> EvalRunner<'a> {
 
         match result {
             Ok(response) => {
-                let mut scorer_results = Vec::with_capacity(scenario.scorers.len());
-                for scorer in &scenario.scorers {
-                    scorer_results.push(scorer.evaluate(&response.final_text).await);
-                }
+                // Network-bound scorers (LLM judge, semantic similarity) run
+                // concurrently; join_all preserves scorer order.
+                let scorer_results = join_all(
+                    scenario
+                        .scorers
+                        .iter()
+                        .map(|scorer| scorer.evaluate(&response.final_text)),
+                )
+                .await;
                 let passed = scorer_results.iter().all(|r| *r);
 
                 EvalResult {

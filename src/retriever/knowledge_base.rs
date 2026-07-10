@@ -143,6 +143,7 @@ impl<V: VectorStore> KnowledgeBase for SimpleKnowledgeBase<V> {
         let texts: Vec<&str> = documents.iter().map(|d| d.content.as_str()).collect();
         let embeddings = self.embedding_model.embed_erased(&texts).await?;
         let mut ids = Vec::with_capacity(documents.len());
+        let mut items = Vec::with_capacity(documents.len());
 
         for (doc, embedding) in documents.into_iter().zip(embeddings) {
             let id = doc
@@ -151,9 +152,12 @@ impl<V: VectorStore> KnowledgeBase for SimpleKnowledgeBase<V> {
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| content_hash(&doc.content));
-            self.store.upsert(&id, embedding, doc).await?;
+            items.push((id.clone(), embedding, doc));
             ids.push(id);
         }
+
+        // One batched write instead of a roundtrip per document.
+        self.store.upsert_many(items).await?;
 
         Ok(ids)
     }

@@ -10,6 +10,8 @@
 //! cp.save(&state).await?;
 //! ```
 
+use redis::aio::ConnectionManager;
+
 use crate::error::{DaimonError, Result};
 
 use super::traits::Checkpoint;
@@ -20,8 +22,12 @@ use super::types::CheckpointState;
 /// Each checkpoint is stored as a field in a Redis hash (`{prefix}:data`),
 /// keyed by run ID with the `CheckpointState` serialized as JSON.
 /// A secondary hash (`{prefix}:runs`) tracks all known run IDs.
+///
+/// The connection is established once at construction and reused (with
+/// transparent reconnection via [`ConnectionManager`]) instead of paying a
+/// TCP connect + handshake on every save/load.
 pub struct RedisCheckpoint {
-    client: redis::Client,
+    connection: ConnectionManager,
     prefix: String,
 }
 
@@ -34,18 +40,17 @@ impl RedisCheckpoint {
         let client = redis::Client::open(url)
             .map_err(|e| DaimonError::Other(format!("redis checkpoint connection: {e}")))?;
 
-        let mut conn = client
-            .get_multiplexed_async_connection()
+        let mut connection = ConnectionManager::new(client)
             .await
             .map_err(|e| DaimonError::Other(format!("redis checkpoint connect: {e}")))?;
 
         redis::cmd("PING")
-            .query_async::<String>(&mut conn)
+            .query_async::<String>(&mut connection)
             .await
             .map_err(|e| DaimonError::Other(format!("redis checkpoint ping: {e}")))?;
 
         Ok(Self {
-            client,
+            connection,
             prefix: prefix.into(),
         })
     }
@@ -54,11 +59,12 @@ impl RedisCheckpoint {
         format!("{}:data", self.prefix)
     }
 
-    async fn conn(&self) -> Result<redis::aio::MultiplexedConnection> {
-        self.client
-            .get_multiplexed_async_connection()
-            .await
-            .map_err(|e| DaimonError::Other(format!("redis checkpoint conn: {e}")))
+    /// Returns a handle to the managed connection.
+    ///
+    /// `ConnectionManager` is a cheap `Arc`-backed clone; command methods
+    /// take `&mut self`, so each operation clones a handle.
+    fn conn(&self) -> ConnectionManager {
+        self.connection.clone()
     }
 }
 
@@ -67,7 +73,7 @@ impl Checkpoint for RedisCheckpoint {
         use redis::AsyncCommands;
 
         let json = serde_json::to_string(state)?;
-        let mut conn = self.conn().await?;
+        let mut conn = self.conn();
 
         conn.hset::<_, _, _, ()>(&self.data_key(), &state.run_id, &json)
             .await
@@ -79,7 +85,7 @@ impl Checkpoint for RedisCheckpoint {
     async fn load(&self, run_id: &str) -> Result<Option<CheckpointState>> {
         use redis::AsyncCommands;
 
-        let mut conn = self.conn().await?;
+        let mut conn = self.conn();
 
         let json: Option<String> = conn
             .hget(self.data_key(), run_id)
@@ -100,7 +106,7 @@ impl Checkpoint for RedisCheckpoint {
     async fn list_runs(&self) -> Result<Vec<String>> {
         use redis::AsyncCommands;
 
-        let mut conn = self.conn().await?;
+        let mut conn = self.conn();
 
         let keys: Vec<String> = conn
             .hkeys(self.data_key())
@@ -113,7 +119,7 @@ impl Checkpoint for RedisCheckpoint {
     async fn delete(&self, run_id: &str) -> Result<()> {
         use redis::AsyncCommands;
 
-        let mut conn = self.conn().await?;
+        let mut conn = self.conn();
 
         conn.hdel::<_, _, ()>(&self.data_key(), run_id)
             .await

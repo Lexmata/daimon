@@ -1,9 +1,28 @@
 //! OpenAI embeddings provider (text-embedding-3-small, text-embedding-3-large, etc.).
 
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 
 use crate::error::{DaimonError, Result};
 use crate::model::EmbeddingModel;
+
+/// Default total request timeout. Embedding calls are non-streaming and
+/// bounded, so a hung endpoint now fails after a minute instead of stalling
+/// RAG ingest or retrieval forever; override with `with_timeout`.
+const DEFAULT_EMBED_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Upper bound on establishing a TCP connection, so a dead or unreachable
+/// endpoint fails fast.
+const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn build_client(timeout: Duration) -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(timeout)
+        .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
+        .build()
+        .expect("failed to build HTTP client")
+}
 
 /// OpenAI embedding model client.
 pub struct OpenAiEmbedding {
@@ -26,7 +45,7 @@ impl OpenAiEmbedding {
             1536
         };
         Self {
-            client: reqwest::Client::new(),
+            client: build_client(DEFAULT_EMBED_TIMEOUT),
             api_key: std::env::var("OPENAI_API_KEY").unwrap_or_default(),
             model_id,
             dimensions,
@@ -36,6 +55,12 @@ impl OpenAiEmbedding {
 
     pub fn with_api_key(mut self, key: impl Into<String>) -> Self {
         self.api_key = key.into();
+        self
+    }
+
+    /// Sets the total request timeout (default: 60 seconds).
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.client = build_client(timeout);
         self
     }
 

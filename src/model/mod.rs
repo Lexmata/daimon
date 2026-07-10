@@ -2,7 +2,7 @@
 //!
 //! Implement [`Model`] (from [`daimon_core`]) to add new providers. Built-in providers
 //! ship as separate crates (each behind a feature flag): `openai`, `anthropic`,
-//! `gemini`, `azure`, `bedrock`, `ollama`.
+//! `gemini`, `azure`, `bedrock`, `ollama`, `llamacpp`.
 
 mod traits;
 pub mod types;
@@ -39,6 +39,12 @@ pub mod azure {
 pub mod bedrock {
     //! Amazon Bedrock model provider (via [`daimon_provider_bedrock`]).
     pub use daimon_provider_bedrock::*;
+}
+
+#[cfg(feature = "llamacpp")]
+pub mod llamacpp {
+    //! llama.cpp model provider (via [`daimon_provider_llamacpp`]).
+    pub use daimon_provider_llamacpp::*;
 }
 
 #[cfg(feature = "ollama")]

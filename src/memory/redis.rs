@@ -33,6 +33,13 @@ use crate::model::types::Message;
 pub struct RedisMemory {
     connection: ConnectionManager,
     key: String,
+    /// Messages already fetched from the list, so `get_messages` only reads
+    /// the tail that appeared since the last call instead of re-transferring
+    /// and re-parsing the whole history every turn (which is O(n²) over a
+    /// conversation). The list is append-only under normal operation; if
+    /// `LLEN` ever reports fewer entries than cached (external `DEL`/`LTRIM`/
+    /// expiry), the cache is dropped and the history refetched in full.
+    cache: tokio::sync::Mutex<Vec<Message>>,
 }
 
 impl RedisMemory {
@@ -51,6 +58,7 @@ impl RedisMemory {
         Ok(Self {
             connection,
             key: key.into(),
+            cache: tokio::sync::Mutex::new(Vec::new()),
         })
     }
 
@@ -84,26 +92,45 @@ impl Memory for RedisMemory {
         use redis::AsyncCommands;
 
         let mut conn = self.conn();
-        let items: Vec<String> = conn
-            .lrange(&self.key, 0, -1)
-            .await
-            .map_err(|e| DaimonError::Other(format!("redis lrange: {e}")))?;
+        let mut cache = self.cache.lock().await;
 
-        let mut messages = Vec::with_capacity(items.len());
-        for item in items {
-            let msg: Message = serde_json::from_str(&item)?;
-            messages.push(msg);
+        let len: usize = conn
+            .llen(&self.key)
+            .await
+            .map_err(|e| DaimonError::Other(format!("redis llen: {e}")))?;
+
+        if len < cache.len() {
+            // The list shrank underneath us — the append-only assumption no
+            // longer holds, so drop the cache and refetch from scratch.
+            cache.clear();
         }
-        Ok(messages)
+
+        if cache.len() < len {
+            // Fetch only the entries that appeared since the last read. A
+            // concurrent append between LLEN and LRANGE just means we read
+            // slightly more than `len`, which is fine for an append-only list.
+            let items: Vec<String> = conn
+                .lrange(&self.key, cache.len() as isize, -1)
+                .await
+                .map_err(|e| DaimonError::Other(format!("redis lrange: {e}")))?;
+            for item in items {
+                let msg: Message = serde_json::from_str(&item)?;
+                cache.push(msg);
+            }
+        }
+
+        Ok(cache.clone())
     }
 
     async fn clear(&self) -> Result<()> {
         use redis::AsyncCommands;
 
         let mut conn = self.conn();
+        let mut cache = self.cache.lock().await;
         conn.del::<_, ()>(&self.key)
             .await
             .map_err(|e| DaimonError::Other(format!("redis del: {e}")))?;
+        cache.clear();
         Ok(())
     }
 }

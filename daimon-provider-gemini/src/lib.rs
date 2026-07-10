@@ -36,8 +36,14 @@ use daimon_core::{
 const DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
 const DEFAULT_MAX_RETRIES: u32 = 3;
 
+/// Upper bound on establishing a TCP connection. Applied unconditionally so
+/// a dead or unreachable upstream fails fast instead of blocking forever; it
+/// does not bound the request itself, so long streaming generations are
+/// unaffected.
+const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
 fn build_client(timeout: Option<Duration>) -> Client {
-    let mut builder = Client::builder();
+    let mut builder = Client::builder().connect_timeout(DEFAULT_CONNECT_TIMEOUT);
     if let Some(t) = timeout {
         builder = builder.timeout(t);
     }
