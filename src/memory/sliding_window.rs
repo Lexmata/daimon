@@ -39,9 +39,9 @@ impl Default for SlidingWindowMemory {
 }
 
 impl Memory for SlidingWindowMemory {
-    async fn add_message(&self, message: Message) -> Result<()> {
+    async fn add_message(&self, message: &Message) -> Result<()> {
         let mut messages = self.messages.lock().await;
-        messages.push_back(message);
+        messages.push_back(message.clone());
         while messages.len() > self.max_messages {
             let group = crate::memory::eviction_group_len(&messages);
             if group >= messages.len() {
@@ -77,9 +77,9 @@ mod tests {
     #[tokio::test]
     async fn test_add_and_get_messages() {
         let memory = SlidingWindowMemory::new(10);
-        memory.add_message(Message::user("hello")).await.unwrap();
+        memory.add_message(&Message::user("hello")).await.unwrap();
         memory
-            .add_message(Message::assistant("hi there"))
+            .add_message(&Message::assistant("hi there"))
             .await
             .unwrap();
 
@@ -95,7 +95,7 @@ mod tests {
 
         for i in 0..5 {
             memory
-                .add_message(Message::user(format!("msg {i}")))
+                .add_message(&Message::user(format!("msg {i}")))
                 .await
                 .unwrap();
         }
@@ -110,7 +110,7 @@ mod tests {
     #[tokio::test]
     async fn test_clear_removes_all_messages() {
         let memory = SlidingWindowMemory::new(10);
-        memory.add_message(Message::user("hello")).await.unwrap();
+        memory.add_message(&Message::user("hello")).await.unwrap();
         memory.clear().await.unwrap();
 
         let messages = memory.get_messages().await.unwrap();
@@ -133,8 +133,8 @@ mod tests {
     #[tokio::test]
     async fn test_window_size_of_one() {
         let memory = SlidingWindowMemory::new(1);
-        memory.add_message(Message::user("first")).await.unwrap();
-        memory.add_message(Message::user("second")).await.unwrap();
+        memory.add_message(&Message::user("first")).await.unwrap();
+        memory.add_message(&Message::user("second")).await.unwrap();
 
         let messages = memory.get_messages().await.unwrap();
         assert_eq!(messages.len(), 1);
@@ -150,21 +150,24 @@ mod tests {
             arguments: serde_json::json!({"expr": "1+1"}),
         };
 
-        memory.add_message(Message::user("question")).await.unwrap();
         memory
-            .add_message(Message::assistant_with_tool_calls(vec![tool_call]))
+            .add_message(&Message::user("question"))
             .await
             .unwrap();
         memory
-            .add_message(Message::tool_result("tc_1", "result one"))
+            .add_message(&Message::assistant_with_tool_calls(vec![tool_call]))
             .await
             .unwrap();
         memory
-            .add_message(Message::tool_result("tc_1", "result two"))
+            .add_message(&Message::tool_result("tc_1", "result one"))
             .await
             .unwrap();
         memory
-            .add_message(Message::assistant("final answer"))
+            .add_message(&Message::tool_result("tc_1", "result two"))
+            .await
+            .unwrap();
+        memory
+            .add_message(&Message::assistant("final answer"))
             .await
             .unwrap();
 
@@ -188,15 +191,15 @@ mod tests {
         };
 
         memory
-            .add_message(Message::assistant_with_tool_calls(vec![tool_call]))
+            .add_message(&Message::assistant_with_tool_calls(vec![tool_call]))
             .await
             .unwrap();
         memory
-            .add_message(Message::tool_result("tc_1", "result one"))
+            .add_message(&Message::tool_result("tc_1", "result one"))
             .await
             .unwrap();
         memory
-            .add_message(Message::tool_result("tc_1", "result two"))
+            .add_message(&Message::tool_result("tc_1", "result two"))
             .await
             .unwrap();
 
@@ -211,9 +214,9 @@ mod tests {
     #[tokio::test]
     async fn test_messages_at_exact_capacity() {
         let memory = SlidingWindowMemory::new(3);
-        memory.add_message(Message::user("a")).await.unwrap();
-        memory.add_message(Message::user("b")).await.unwrap();
-        memory.add_message(Message::user("c")).await.unwrap();
+        memory.add_message(&Message::user("a")).await.unwrap();
+        memory.add_message(&Message::user("b")).await.unwrap();
+        memory.add_message(&Message::user("c")).await.unwrap();
 
         let messages = memory.get_messages().await.unwrap();
         assert_eq!(messages.len(), 3);

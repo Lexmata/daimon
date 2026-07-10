@@ -94,7 +94,7 @@ impl Agent {
                 msgs.push(Message::user(&actual_input));
 
                 self.memory
-                    .add_message_erased(Message::user(&actual_input))
+                    .add_message_erased(&Message::user(&actual_input))
                     .await?;
                 (msgs, 0, false, Usage::default(), 0.0f64)
             };

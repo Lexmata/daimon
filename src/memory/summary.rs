@@ -196,10 +196,10 @@ impl SummaryMemory {
 }
 
 impl Memory for SummaryMemory {
-    async fn add_message(&self, message: Message) -> Result<()> {
+    async fn add_message(&self, message: &Message) -> Result<()> {
         {
             let mut messages = self.messages.lock().await;
-            messages.push(message);
+            messages.push(message.clone());
         }
 
         // A failed summarization must not abort the caller's agent run:
@@ -288,8 +288,8 @@ mod tests {
     async fn test_add_and_get_below_threshold() {
         let memory = make_memory(10, 5);
 
-        memory.add_message(Message::user("hello")).await.unwrap();
-        memory.add_message(Message::assistant("hi")).await.unwrap();
+        memory.add_message(&Message::user("hello")).await.unwrap();
+        memory.add_message(&Message::assistant("hi")).await.unwrap();
 
         let msgs = memory.get_messages().await.unwrap();
         assert_eq!(msgs.len(), 2);
@@ -302,7 +302,7 @@ mod tests {
 
         for i in 0..6 {
             memory
-                .add_message(Message::user(format!("message {i}")))
+                .add_message(&Message::user(format!("message {i}")))
                 .await
                 .unwrap();
         }
@@ -321,7 +321,7 @@ mod tests {
 
         for i in 0..5 {
             memory
-                .add_message(Message::user(format!("msg {i}")))
+                .add_message(&Message::user(format!("msg {i}")))
                 .await
                 .unwrap();
         }
@@ -340,7 +340,7 @@ mod tests {
 
         for i in 0..5 {
             memory
-                .add_message(Message::user(format!("msg {i}")))
+                .add_message(&Message::user(format!("msg {i}")))
                 .await
                 .unwrap();
         }
@@ -360,7 +360,7 @@ mod tests {
         // First batch: trigger first summarization
         for i in 0..5 {
             memory
-                .add_message(Message::user(format!("batch1 msg {i}")))
+                .add_message(&Message::user(format!("batch1 msg {i}")))
                 .await
                 .unwrap();
         }
@@ -369,7 +369,7 @@ mod tests {
         // Second batch: trigger second summarization (builds on first)
         for i in 0..5 {
             memory
-                .add_message(Message::user(format!("batch2 msg {i}")))
+                .add_message(&Message::user(format!("batch2 msg {i}")))
                 .await
                 .unwrap();
         }
@@ -420,7 +420,7 @@ mod tests {
         // Every add must succeed even though summarization fails repeatedly.
         for i in 0..8 {
             memory
-                .add_message(Message::user(format!("message {i}")))
+                .add_message(&Message::user(format!("message {i}")))
                 .await
                 .unwrap();
         }
@@ -496,7 +496,7 @@ mod tests {
         let task_a = tokio::spawn(async move {
             for i in 0..15 {
                 mem_a
-                    .add_message(Message::user(format!("task-a {i}")))
+                    .add_message(&Message::user(format!("task-a {i}")))
                     .await
                     .unwrap();
             }
@@ -506,7 +506,7 @@ mod tests {
         let task_b = tokio::spawn(async move {
             for i in 0..15 {
                 mem_b
-                    .add_message(Message::user(format!("task-b {i}")))
+                    .add_message(&Message::user(format!("task-b {i}")))
                     .await
                     .unwrap();
             }
@@ -552,7 +552,7 @@ mod tests {
 
         for i in 0..5 {
             memory
-                .add_message(Message::user(format!("msg {i}")))
+                .add_message(&Message::user(format!("msg {i}")))
                 .await
                 .unwrap();
         }
@@ -564,7 +564,7 @@ mod tests {
         assert!(memory.get_messages().await.unwrap().is_empty());
 
         // Fresh messages after clear behave normally.
-        memory.add_message(Message::user("fresh")).await.unwrap();
+        memory.add_message(&Message::user("fresh")).await.unwrap();
         let msgs = memory.get_messages().await.unwrap();
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].content.as_deref(), Some("fresh"));

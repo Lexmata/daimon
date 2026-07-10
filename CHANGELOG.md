@@ -35,6 +35,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     once at construction) instead of a `String`. `Scorer::Regex(s.into())`
     and `EvalScenario::expect_regex` keep working; an invalid pattern still
     scores `false` on every evaluation.
+  - **Breaking:** `Memory::add_message` (and `ErasedMemory::
+    add_message_erased`) now take `&Message` instead of `Message`. The agent
+    runner keeps every message it persists, so passing by value forced a
+    deep clone per ReAct iteration; serializing backends (Redis, SQLite)
+    never needed ownership at all, and the in-memory backends clone
+    internally. Implementors change the signature and add one `.clone()`
+    where they store; callers drop their clones.
   - pgvector statements go through deadpool's per-connection
     `prepare_cached`, so the constant upsert/query/delete/count SQL is
     parsed and planned once per pooled connection instead of per call.
