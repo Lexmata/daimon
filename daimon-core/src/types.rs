@@ -139,7 +139,12 @@ impl ChatRequest {
 }
 
 /// Why the model stopped generating.
+///
+/// Marked `#[non_exhaustive]`: providers keep introducing new stop reasons, so
+/// downstream matches must include a wildcard arm and adding a variant is not
+/// a breaking change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum StopReason {
     /// The model finished its response naturally.
     EndTurn,
@@ -147,6 +152,13 @@ pub enum StopReason {
     ToolUse,
     /// The response was truncated due to max token limits.
     MaxTokens,
+    /// The model declined to answer, e.g. for safety reasons.
+    Refusal,
+    /// A provider-side guardrail or content filter blocked the output.
+    ContentFiltered,
+    /// The provider paused mid-turn (e.g. during a server-tool loop); the
+    /// turn can be continued with a follow-up request.
+    PauseTurn,
 }
 
 /// A complete response from a model.

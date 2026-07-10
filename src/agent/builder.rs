@@ -32,6 +32,9 @@ pub struct AgentBuilder {
     cost_model: Option<Arc<dyn CostModel>>,
     max_budget: Option<f64>,
     tool_retry_policy: Option<ToolRetryPolicy>,
+    /// First tool-registration error, surfaced by [`build`](AgentBuilder::build)
+    /// so a duplicate tool name cannot be silently dropped.
+    tool_error: Option<DaimonError>,
 }
 
 impl AgentBuilder {
@@ -54,6 +57,7 @@ impl AgentBuilder {
             cost_model: None,
             max_budget: None,
             tool_retry_policy: None,
+            tool_error: None,
         }
     }
 
@@ -76,8 +80,13 @@ impl AgentBuilder {
     }
 
     /// Registers a tool the agent can invoke. Tools must have unique names.
+    ///
+    /// Registering two tools with the same name is an error surfaced by
+    /// [`build`](AgentBuilder::build) — the duplicate is never silently dropped.
     pub fn tool<T: Tool + 'static>(mut self, tool: T) -> Self {
-        let _ = self.tools.register(tool);
+        if let Err(e) = self.tools.register(tool) {
+            self.tool_error.get_or_insert(e);
+        }
         self
     }
 
@@ -125,8 +134,13 @@ impl AgentBuilder {
     /// Adds human-in-the-loop support. Registers an `ask_human` tool that the
     /// agent can call to request input from the user. The handler receives the
     /// request and must return the human's response.
+    ///
+    /// A name collision with an already-registered `ask_human` tool is an
+    /// error surfaced by [`build`](AgentBuilder::build).
     pub fn human_input<H: HumanInputHandler + 'static>(mut self, handler: H) -> Self {
-        let _ = self.tools.register(AskHumanTool::new(handler));
+        if let Err(e) = self.tools.register(AskHumanTool::new(handler)) {
+            self.tool_error.get_or_insert(e);
+        }
         self
     }
 
@@ -174,11 +188,16 @@ impl AgentBuilder {
         self
     }
 
-    /// Builds the agent. Fails if model is not set.
+    /// Builds the agent. Fails if model is not set or if a tool registration
+    /// failed (e.g. two tools sharing a name).
     ///
     /// Pre-compiles JSON Schema validators and caches tool specs so the
     /// ReAct loop avoids per-iteration allocation.
     pub fn build(mut self) -> Result<Agent> {
+        if let Some(e) = self.tool_error {
+            return Err(e);
+        }
+
         let model = self
             .model
             .ok_or_else(|| DaimonError::Builder("model is required".into()))?;
@@ -300,5 +319,22 @@ mod tests {
     fn test_default_max_iterations() {
         let agent = AgentBuilder::new().model(FakeModel).build().unwrap();
         assert_eq!(agent.max_iterations, 25);
+    }
+
+    #[test]
+    fn test_duplicate_tool_fails_build() {
+        // A second tool with the same name must surface as an error from
+        // build(), never be silently dropped.
+        let result = AgentBuilder::new()
+            .model(FakeModel)
+            .tool(FakeTool)
+            .tool(FakeTool)
+            .build();
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            DaimonError::DuplicateTool(name) if name == "fake"
+        ));
     }
 }

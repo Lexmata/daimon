@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Agent core (DAIM-8, breaking):**
+  - Output guardrails now run *before* the final assistant message is
+    persisted in the non-streaming path, matching the streaming path:
+    blocked text never reaches memory, transformed text is what gets
+    persisted (and what resumable checkpoints store). The redundant
+    post-loop guardrail pass is gone.
+  - `HandoffNetwork::run` no longer bypasses per-agent controls: entry-agent
+    input guardrails, per-agent output guardrails, per-agent budgets, and
+    the runner's full tool middleware/validation/retry path all apply.
+    Handing off to an agent without a system prompt removes the previous
+    agent's system message; assistant text alongside tool calls is
+    preserved; a hallucinated `transfer_to_*` target returns a tool error
+    instead of aborting the run; genuine tools named `transfer_to_*` are no
+    longer hijacked.
+  - One panicked parallel tool task no longer aborts its in-flight
+    siblings and mislabels their results.
+  - Concurrent `prompt()` calls use per-run cost trackers; they previously
+    reset the shared tracker and under-enforced `max_budget`.
+  - Streamed tool-call arguments that fail JSON parsing surface a parse
+    error to the model instead of executing the tool with `{}`.
+  - Tool-call middleware `ShortCircuit` values are used as the tool result
+    instead of a fixed placeholder string.
+  - `prompt_with_messages` persists the caller's messages to memory so the
+    next prompt's history isn't missing its own question.
+  - Resuming a run already at `max_iterations` fails immediately instead of
+    burning one model call per resume.
+  - `AgentBuilder`/`ForkBuilder` surface duplicate tool registrations from
+    `build()` instead of silently dropping the second tool
+    (`ForkBuilder::build` now returns `Result`).
+  - `StopReason` is `#[non_exhaustive]` and gains `Refusal`,
+    `ContentFiltered`, and `PauseTurn` variants so provider safety stops
+    can stop masquerading as normal completions.
 - **Distributed (DAIM-10):**
   - Workers no longer exit permanently the first time a Redis or NATS queue
     is idle. `TaskBroker` gains `none_means_closed()` so polling brokers'
