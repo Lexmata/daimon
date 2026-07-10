@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **CI & test coverage (DAIM-15):** CI now tests and lints the whole
+  workspace (member-crate tests previously never ran in CI), compiles every
+  root-crate feature in isolation via `cargo hack --each-feature`, checks
+  all examples instead of four, builds workspace rustdoc, and gates
+  coverage on full-feature builds (≥80%; the old 84% gate measured
+  `--no-default-features` code only). New `tests/broker_contract.rs`
+  runs an identical submit/receive/complete/fail/idle contract against
+  `InProcessBroker` unconditionally and against live Redis/NATS/RabbitMQ
+  behind `#[ignore]` — the class of bug where broker `None` semantics
+  diverged now has a pinning suite.
 - **llama.cpp provider (DAIM-17):** new `daimon-provider-llamacpp` crate
   (feature `llamacpp`, included in `full`) targeting a running `llama-server`
   over its OpenAI-compatible `/v1/chat/completions` and `/v1/embeddings`
