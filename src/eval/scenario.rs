@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::eval::scoring::Scorer;
+use crate::eval::scoring::{CompiledRegex, Scorer};
 use crate::model::{SharedEmbeddingModel, SharedModel};
 
 /// A test scenario for evaluating agent behaviour.
@@ -40,8 +40,12 @@ impl EvalScenario {
     }
 
     /// Adds a scorer that checks against a regex pattern.
+    ///
+    /// The pattern compiles once here; an invalid pattern scores `false` on
+    /// every evaluation.
     pub fn expect_regex(mut self, pattern: impl Into<String>) -> Self {
-        self.scorers.push(Scorer::Regex(pattern.into()));
+        self.scorers
+            .push(Scorer::Regex(CompiledRegex::from(pattern.into())));
         self
     }
 

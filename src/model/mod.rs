@@ -10,9 +10,6 @@ pub mod types;
 #[cfg(any(feature = "openai", feature = "anthropic", feature = "ollama"))]
 pub(crate) mod retry;
 
-#[cfg(any(feature = "openai", feature = "anthropic", feature = "ollama"))]
-pub(crate) mod line_buffer;
-
 pub use traits::{
     EmbeddingModel, ErasedEmbeddingModel, ErasedModel, Model, SharedEmbeddingModel, SharedModel,
 };

@@ -188,7 +188,7 @@ impl Agent {
         messages.push(Message::user(&actual_input));
 
         self.memory
-            .add_message_erased(Message::user(&actual_input))
+            .add_message_erased(&Message::user(&actual_input))
             .await?;
 
         self.run_react_loop(messages, &CancellationToken::new())
@@ -216,7 +216,7 @@ impl Agent {
         messages.push(Message::user(&actual_input));
 
         self.memory
-            .add_message_erased(Message::user(&actual_input))
+            .add_message_erased(&Message::user(&actual_input))
             .await?;
 
         self.run_react_loop(messages, cancel).await
@@ -249,7 +249,7 @@ impl Agent {
 
         for msg in &messages {
             if msg.role != crate::model::types::Role::System {
-                self.memory.add_message_erased(msg.clone()).await?;
+                self.memory.add_message_erased(msg).await?;
             }
         }
 
@@ -445,16 +445,14 @@ impl Agent {
                 }
                 _ => Message::assistant_with_tool_calls(tool_calls.clone()),
             };
-            self.memory
-                .add_message_erased(assistant_msg.clone())
-                .await?;
+            self.memory.add_message_erased(&assistant_msg).await?;
             messages.push(assistant_msg);
 
             let tool_results = self.execute_tools_parallel(&tool_calls).await;
 
             for (call, tool_result) in tool_calls.iter().zip(tool_results) {
                 let result_msg = Message::tool_result(&call.id, &tool_result.content);
-                self.memory.add_message_erased(result_msg.clone()).await?;
+                self.memory.add_message_erased(&result_msg).await?;
                 messages.push(result_msg);
             }
 
@@ -483,9 +481,7 @@ impl Agent {
             GuardrailDecision::Pass => final_text,
         };
 
-        self.memory
-            .add_message_erased(response.message.clone())
-            .await?;
+        self.memory.add_message_erased(&response.message).await?;
         messages.push(response.message);
 
         Ok(StepOutcome::Final(final_text))
@@ -665,7 +661,7 @@ impl Agent {
         messages.push(Message::user(&actual_input));
 
         self.memory
-            .add_message_erased(Message::user(&actual_input))
+            .add_message_erased(&Message::user(&actual_input))
             .await?;
 
         let mut tool_specs_vec: Vec<crate::model::types::ToolSpec> =
@@ -830,7 +826,7 @@ impl Agent {
 
                     if !final_text.is_empty() {
                         let assistant = Message::assistant(&final_text);
-                        memory.add_message_erased(assistant.clone()).await?;
+                        memory.add_message_erased(&assistant).await?;
                         messages.push(assistant);
                     }
                     yield StreamEvent::Done;
@@ -871,7 +867,7 @@ impl Agent {
                 } else {
                     Message::assistant_with_text_and_tool_calls(&text_buf, completed_calls.clone())
                 };
-                memory.add_message_erased(assistant_msg.clone()).await?;
+                memory.add_message_erased(&assistant_msg).await?;
                 messages.push(assistant_msg);
 
                 for call in &completed_calls {
@@ -929,7 +925,7 @@ impl Agent {
                     };
 
                     let result_msg = Message::tool_result(&call.id, &tool_result.content);
-                    memory.add_message_erased(result_msg.clone()).await?;
+                    memory.add_message_erased(&result_msg).await?;
                     messages.push(result_msg);
                 }
 

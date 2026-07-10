@@ -1,7 +1,7 @@
 import { Component, input, output } from '@angular/core';
 import { RouterLink, RouterLinkActive } from '@angular/router';
 import type { IconDefinition } from '@fortawesome/fontawesome-svg-core';
-import { FontAwesomeModule } from '@fortawesome/angular-fontawesome';
+import { FaIconComponent } from '@fortawesome/angular-fontawesome';
 import {
   faRocket,
   faSitemap,
@@ -25,7 +25,7 @@ interface NavSection {
 @Component({
   selector: 'app-sidebar',
   standalone: true,
-  imports: [FontAwesomeModule, RouterLink, RouterLinkActive],
+  imports: [FaIconComponent, RouterLink, RouterLinkActive],
   template: `
     <aside
       class="fixed inset-y-0 left-0 z-40 w-64 flex flex-col bg-surface-light border-r border-border transition-transform duration-300 ease-in-out lg:translate-x-0 lg:static lg:z-auto"

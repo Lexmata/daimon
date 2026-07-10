@@ -7,7 +7,12 @@ use crate::model::types::Message;
 /// Trait for conversation memory backends. Stores and retrieves messages for agent context.
 pub trait Memory: Send + Sync {
     /// Appends a message to the history. Order is preserved.
-    fn add_message(&self, message: Message) -> impl Future<Output = Result<()>> + Send;
+    ///
+    /// Takes a borrow so callers that keep the message (the agent runner
+    /// appends it to its working log after persisting) don't clone it per
+    /// iteration. Backends that store owned messages clone internally;
+    /// serializing backends (Redis, SQLite) never need ownership at all.
+    fn add_message(&self, message: &Message) -> impl Future<Output = Result<()>> + Send;
 
     /// Returns all stored messages in order. Used to build context for the model.
     fn get_messages(&self) -> impl Future<Output = Result<Vec<Message>>> + Send;
@@ -20,7 +25,7 @@ pub trait Memory: Send + Sync {
 pub trait ErasedMemory: Send + Sync {
     fn add_message_erased<'a>(
         &'a self,
-        message: Message,
+        message: &'a Message,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 
     fn get_messages_erased<'a>(
@@ -33,7 +38,7 @@ pub trait ErasedMemory: Send + Sync {
 impl<T: Memory> ErasedMemory for T {
     fn add_message_erased<'a>(
         &'a self,
-        message: Message,
+        message: &'a Message,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
         Box::pin(self.add_message(message))
     }

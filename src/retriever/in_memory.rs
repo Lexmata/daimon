@@ -11,6 +11,9 @@ use crate::retriever::types::Document;
 struct StoredEntry {
     document: Document,
     embedding: Vec<f32>,
+    /// L2 norm of `embedding`, precomputed at insert time so each query pays
+    /// only a dot product per entry.
+    norm: f32,
 }
 
 /// Brute-force in-memory vector store for development and testing.
@@ -36,9 +39,11 @@ impl InMemoryVectorStore {
         let embeddings = self.embedding_model.embed_erased(&texts).await?;
         let embedding = embeddings.into_iter().next().unwrap_or_default();
 
+        let norm = l2_norm(&embedding);
         self.entries.write().await.push(StoredEntry {
             document: doc,
             embedding,
+            norm,
         });
         Ok(())
     }
@@ -50,9 +55,11 @@ impl InMemoryVectorStore {
 
         let mut entries = self.entries.write().await;
         for (doc, embedding) in docs.into_iter().zip(embeddings) {
+            let norm = l2_norm(&embedding);
             entries.push(StoredEntry {
                 document: doc,
                 embedding,
+                norm,
             });
         }
         Ok(())
@@ -69,20 +76,21 @@ impl InMemoryVectorStore {
     }
 }
 
+fn dot(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b).map(|(x, y)| x * y).sum()
+}
+
+fn l2_norm(v: &[f32]) -> f32 {
+    v.iter().map(|x| x * x).sum::<f32>().sqrt()
+}
+
+#[cfg(test)]
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() || a.is_empty() {
         return 0.0;
     }
-    let mut dot = 0.0f32;
-    let mut norm_a = 0.0f32;
-    let mut norm_b = 0.0f32;
-    for (x, y) in a.iter().zip(b.iter()) {
-        dot += x * y;
-        norm_a += x * x;
-        norm_b += y * y;
-    }
-    let denom = norm_a.sqrt() * norm_b.sqrt();
-    if denom == 0.0 { 0.0 } else { dot / denom }
+    let denom = l2_norm(a) * l2_norm(b);
+    if denom == 0.0 { 0.0 } else { dot(a, b) / denom }
 }
 
 impl Retriever for InMemoryVectorStore {
@@ -90,21 +98,43 @@ impl Retriever for InMemoryVectorStore {
         let texts = [query];
         let query_embeddings = self.embedding_model.embed_erased(&texts).await?;
         let query_vec = query_embeddings.into_iter().next().unwrap_or_default();
+        let query_norm = l2_norm(&query_vec);
 
         let entries = self.entries.read().await;
         let mut scored: Vec<(f64, &StoredEntry)> = entries
             .iter()
             .map(|entry| {
-                let sim = cosine_similarity(&query_vec, &entry.embedding) as f64;
+                // Entry norms are precomputed at insert; only the dot product
+                // is paid per entry. Zero norms and dimension mismatches score
+                // 0.0, matching the previous full cosine computation.
+                let denom = query_norm * entry.norm;
+                let sim = if denom == 0.0 || query_vec.len() != entry.embedding.len() {
+                    0.0
+                } else {
+                    f64::from(dot(&query_vec, &entry.embedding) / denom)
+                };
                 (sim, entry)
             })
             .collect();
 
+        let k = top_k.min(scored.len());
+        if k == 0 {
+            return Ok(Vec::new());
+        }
+        if k < scored.len() {
+            // Partition the top k to the front in O(n), then sort only that
+            // prefix — O(n + k log k) instead of sorting every entry. Ties may
+            // resolve differently than a full sort, as with any unstable
+            // selection.
+            scored.select_nth_unstable_by(k - 1, |a, b| {
+                b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            scored.truncate(k);
+        }
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
         Ok(scored
             .into_iter()
-            .take(top_k)
             .map(|(score, entry)| entry.document.clone().with_score(score))
             .collect())
     }

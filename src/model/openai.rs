@@ -273,7 +273,7 @@ impl Model for OpenAi {
 
         let stream = async_stream::try_stream! {
             use futures::StreamExt;
-            use crate::model::line_buffer::LineBuffer;
+            use daimon_core::stream_util::LineBuffer;
 
             let mut buffer = LineBuffer::new();
             let mut state = OpenAiStreamState::default();

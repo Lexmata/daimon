@@ -1,13 +1,13 @@
 import { Component, input, output } from '@angular/core';
 import { RouterLink } from '@angular/router';
-import { FontAwesomeModule } from '@fortawesome/angular-fontawesome';
+import { FaIconComponent } from '@fortawesome/angular-fontawesome';
 import { faBars, faCube, faBook, faArrowRight } from '@fortawesome/free-solid-svg-icons';
 import { faGithub, faRust } from '@fortawesome/free-brands-svg-icons';
 
 @Component({
   selector: 'app-header',
   standalone: true,
-  imports: [FontAwesomeModule, RouterLink],
+  imports: [FaIconComponent, RouterLink],
   template: `
     <header
       class="header"

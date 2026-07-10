@@ -24,4 +24,4 @@ mod scoring;
 
 pub use runner::{EvalResult, EvalRunner};
 pub use scenario::EvalScenario;
-pub use scoring::Scorer;
+pub use scoring::{CompiledRegex, Scorer};

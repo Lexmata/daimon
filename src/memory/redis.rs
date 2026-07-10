@@ -77,10 +77,10 @@ impl RedisMemory {
 }
 
 impl Memory for RedisMemory {
-    async fn add_message(&self, message: Message) -> Result<()> {
+    async fn add_message(&self, message: &Message) -> Result<()> {
         use redis::AsyncCommands;
 
-        let serialized = serde_json::to_string(&message)?;
+        let serialized = serde_json::to_string(message)?;
         let mut conn = self.conn();
         conn.rpush::<_, _, ()>(&self.key, &serialized)
             .await
@@ -155,8 +155,8 @@ mod tests {
             .unwrap();
         memory.clear().await.unwrap();
 
-        memory.add_message(Message::user("hello")).await.unwrap();
-        memory.add_message(Message::assistant("hi")).await.unwrap();
+        memory.add_message(&Message::user("hello")).await.unwrap();
+        memory.add_message(&Message::assistant("hi")).await.unwrap();
 
         let messages = memory.get_messages().await.unwrap();
         assert_eq!(messages.len(), 2);

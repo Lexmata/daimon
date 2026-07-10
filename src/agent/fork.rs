@@ -76,7 +76,7 @@ impl Agent {
         let capacity = (state.messages.len() * 2).max(state.messages.len() + 50);
         let memory = SlidingWindowMemory::new(capacity);
         for msg in &state.messages {
-            memory.add_message(msg.clone()).await?;
+            memory.add_message(msg).await?;
         }
 
         let cost_tracker = self
@@ -658,7 +658,7 @@ mod tests {
         for i in 0..55 {
             forked
                 .memory
-                .add_message_erased(Message::user(format!("post-{i}")))
+                .add_message_erased(&Message::user(format!("post-{i}")))
                 .await
                 .unwrap();
         }

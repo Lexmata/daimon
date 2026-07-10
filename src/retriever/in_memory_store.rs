@@ -15,6 +15,9 @@ use crate::retriever::vector_store::{ScoredDocument, VectorStore};
 struct StoredEntry {
     embedding: Vec<f32>,
     document: Document,
+    /// L2 norm of `embedding`, precomputed at upsert time so each query pays
+    /// only a dot product per entry.
+    norm: f32,
 }
 
 /// Brute-force in-memory vector store for development and testing.
@@ -46,50 +49,68 @@ impl Default for InMemoryVectorStoreBackend {
     }
 }
 
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    if a.len() != b.len() || a.is_empty() {
-        return 0.0;
-    }
-    let mut dot = 0.0f32;
-    let mut norm_a = 0.0f32;
-    let mut norm_b = 0.0f32;
-    for (x, y) in a.iter().zip(b.iter()) {
-        dot += x * y;
-        norm_a += x * x;
-        norm_b += y * y;
-    }
-    let denom = norm_a.sqrt() * norm_b.sqrt();
-    if denom == 0.0 { 0.0 } else { dot / denom }
+fn dot(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b).map(|(x, y)| x * y).sum()
+}
+
+fn l2_norm(v: &[f32]) -> f32 {
+    v.iter().map(|x| x * x).sum::<f32>().sqrt()
 }
 
 impl VectorStore for InMemoryVectorStoreBackend {
     async fn upsert(&self, id: &str, embedding: Vec<f32>, document: Document) -> Result<()> {
+        let norm = l2_norm(&embedding);
         self.entries.write().await.insert(
             id.to_string(),
             StoredEntry {
                 embedding,
                 document,
+                norm,
             },
         );
         Ok(())
     }
 
     async fn query(&self, embedding: Vec<f32>, top_k: usize) -> Result<Vec<ScoredDocument>> {
+        let query_norm = l2_norm(&embedding);
         let entries = self.entries.read().await;
         let mut scored: Vec<ScoredDocument> = entries
             .values()
             .map(|entry| {
-                let sim = cosine_similarity(&embedding, &entry.embedding) as f64;
+                // Entry norms are precomputed at upsert; only the dot product
+                // is paid per entry. Zero norms and dimension mismatches score
+                // 0.0, matching the previous full cosine computation.
+                let denom = query_norm * entry.norm;
+                let sim = if denom == 0.0 || embedding.len() != entry.embedding.len() {
+                    0.0
+                } else {
+                    f64::from(dot(&embedding, &entry.embedding) / denom)
+                };
                 ScoredDocument::new(entry.document.clone(), sim)
             })
             .collect();
 
+        let k = top_k.min(scored.len());
+        if k == 0 {
+            return Ok(Vec::new());
+        }
+        if k < scored.len() {
+            // Partition the top k to the front in O(n), then sort only that
+            // prefix — O(n + k log k) instead of sorting every entry. Ties may
+            // resolve differently than a full sort, as with any unstable
+            // selection.
+            scored.select_nth_unstable_by(k - 1, |a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            scored.truncate(k);
+        }
         scored.sort_by(|a, b| {
             b.score
                 .partial_cmp(&a.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        scored.truncate(top_k);
         Ok(scored)
     }
 

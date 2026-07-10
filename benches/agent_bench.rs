@@ -126,7 +126,7 @@ fn bench_sliding_window_memory(c: &mut Criterion) {
                 use daimon::memory::Memory;
                 let mem = SlidingWindowMemory::new(50);
                 for i in 0..100 {
-                    mem.add_message(Message::user(format!("msg {i}")))
+                    mem.add_message(&Message::user(format!("msg {i}")))
                         .await
                         .unwrap();
                 }
@@ -146,7 +146,7 @@ fn bench_token_window_memory(c: &mut Criterion) {
                 use daimon::memory::Memory;
                 let mem = TokenWindowMemory::new(1000);
                 for i in 0..100 {
-                    mem.add_message(Message::user(format!(
+                    mem.add_message(&Message::user(format!(
                         "message number {i} with some content"
                     )))
                     .await

@@ -346,7 +346,7 @@ impl Model for Anthropic {
 
         let stream = async_stream::try_stream! {
             use futures::StreamExt;
-            use crate::model::line_buffer::LineBuffer;
+            use daimon_core::stream_util::LineBuffer;
 
             // Byte-accurate line buffer: a multi-byte UTF-8 character can be
             // split across two network chunks; only complete lines are decoded.

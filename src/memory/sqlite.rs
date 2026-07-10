@@ -93,7 +93,7 @@ impl SqliteMemory {
 }
 
 impl Memory for SqliteMemory {
-    async fn add_message(&self, message: Message) -> Result<()> {
+    async fn add_message(&self, message: &Message) -> Result<()> {
         let conn = self.conn.clone();
         let session_id = self.session_id.clone();
         let role = role_to_str(&message.role);
@@ -253,8 +253,8 @@ mod tests {
     #[tokio::test]
     async fn test_in_memory_add_and_get() {
         let mem = SqliteMemory::in_memory().await.unwrap();
-        mem.add_message(Message::user("hello")).await.unwrap();
-        mem.add_message(Message::assistant("hi")).await.unwrap();
+        mem.add_message(&Message::user("hello")).await.unwrap();
+        mem.add_message(&Message::assistant("hi")).await.unwrap();
 
         let messages = mem.get_messages().await.unwrap();
         assert_eq!(messages.len(), 2);
@@ -265,7 +265,7 @@ mod tests {
     #[tokio::test]
     async fn test_clear() {
         let mem = SqliteMemory::in_memory().await.unwrap();
-        mem.add_message(Message::user("hello")).await.unwrap();
+        mem.add_message(&Message::user("hello")).await.unwrap();
         assert_eq!(mem.get_messages().await.unwrap().len(), 1);
 
         mem.clear().await.unwrap();
@@ -275,10 +275,10 @@ mod tests {
     #[tokio::test]
     async fn test_roles_preserved() {
         let mem = SqliteMemory::in_memory().await.unwrap();
-        mem.add_message(Message::system("sys")).await.unwrap();
-        mem.add_message(Message::user("usr")).await.unwrap();
-        mem.add_message(Message::assistant("ast")).await.unwrap();
-        mem.add_message(Message::tool_result("id1", "result"))
+        mem.add_message(&Message::system("sys")).await.unwrap();
+        mem.add_message(&Message::user("usr")).await.unwrap();
+        mem.add_message(&Message::assistant("ast")).await.unwrap();
+        mem.add_message(&Message::tool_result("id1", "result"))
             .await
             .unwrap();
 
@@ -298,7 +298,7 @@ mod tests {
             name: "calc".into(),
             arguments: serde_json::json!({"expr": "1+1"}),
         }]);
-        mem.add_message(msg).await.unwrap();
+        mem.add_message(&msg).await.unwrap();
 
         let messages = mem.get_messages().await.unwrap();
         assert_eq!(messages[0].tool_calls.len(), 1);
@@ -314,8 +314,8 @@ mod tests {
             session_id: "other_session".into(),
         };
 
-        mem1.add_message(Message::user("session1")).await.unwrap();
-        mem2.add_message(Message::user("session2")).await.unwrap();
+        mem1.add_message(&Message::user("session1")).await.unwrap();
+        mem2.add_message(&Message::user("session2")).await.unwrap();
 
         assert_eq!(mem1.get_messages().await.unwrap().len(), 1);
         assert_eq!(mem2.get_messages().await.unwrap().len(), 1);
@@ -337,7 +337,7 @@ mod tests {
     #[tokio::test]
     async fn test_corrupted_tool_calls_json_surfaces_error() {
         let mem = SqliteMemory::in_memory().await.unwrap();
-        mem.add_message(Message::user("hello")).await.unwrap();
+        mem.add_message(&Message::user("hello")).await.unwrap();
 
         // Hand-corrupt a row's tool_calls JSON directly.
         {

@@ -150,11 +150,11 @@ impl TokenWindowMemory {
 }
 
 impl Memory for TokenWindowMemory {
-    async fn add_message(&self, message: Message) -> Result<()> {
-        let tokens = (self.token_counter)(&message);
+    async fn add_message(&self, message: &Message) -> Result<()> {
+        let tokens = (self.token_counter)(message);
         let mut inner = self.inner.lock().await;
 
-        inner.messages.push_back(message);
+        inner.messages.push_back(message.clone());
         inner.token_counts.push_back(tokens);
         inner.total_tokens += tokens;
 
@@ -200,8 +200,8 @@ mod tests {
     #[tokio::test]
     async fn test_add_and_get_messages() {
         let memory = TokenWindowMemory::new(10_000);
-        memory.add_message(Message::user("hello")).await.unwrap();
-        memory.add_message(Message::assistant("hi")).await.unwrap();
+        memory.add_message(&Message::user("hello")).await.unwrap();
+        memory.add_message(&Message::assistant("hi")).await.unwrap();
 
         let msgs = memory.get_messages().await.unwrap();
         assert_eq!(msgs.len(), 2);
@@ -217,19 +217,19 @@ mod tests {
 
         // "aaaaaaaaaa" = 10 tokens
         memory
-            .add_message(Message::user("aaaaaaaaaa"))
+            .add_message(&Message::user("aaaaaaaaaa"))
             .await
             .unwrap();
         // "bbbbbbbbbb" = 10 tokens, total 20 (at limit)
         memory
-            .add_message(Message::user("bbbbbbbbbb"))
+            .add_message(&Message::user("bbbbbbbbbb"))
             .await
             .unwrap();
         assert_eq!(memory.get_messages().await.unwrap().len(), 2);
 
         // "cccccccccc" = 10 tokens, total would be 30 > 20, evict "aaa..."
         memory
-            .add_message(Message::user("cccccccccc"))
+            .add_message(&Message::user("cccccccccc"))
             .await
             .unwrap();
 
@@ -244,12 +244,15 @@ mod tests {
         let memory = TokenWindowMemory::new(15)
             .with_token_counter(|msg| msg.content.as_ref().map_or(0, |c| c.len()));
 
-        memory.add_message(Message::user("aaa")).await.unwrap(); // 3
-        memory.add_message(Message::user("bbb")).await.unwrap(); // 3
-        memory.add_message(Message::user("ccc")).await.unwrap(); // 3, total 9
+        memory.add_message(&Message::user("aaa")).await.unwrap(); // 3
+        memory.add_message(&Message::user("bbb")).await.unwrap(); // 3
+        memory.add_message(&Message::user("ccc")).await.unwrap(); // 3, total 9
 
         // Adding 8 tokens: total would be 17 > 15, evict "aaa" (3) -> 14, fits
-        memory.add_message(Message::user("dddddddd")).await.unwrap();
+        memory
+            .add_message(&Message::user("dddddddd"))
+            .await
+            .unwrap();
 
         let msgs = memory.get_messages().await.unwrap();
         assert_eq!(msgs.len(), 3);
@@ -261,7 +264,7 @@ mod tests {
     #[tokio::test]
     async fn test_clear_resets_tokens() {
         let memory = TokenWindowMemory::new(100);
-        memory.add_message(Message::user("hello")).await.unwrap();
+        memory.add_message(&Message::user("hello")).await.unwrap();
         assert!(memory.current_tokens().await > 0);
 
         memory.clear().await.unwrap();
@@ -279,7 +282,7 @@ mod tests {
             name: "calculator".into(),
             arguments: serde_json::json!({"expression": "2+2"}),
         }]);
-        memory.add_message(msg).await.unwrap();
+        memory.add_message(&msg).await.unwrap();
 
         assert!(memory.current_tokens().await > 0);
     }
@@ -290,7 +293,7 @@ mod tests {
 
         for i in 0..7 {
             memory
-                .add_message(Message::user(format!("msg{i}")))
+                .add_message(&Message::user(format!("msg{i}")))
                 .await
                 .unwrap();
         }
@@ -310,24 +313,27 @@ mod tests {
             arguments: serde_json::json!({"expr": "1+1"}),
         };
 
-        memory.add_message(Message::user("question")).await.unwrap();
         memory
-            .add_message(Message::assistant_with_tool_calls(vec![tool_call]))
+            .add_message(&Message::user("question"))
             .await
             .unwrap();
         memory
-            .add_message(Message::tool_result("tc_1", "result one"))
+            .add_message(&Message::assistant_with_tool_calls(vec![tool_call]))
+            .await
+            .unwrap();
+        memory
+            .add_message(&Message::tool_result("tc_1", "result one"))
             .await
             .unwrap();
         // 4 tokens > 3: evicts the lone user message first.
         memory
-            .add_message(Message::tool_result("tc_1", "result two"))
+            .add_message(&Message::tool_result("tc_1", "result two"))
             .await
             .unwrap();
         // 4 tokens > 3 again: the front group is assistant + 2 tool results,
         // which must be evicted as a whole.
         memory
-            .add_message(Message::assistant("final answer"))
+            .add_message(&Message::assistant("final answer"))
             .await
             .unwrap();
 
@@ -349,15 +355,15 @@ mod tests {
         };
 
         memory
-            .add_message(Message::assistant_with_tool_calls(vec![tool_call]))
+            .add_message(&Message::assistant_with_tool_calls(vec![tool_call]))
             .await
             .unwrap();
         memory
-            .add_message(Message::tool_result("tc_1", "result one"))
+            .add_message(&Message::tool_result("tc_1", "result one"))
             .await
             .unwrap();
         memory
-            .add_message(Message::tool_result("tc_1", "result two"))
+            .add_message(&Message::tool_result("tc_1", "result two"))
             .await
             .unwrap();
 
@@ -373,10 +379,10 @@ mod tests {
         let memory = TokenWindowMemory::new(5)
             .with_token_counter(|msg| msg.content.as_ref().map_or(0, |c| c.len()));
 
-        memory.add_message(Message::user("short")).await.unwrap();
+        memory.add_message(&Message::user("short")).await.unwrap();
         // "this is a very long message" = 27 tokens, exceeds budget but still kept as last msg
         memory
-            .add_message(Message::user("this is a very long message"))
+            .add_message(&Message::user("this is a very long message"))
             .await
             .unwrap();
 

@@ -31,6 +31,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Performance cleanups (DAIM-19):**
+  - In-memory vector stores (`InMemoryVectorStore`,
+    `InMemoryVectorStoreBackend`) precompute entry norms at insert and
+    partition the top-k to the front instead of fully sorting every entry per
+    query — O(n + k log k) instead of O(n log n), with only a dot product
+    paid per entry.
+  - `PromptTemplate` renders in a single pass instead of one full-string
+    `replace` per variable. Substituted values are now inserted verbatim:
+    the old loop could re-expand a placeholder appearing inside an earlier
+    substitution, with the result depending on `HashMap` iteration order.
+  - **Breaking:** `Scorer::Regex` now carries a `CompiledRegex` (compiled
+    once at construction) instead of a `String`. `Scorer::Regex(s.into())`
+    and `EvalScenario::expect_regex` keep working; an invalid pattern still
+    scores `false` on every evaluation.
+  - **Breaking:** `Memory::add_message` (and `ErasedMemory::
+    add_message_erased`) now take `&Message` instead of `Message`. The agent
+    runner keeps every message it persists, so passing by value forced a
+    deep clone per ReAct iteration; serializing backends (Redis, SQLite)
+    never needed ownership at all, and the in-memory backends clone
+    internally. Implementors change the signature and add one `.clone()`
+    where they store; callers drop their clones.
+  - pgvector statements go through deadpool's per-connection
+    `prepare_cached`, so the constant upsert/query/delete/count SQL is
+    parsed and planned once per pooled connection instead of per call.
+  - Docs site: dropped the unused `provideHttpClient` provider (the app uses
+    native `fetch`), swapped `FontAwesomeModule` for the standalone
+    `FaIconComponent` in header/sidebar, and removed the never-imported
+    `@angular/forms` dependency.
 - **Performance (DAIM-18):**
   - `LineBuffer` (shared by every streaming provider) splits lines with a
     cursor instead of draining per line — per-chunk work is now linear and
