@@ -5,6 +5,14 @@ on:
     branches: [develop, main]
   pull_request:
     branches: [develop]
+  # Used by the autofix job to re-run CI on a fix commit it pushed: pushes
+  # made with GITHUB_TOKEN never trigger workflows on their own.
+  workflow_dispatch:
+
+# Read-only token by default; the autofix job overrides with the write
+# scopes it needs.
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -40,7 +48,7 @@ jobs:
         run: cargo install cargo-commitlint --locked
       - name: Lint commits
         run: |
-          for sha in $(git log --format=%H origin/${{ github.base_ref }}..HEAD); do
+          for sha in $(git log --no-merges --format=%H origin/${{ github.base_ref }}..HEAD); do
             git log -1 --format=%s "$sha" | cargo commitlint check --config commitlint.toml
           done
 
@@ -89,7 +97,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-hack
-      - run: cargo hack check --each-feature --no-dev-deps -p daimon
+      - run: cargo hack check --each-feature --workspace
 
   # ── Linting ───────────────────────────────────────────────────────
   clippy:
@@ -206,6 +214,58 @@ jobs:
           command: check advisories licenses bans
 
   # ── Final gate ────────────────────────────────────────────────────
+  # ── Lint autofix (PRs from this repo only) ────────────────────────
+  # Applies machine-fixable clippy lints and rustfmt, pushes the fix
+  # commit to the PR branch, and re-dispatches CI on it (GITHUB_TOKEN
+  # pushes never trigger workflows by themselves). Strict gates still
+  # run in the clippy/fmt jobs; this job only heals what it can.
+  autofix:
+    name: Lint autofix
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      # Third-party actions are SHA-pinned in this job (unlike the read-only
+      # jobs) because it holds write permissions: a compromised action here
+      # could push code or dispatch workflows.
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: autofix
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Apply clippy fixes
+        env:
+          # Unset -Dwarnings so unfixable lints don't abort the fix pass;
+          # the strict clippy job still gates them.
+          RUSTFLAGS: ""
+        run: cargo clippy --workspace --features full --all-targets --fix --allow-dirty
+      - name: Apply formatting
+        run: cargo fmt --all
+      - name: Push fixes and re-dispatch CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          if git diff --quiet; then
+            echo "No autofixable issues."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "style: apply automated clippy and rustfmt fixes"
+          git push origin "HEAD:refs/heads/$HEAD_REF"
+          gh workflow run ci.yml --ref "$HEAD_REF"
+          echo "::notice::Autofix pushed $(git rev-parse --short HEAD) to $HEAD_REF; CI re-dispatched on the fixed commit."
+
   ci-pass:
     name: CI passed
     if: always()
