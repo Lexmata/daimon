@@ -39,12 +39,10 @@ impl FileCheckpoint {
     /// component.
     fn validate_run_id(run_id: &str) -> Result<()> {
         if run_id.is_empty() {
-            return Err(DaimonError::Other(
-                "invalid run_id: must not be empty".to_string(),
-            ));
+            return Err(DaimonError::storage("invalid run_id: must not be empty"));
         }
         if run_id == ".." || run_id == "." {
-            return Err(DaimonError::Other(format!(
+            return Err(DaimonError::storage(format!(
                 "invalid run_id '{run_id}': reserved path component"
             )));
         }
@@ -52,7 +50,7 @@ impl FileCheckpoint {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
         {
-            return Err(DaimonError::Other(format!(
+            return Err(DaimonError::storage(format!(
                 "invalid run_id '{run_id}': only [A-Za-z0-9._-] characters are allowed"
             )));
         }
@@ -72,8 +70,9 @@ impl Checkpoint for FileCheckpoint {
         let json = serde_json::to_string_pretty(state)?;
 
         tokio::task::spawn_blocking(move || {
-            std::fs::create_dir_all(&dir)
-                .map_err(|e| DaimonError::Other(format!("failed to create checkpoint dir: {e}")))?;
+            std::fs::create_dir_all(&dir).map_err(|e| {
+                DaimonError::storage_transient(format!("failed to create checkpoint dir: {e}"))
+            })?;
 
             // Write to a temp file in the *same* directory, then atomically
             // rename it into place. A direct `fs::write` can be interrupted by
@@ -93,20 +92,23 @@ impl Checkpoint for FileCheckpoint {
             let write_result = (|| {
                 use std::io::Write;
                 let mut f = std::fs::File::create(&tmp_path).map_err(|e| {
-                    DaimonError::Other(format!("failed to create temp checkpoint: {e}"))
+                    DaimonError::storage_transient(format!("failed to create temp checkpoint: {e}"))
                 })?;
-                f.write_all(json.as_bytes())
-                    .map_err(|e| DaimonError::Other(format!("failed to write checkpoint: {e}")))?;
-                f.flush()
-                    .map_err(|e| DaimonError::Other(format!("failed to flush checkpoint: {e}")))?;
+                f.write_all(json.as_bytes()).map_err(|e| {
+                    DaimonError::storage_transient(format!("failed to write checkpoint: {e}"))
+                })?;
+                f.flush().map_err(|e| {
+                    DaimonError::storage_transient(format!("failed to flush checkpoint: {e}"))
+                })?;
                 // A sync_all failure means the bytes may not be durable on
                 // disk, so treat it as a hard error: returning Ok here would
                 // report a possibly-lost write as a committed checkpoint. The
                 // caller's cleanup removes the temp file and `save` returns
                 // Err, and the previous checkpoint file stays in place because
                 // the rename never happens.
-                f.sync_all()
-                    .map_err(|e| DaimonError::Other(format!("failed to fsync checkpoint: {e}")))?;
+                f.sync_all().map_err(|e| {
+                    DaimonError::storage_transient(format!("failed to fsync checkpoint: {e}"))
+                })?;
                 Ok::<_, DaimonError>(())
             })();
 
@@ -117,7 +119,7 @@ impl Checkpoint for FileCheckpoint {
 
             if let Err(e) = std::fs::rename(&tmp_path, &path) {
                 let _ = std::fs::remove_file(&tmp_path);
-                return Err(DaimonError::Other(format!(
+                return Err(DaimonError::storage_transient(format!(
                     "failed to commit checkpoint: {e}"
                 )));
             }
@@ -134,8 +136,9 @@ impl Checkpoint for FileCheckpoint {
             if !path.exists() {
                 return Ok(None);
             }
-            let json = std::fs::read_to_string(&path)
-                .map_err(|e| DaimonError::Other(format!("failed to read checkpoint: {e}")))?;
+            let json = std::fs::read_to_string(&path).map_err(|e| {
+                DaimonError::storage_transient(format!("failed to read checkpoint: {e}"))
+            })?;
             let state: CheckpointState = serde_json::from_str(&json)?;
             Ok(Some(state))
         })
@@ -151,11 +154,13 @@ impl Checkpoint for FileCheckpoint {
                 return Ok(Vec::new());
             }
             let mut runs = Vec::new();
-            let entries = std::fs::read_dir(&dir)
-                .map_err(|e| DaimonError::Other(format!("failed to read checkpoint dir: {e}")))?;
+            let entries = std::fs::read_dir(&dir).map_err(|e| {
+                DaimonError::storage_transient(format!("failed to read checkpoint dir: {e}"))
+            })?;
             for entry in entries {
-                let entry = entry
-                    .map_err(|e| DaimonError::Other(format!("failed to read dir entry: {e}")))?;
+                let entry = entry.map_err(|e| {
+                    DaimonError::storage_transient(format!("failed to read dir entry: {e}"))
+                })?;
                 let path = entry.path();
                 if path.extension().is_some_and(|ext| ext == "json")
                     && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
@@ -174,8 +179,9 @@ impl Checkpoint for FileCheckpoint {
 
         tokio::task::spawn_blocking(move || {
             if path.exists() {
-                std::fs::remove_file(&path)
-                    .map_err(|e| DaimonError::Other(format!("failed to delete checkpoint: {e}")))?;
+                std::fs::remove_file(&path).map_err(|e| {
+                    DaimonError::storage_transient(format!("failed to delete checkpoint: {e}"))
+                })?;
             }
             Ok::<_, DaimonError>(())
         })
@@ -366,6 +372,49 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_file_io_failure_returns_transient_storage_error() {
+        // Point the backend at a path occupied by a regular file so
+        // `create_dir_all` fails: the failure must surface as a transient
+        // `Storage` error, not the undifferentiated `Other`.
+        let dir = temp_dir();
+        std::fs::create_dir_all(dir.parent().unwrap()).unwrap();
+        std::fs::write(&dir, b"not a directory").unwrap();
+
+        let cp = FileCheckpoint::new(&dir);
+        let err = cp
+            .save(&CheckpointState::new("run-1", vec![], 0))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                DaimonError::Storage {
+                    transient: true,
+                    ..
+                }
+            ),
+            "expected transient Storage error, got: {err:?}"
+        );
+
+        let _ = std::fs::remove_file(&dir);
+    }
+
+    #[test]
+    fn test_invalid_run_id_returns_permanent_storage_error() {
+        let err = FileCheckpoint::validate_run_id("../escape").unwrap_err();
+        assert!(
+            matches!(
+                err,
+                DaimonError::Storage {
+                    transient: false,
+                    ..
+                }
+            ),
+            "expected permanent Storage error, got: {err:?}"
+        );
     }
 
     #[tokio::test]

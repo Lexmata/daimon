@@ -33,7 +33,7 @@ impl NatsKvCheckpoint {
         let bucket = bucket.into();
         let client = async_nats::connect(url)
             .await
-            .map_err(|e| DaimonError::Other(format!("nats kv connect: {e}")))?;
+            .map_err(|e| DaimonError::storage_transient(format!("nats kv connect: {e}")))?;
 
         let jetstream = async_nats::jetstream::new(client);
 
@@ -53,7 +53,7 @@ impl NatsKvCheckpoint {
             Err(_) => jetstream
                 .get_key_value(&bucket)
                 .await
-                .map_err(|e| DaimonError::Other(format!("nats kv open bucket: {e}")))?,
+                .map_err(|e| DaimonError::storage_transient(format!("nats kv open bucket: {e}")))?,
         };
 
         Ok(Self { kv })
@@ -76,15 +76,13 @@ impl NatsKvCheckpoint {
     /// fast with a clear error instead.
     fn validate_run_id(run_id: &str) -> Result<()> {
         if run_id.is_empty() {
-            return Err(DaimonError::Other(
-                "invalid run_id: must not be empty".to_string(),
-            ));
+            return Err(DaimonError::storage("invalid run_id: must not be empty"));
         }
         if !run_id
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
         {
-            return Err(DaimonError::Other(format!(
+            return Err(DaimonError::storage(format!(
                 "invalid run_id '{run_id}': only [A-Za-z0-9_-] characters are allowed in NATS KV keys"
             )));
         }
@@ -104,7 +102,7 @@ impl Checkpoint for NatsKvCheckpoint {
         self.kv
             .put(key, json.into())
             .await
-            .map_err(|e| DaimonError::Other(format!("nats kv put: {e}")))?;
+            .map_err(|e| DaimonError::storage_transient(format!("nats kv put: {e}")))?;
         Ok(())
     }
 
@@ -117,11 +115,11 @@ impl Checkpoint for NatsKvCheckpoint {
         match self.kv.get(Self::key(run_id)?).await {
             Ok(Some(bytes)) => {
                 let state: CheckpointState = serde_json::from_slice(&bytes)
-                    .map_err(|e| DaimonError::Other(format!("nats kv deserialize: {e}")))?;
+                    .map_err(|e| DaimonError::storage(format!("nats kv deserialize: {e}")))?;
                 Ok(Some(state))
             }
             Ok(None) => Ok(None),
-            Err(e) => Err(DaimonError::Other(format!(
+            Err(e) => Err(DaimonError::storage_transient(format!(
                 "nats kv get ({kind:?}): {e}",
                 kind = e.kind()
             ))),
@@ -135,10 +133,10 @@ impl Checkpoint for NatsKvCheckpoint {
             .kv
             .keys()
             .await
-            .map_err(|e| DaimonError::Other(format!("nats kv keys: {e}")))?
+            .map_err(|e| DaimonError::storage_transient(format!("nats kv keys: {e}")))?
             .try_collect()
             .await
-            .map_err(|e| DaimonError::Other(format!("nats kv keys collect: {e}")))?;
+            .map_err(|e| DaimonError::storage_transient(format!("nats kv keys collect: {e}")))?;
 
         let prefix = "cp.";
         let runs = keys
@@ -153,7 +151,7 @@ impl Checkpoint for NatsKvCheckpoint {
         self.kv
             .purge(Self::key(run_id)?)
             .await
-            .map_err(|e| DaimonError::Other(format!("nats kv delete: {e}")))?;
+            .map_err(|e| DaimonError::storage_transient(format!("nats kv delete: {e}")))?;
         Ok(())
     }
 }
@@ -192,6 +190,21 @@ mod tests {
     fn test_key_rejects_invalid_run_id() {
         assert!(NatsKvCheckpoint::key("a.b").is_err());
         assert!(NatsKvCheckpoint::key("").is_err());
+    }
+
+    #[test]
+    fn test_invalid_run_id_returns_permanent_storage_error() {
+        let err = NatsKvCheckpoint::key("a.b").unwrap_err();
+        assert!(
+            matches!(
+                err,
+                DaimonError::Storage {
+                    transient: false,
+                    ..
+                }
+            ),
+            "expected permanent Storage error, got: {err:?}"
+        );
     }
 
     #[test]

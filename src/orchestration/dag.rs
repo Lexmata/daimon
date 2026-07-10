@@ -219,6 +219,7 @@ type BranchFn = Arc<dyn Fn(&DagContext) -> Result<Vec<String>> + Send + Sync>;
 /// topological sort and produces the executable DAG.
 pub struct DagBuilder {
     nodes: HashMap<String, Arc<dyn DagNode>>,
+    node_order: HashMap<String, usize>,
     edges: Vec<(String, String)>,
     branches: HashMap<String, BranchFn>,
 }
@@ -227,14 +228,22 @@ impl DagBuilder {
     fn new() -> Self {
         Self {
             nodes: HashMap::new(),
+            node_order: HashMap::new(),
             edges: Vec::new(),
             branches: HashMap::new(),
         }
     }
 
     /// Adds a named processing node.
+    ///
+    /// Registration order matters for parallel levels: when concurrent
+    /// branches write the same context key, the **later-registered** node's
+    /// write wins (see [`Dag::run`]).
     pub fn node<N: DagNode + 'static>(mut self, name: impl Into<String>, node: N) -> Self {
-        self.nodes.insert(name.into(), Arc::new(node));
+        let name = name.into();
+        let next_index = self.node_order.len();
+        self.node_order.entry(name.clone()).or_insert(next_index);
+        self.nodes.insert(name, Arc::new(node));
         self
     }
 
@@ -330,6 +339,7 @@ impl DagBuilder {
 
         Ok(Dag {
             nodes: self.nodes,
+            node_order: self.node_order,
             levels,
             successors,
             predecessors,
@@ -358,6 +368,7 @@ impl std::fmt::Debug for Dag {
 
 pub struct Dag {
     nodes: HashMap<String, Arc<dyn DagNode>>,
+    node_order: HashMap<String, usize>,
     levels: Vec<Vec<String>>,
     successors: HashMap<String, Vec<String>>,
     predecessors: HashMap<String, Vec<String>>,
@@ -375,6 +386,11 @@ impl Dag {
     /// Nodes in the same topological level run in parallel. Branch conditions
     /// are evaluated after each level to determine which successors are
     /// activated for subsequent levels.
+    ///
+    /// Parallel branch results are merged **deterministically** in node
+    /// registration order (the order of [`DagBuilder::node`] calls), not in
+    /// task completion order. When two concurrent branches write the same
+    /// context key, the later-registered branch's value wins.
     #[tracing::instrument(skip_all, fields(levels = self.levels.len()))]
     pub async fn run(&self, ctx: DagContext) -> Result<DagContext> {
         let mut ctx = ctx;
@@ -403,6 +419,11 @@ impl Dag {
                 continue;
             }
 
+            // Fix the merge order up front: node registration order, so that
+            // same-key writes resolve identically on every run regardless of
+            // which parallel task happens to finish first.
+            runnable.sort_by_key(|name| self.node_order.get(*name).copied().unwrap_or(usize::MAX));
+
             if runnable.len() == 1 {
                 let name = runnable[0];
                 let node = self.nodes.get(name).ok_or_else(|| {
@@ -426,12 +447,22 @@ impl Dag {
                     });
                 }
 
+                // Collect every branch result first, then merge in
+                // registration order — never in completion order.
+                let mut branch_results: HashMap<String, DagContext> =
+                    HashMap::with_capacity(runnable.len());
                 while let Some(result) = join_set.join_next().await {
-                    let (_, branch_ctx) = result.map_err(|e| {
+                    let (name, branch_ctx) = result.map_err(|e| {
                         DaimonError::Orchestration(format!("dag join error: {e}"))
                     })??;
-                    for (key, value) in branch_ctx.state {
-                        ctx.state.insert(key, value);
+                    branch_results.insert(name, branch_ctx);
+                }
+
+                for &name in &runnable {
+                    if let Some(branch_ctx) = branch_results.remove(name) {
+                        for (key, value) in branch_ctx.state {
+                            ctx.state.insert(key, value);
+                        }
                     }
                 }
 
@@ -468,6 +499,24 @@ impl Dag {
 
         if let Some(branch_fn) = self.branches.get(node) {
             let selected = branch_fn(ctx)?;
+
+            // A branch selecting a name that is not a declared successor is
+            // a wiring bug. Silently ignoring it used to surface much later
+            // as a generic "did not reach END" — fail fast and say exactly
+            // which target was invalid and what would have been valid.
+            let succ_set: HashSet<&str> = succs.iter().map(String::as_str).collect();
+            for target in &selected {
+                if !succ_set.contains(target.as_str()) {
+                    let mut valid: Vec<&str> = succs.iter().map(String::as_str).collect();
+                    valid.sort_unstable();
+                    return Err(DaimonError::Orchestration(format!(
+                        "branch on node '{node}' selected '{target}', which is not a declared \
+                         successor; valid successors: [{}]",
+                        valid.join(", ")
+                    )));
+                }
+            }
+
             let selected_set: HashSet<&str> = selected.iter().map(|s| s.as_str()).collect();
             for succ in succs {
                 if selected_set.contains(succ.as_str()) {
@@ -778,6 +827,91 @@ mod tests {
 
         let result = dag.run(DagContext::new()).await.unwrap();
         assert_eq!(result.get("step"), Some(&serde_json::json!(3)));
+    }
+
+    #[tokio::test]
+    async fn test_parallel_merge_is_deterministic() {
+        // Both branches write the same key. "slow" is registered FIRST but
+        // finishes LAST; the completion-order fold used to let it win. The
+        // later-registered branch ("fast") must win deterministically.
+        for _ in 0..20 {
+            let dag = Dag::builder()
+                .node(
+                    "slow",
+                    FnDagNode::new(|ctx| {
+                        Box::pin(async move {
+                            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                            ctx.set("shared", serde_json::json!("from-slow"));
+                            Ok(())
+                        })
+                    }),
+                )
+                .node(
+                    "fast",
+                    FnDagNode::new(|ctx| {
+                        Box::pin(async move {
+                            ctx.set("shared", serde_json::json!("from-fast"));
+                            Ok(())
+                        })
+                    }),
+                )
+                .edge(START, "slow")
+                .edge(START, "fast")
+                .edge("slow", END)
+                .edge("fast", END)
+                .build()
+                .unwrap();
+
+            let result = dag.run(DagContext::new()).await.unwrap();
+            assert_eq!(
+                result.get("shared"),
+                Some(&serde_json::json!("from-fast")),
+                "same-key writes must resolve to the later-registered branch"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_branch_invalid_target_errors() {
+        let dag = Dag::builder()
+            .node("gate", set_node("gate", serde_json::json!(true)))
+            .node("a", set_node("a_ran", serde_json::json!(true)))
+            .node("b", set_node("b_ran", serde_json::json!(true)))
+            .edge(START, "gate")
+            .edge("gate", "a")
+            .edge("gate", "b")
+            .edge("a", END)
+            .edge("b", END)
+            .branch("gate", |_ctx| Ok("nonexistent".to_string()))
+            .build()
+            .unwrap();
+
+        let err = dag.run(DagContext::new()).await.unwrap_err().to_string();
+        assert!(
+            err.contains("'nonexistent'"),
+            "error must name the invalid target, got: {err}"
+        );
+        assert!(err.contains("'gate'"), "error must name the node: {err}");
+        assert!(
+            err.contains("a, b"),
+            "error must list valid successors, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_multi_branch_invalid_target_errors() {
+        let dag = Dag::builder()
+            .node("gate", set_node("gate", serde_json::json!(true)))
+            .node("a", set_node("a_ran", serde_json::json!(true)))
+            .edge(START, "gate")
+            .edge("gate", "a")
+            .edge("a", END)
+            .multi_branch("gate", |_ctx| Ok(vec!["a".to_string(), "typo".to_string()]))
+            .build()
+            .unwrap();
+
+        let err = dag.run(DagContext::new()).await.unwrap_err().to_string();
+        assert!(err.contains("'typo'"), "got: {err}");
     }
 
     #[tokio::test]

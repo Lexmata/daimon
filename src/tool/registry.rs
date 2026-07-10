@@ -1,21 +1,44 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::error::{DaimonError, Result};
 use crate::model::types::ToolSpec;
 use crate::tool::traits::{SharedTool, Tool};
 
+/// A tool-spec snapshot tagged with the registry generation it was built from.
+#[derive(Clone)]
+struct CachedSpecs {
+    generation: u64,
+    specs: Arc<[ToolSpec]>,
+}
+
 /// A registry holding named tools that the agent can invoke.
 ///
 /// Caches compiled JSON Schema validators and tool specs to avoid
-/// repeated allocations in the hot path.
-#[derive(Default, Clone)]
+/// repeated allocations in the hot path. The spec cache uses interior
+/// mutability so it is populated lazily even through `&self` access.
+#[derive(Default)]
 pub struct ToolRegistry {
     tools: HashMap<String, SharedTool>,
-    cached_specs: Option<Arc<[ToolSpec]>>,
+    cached_specs: Mutex<Option<CachedSpecs>>,
     cached_validators: HashMap<String, Arc<jsonschema::Validator>>,
     generation: u64,
-    specs_generation: u64,
+}
+
+impl Clone for ToolRegistry {
+    fn clone(&self) -> Self {
+        let cached = self
+            .cached_specs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        Self {
+            tools: self.tools.clone(),
+            cached_specs: Mutex::new(cached),
+            cached_validators: self.cached_validators.clone(),
+            generation: self.generation,
+        }
+    }
 }
 
 impl ToolRegistry {
@@ -25,7 +48,10 @@ impl ToolRegistry {
     }
 
     fn invalidate_caches(&mut self) {
-        self.cached_specs = None;
+        *self
+            .cached_specs
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner) = None;
         self.cached_validators.clear();
         self.generation = self.generation.wrapping_add(1);
     }
@@ -85,12 +111,18 @@ impl ToolRegistry {
     ///
     /// Uses a cached compiled validator when available. Returns `None` if
     /// the input is valid, or a description of errors otherwise.
+    ///
+    /// A `tool_name` that is not registered is reported as a validation
+    /// error (`Some(...)`), never silently treated as valid — there is no
+    /// schema to validate against, so the input cannot be trusted.
     pub fn validate_input(&self, tool_name: &str, input: &serde_json::Value) -> Option<String> {
         if let Some(validator) = self.cached_validators.get(tool_name) {
             return run_validator(validator, input);
         }
 
-        let tool = self.tools.get(tool_name)?;
+        let Some(tool) = self.tools.get(tool_name) else {
+            return Some(format!("tool '{tool_name}' not found in registry"));
+        };
         let schema = tool.parameters_schema();
 
         let validator = match jsonschema::validator_for(&schema) {
@@ -121,17 +153,25 @@ impl ToolRegistry {
     /// Returns tool specs for the model. The result is cached and shared via
     /// `Arc`, so repeated calls return the same allocation.
     ///
-    /// The cache is lazily populated on first call and invalidated when
-    /// tools are registered/unregistered. For `&self` access without
-    /// interior mutability, call [`warm_cache`](Self::warm_cache) after
-    /// registration is complete to ensure the cache is pre-built.
+    /// The cache is lazily populated on first call (including through
+    /// `&self`, via interior mutability) and invalidated when tools are
+    /// registered or unregistered.
     pub fn tool_specs(&self) -> Arc<[ToolSpec]> {
-        if let Some(ref cached) = self.cached_specs
-            && self.specs_generation == self.generation
         {
-            return Arc::clone(cached);
+            let cache = self
+                .cached_specs
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if let Some(cached) = cache.as_ref()
+                && cached.generation == self.generation
+            {
+                return Arc::clone(&cached.specs);
+            }
         }
 
+        // Build outside the lock: `parameters_schema()` may be non-trivial,
+        // and a concurrent builder for the same generation is harmless (the
+        // last writer wins with an identical snapshot).
         let specs: Arc<[ToolSpec]> = self
             .tools
             .values()
@@ -142,37 +182,27 @@ impl ToolRegistry {
             })
             .collect::<Vec<_>>()
             .into();
+
+        *self
+            .cached_specs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(CachedSpecs {
+            generation: self.generation,
+            specs: Arc::clone(&specs),
+        });
 
         specs
     }
 
-    /// Mutable version of `tool_specs` that stores the result in the cache.
+    /// Equivalent to [`tool_specs`](Self::tool_specs); retained for backward
+    /// compatibility from when only the `&mut self` path populated the cache.
     pub fn tool_specs_mut(&mut self) -> Arc<[ToolSpec]> {
-        if let Some(ref cached) = self.cached_specs
-            && self.specs_generation == self.generation
-        {
-            return Arc::clone(cached);
-        }
-
-        let specs: Arc<[ToolSpec]> = self
-            .tools
-            .values()
-            .map(|tool| ToolSpec {
-                name: tool.name().to_string(),
-                description: tool.description().to_string(),
-                parameters: tool.parameters_schema(),
-            })
-            .collect::<Vec<_>>()
-            .into();
-
-        self.cached_specs = Some(Arc::clone(&specs));
-        self.specs_generation = self.generation;
-        specs
+        self.tool_specs()
     }
 
     /// Ensures the tool_specs cache is populated. Call after registration is complete.
     pub fn warm_cache(&mut self) {
-        self.tool_specs_mut();
+        self.tool_specs();
         self.compile_validators();
     }
 }
@@ -402,12 +432,73 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_input_nonexistent_tool() {
+    fn test_validate_input_nonexistent_tool_is_error() {
         let registry = ToolRegistry::new();
+        let err = registry.validate_input("missing", &serde_json::json!({}));
         assert!(
-            registry
-                .validate_input("missing", &serde_json::json!({}))
-                .is_none()
+            err.is_some(),
+            "a missing tool must be a validation error, not silently valid"
+        );
+        assert!(err.unwrap().contains("'missing' not found"));
+    }
+
+    #[test]
+    fn test_tool_specs_cached_across_shared_calls() {
+        let mut registry = ToolRegistry::new();
+        registry.register(MockTool::new("calc")).unwrap();
+
+        let first = registry.tool_specs();
+        let second = registry.tool_specs();
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "repeated &self calls must return the same cached allocation"
+        );
+    }
+
+    #[test]
+    fn test_tool_specs_cache_invalidated_on_register() {
+        let mut registry = ToolRegistry::new();
+        registry.register(MockTool::new("a")).unwrap();
+
+        let before = registry.tool_specs();
+        registry.register(MockTool::new("b")).unwrap();
+        let after = registry.tool_specs();
+
+        assert!(
+            !Arc::ptr_eq(&before, &after),
+            "registering a tool must invalidate the spec cache"
+        );
+        assert_eq!(before.len(), 1);
+        assert_eq!(after.len(), 2);
+    }
+
+    #[test]
+    fn test_tool_specs_cache_invalidated_on_unregister() {
+        let mut registry = ToolRegistry::new();
+        registry.register(MockTool::new("a")).unwrap();
+        registry.register(MockTool::new("b")).unwrap();
+
+        let before = registry.tool_specs();
+        assert!(registry.unregister("a"));
+        let after = registry.tool_specs();
+
+        assert!(!Arc::ptr_eq(&before, &after));
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].name, "b");
+    }
+
+    #[test]
+    fn test_clone_preserves_cache() {
+        let mut registry = ToolRegistry::new();
+        registry.register(MockTool::new("a")).unwrap();
+
+        let original = registry.tool_specs();
+        let cloned = registry.clone();
+        let from_clone = cloned.tool_specs();
+
+        assert!(
+            Arc::ptr_eq(&original, &from_clone),
+            "cloning must carry the populated cache over"
         );
     }
 
