@@ -9,14 +9,13 @@
 //! use daimon_provider_bedrock::Bedrock;
 //! use daimon_core::Model;
 //!
-//! let model = Bedrock::new("us.anthropic.claude-sonnet-4-20250514")
+//! let model = Bedrock::new("us.anthropic.claude-sonnet-5")
 //!     .with_region("us-east-1")
 //!     .with_prompt_caching();
 //! ```
 
-use std::time::Duration;
-
 use aws_sdk_bedrockruntime::Client as BedrockClient;
+use aws_sdk_bedrockruntime::error::ProvideErrorMetadata;
 use aws_sdk_bedrockruntime::types::{
     CachePointBlock, CachePointType, ContentBlock, ConversationRole, GuardrailConfiguration,
     GuardrailStreamConfiguration, InferenceConfiguration, Message as BedrockMessage,
@@ -115,10 +114,15 @@ impl Bedrock {
         Ok(BedrockClient::new(&config))
     }
 
+    /// Builds the system blocks and conversation messages for a Converse call.
+    ///
+    /// Builder failures are propagated as [`DaimonError::Model`] rather than
+    /// panicking: a library must not abort the process even if the AWS SDK's
+    /// builder contracts change underneath it.
     fn build_messages(
         request: &ChatRequest,
         use_prompt_caching: bool,
-    ) -> (Vec<SystemContentBlock>, Vec<BedrockMessage>) {
+    ) -> Result<(Vec<SystemContentBlock>, Vec<BedrockMessage>)> {
         let mut system_blocks = Vec::new();
         let mut messages = Vec::new();
 
@@ -136,7 +140,11 @@ impl Bedrock {
                                 .role(ConversationRole::User)
                                 .content(ContentBlock::Text(text.clone()))
                                 .build()
-                                .expect("valid bedrock message"),
+                                .map_err(|e| {
+                                    DaimonError::Model(format!(
+                                        "Bedrock user message build error: {e}"
+                                    ))
+                                })?,
                         );
                     }
                 }
@@ -153,7 +161,11 @@ impl Bedrock {
                                 .name(&tc.name)
                                 .input(input_doc)
                                 .build()
-                                .expect("valid tool use block"),
+                                .map_err(|e| {
+                                    DaimonError::Model(format!(
+                                        "Bedrock tool use block build error: {e}"
+                                    ))
+                                })?,
                         ));
                     }
                     if !content_blocks.is_empty() {
@@ -162,7 +174,11 @@ impl Bedrock {
                         for block in content_blocks {
                             builder = builder.content(block);
                         }
-                        messages.push(builder.build().expect("valid bedrock message"));
+                        messages.push(builder.build().map_err(|e| {
+                            DaimonError::Model(format!(
+                                "Bedrock assistant message build error: {e}"
+                            ))
+                        })?);
                     }
                 }
                 Role::Tool => {
@@ -174,14 +190,22 @@ impl Bedrock {
                             .status(ToolResultStatus::Success)
                             .content(ToolResultContentBlock::Text(content))
                             .build()
-                            .expect("valid tool result block"),
+                            .map_err(|e| {
+                                DaimonError::Model(format!(
+                                    "Bedrock tool result block build error: {e}"
+                                ))
+                            })?,
                     );
                     messages.push(
                         BedrockMessage::builder()
                             .role(ConversationRole::User)
                             .content(tool_result)
                             .build()
-                            .expect("valid bedrock message"),
+                            .map_err(|e| {
+                                DaimonError::Model(format!(
+                                    "Bedrock tool result message build error: {e}"
+                                ))
+                            })?,
                     );
                 }
             }
@@ -192,61 +216,64 @@ impl Bedrock {
                 CachePointBlock::builder()
                     .r#type(CachePointType::Default)
                     .build()
-                    .expect("valid cache point block"),
+                    .map_err(|e| {
+                        DaimonError::Model(format!("Bedrock cache point build error: {e}"))
+                    })?,
             ));
         }
 
-        (system_blocks, messages)
+        Ok((system_blocks, messages))
     }
 
+    /// Builds the tool configuration for a Converse call.
+    ///
+    /// Builder failures are propagated as [`DaimonError::Model`] rather than
+    /// panicking; see [`Bedrock::build_messages`].
     fn build_tool_config(
         request: &ChatRequest,
         use_prompt_caching: bool,
-    ) -> Option<ToolConfiguration> {
+    ) -> Result<Option<ToolConfiguration>> {
         if request.tools.is_empty() {
-            return None;
+            return Ok(None);
         }
 
-        let tools: Vec<aws_sdk_bedrockruntime::types::Tool> = request
-            .tools
-            .iter()
-            .map(|spec| {
-                let schema_doc = json_to_document(&spec.parameters);
-                aws_sdk_bedrockruntime::types::Tool::ToolSpec(
-                    ToolSpecification::builder()
-                        .name(&spec.name)
-                        .description(&spec.description)
-                        .input_schema(ToolInputSchema::Json(schema_doc))
-                        .build()
-                        .expect("valid tool spec"),
-                )
-            })
-            .collect();
-
         let mut builder = ToolConfiguration::builder();
-        for tool in tools {
-            builder = builder.tools(tool);
+        for spec in &request.tools {
+            let schema_doc = json_to_document(&spec.parameters);
+            let tool_spec = ToolSpecification::builder()
+                .name(&spec.name)
+                .description(&spec.description)
+                .input_schema(ToolInputSchema::Json(schema_doc))
+                .build()
+                .map_err(|e| {
+                    DaimonError::Model(format!(
+                        "Bedrock tool spec build error for '{}': {e}",
+                        spec.name
+                    ))
+                })?;
+            builder = builder.tools(aws_sdk_bedrockruntime::types::Tool::ToolSpec(tool_spec));
         }
         if use_prompt_caching {
             builder = builder.tools(aws_sdk_bedrockruntime::types::Tool::CachePoint(
                 CachePointBlock::builder()
                     .r#type(CachePointType::Default)
                     .build()
-                    .expect("valid cache point block"),
+                    .map_err(|e| {
+                        DaimonError::Model(format!("Bedrock cache point build error: {e}"))
+                    })?,
             ));
         }
-        Some(builder.build().expect("valid tool config"))
+        let config = builder
+            .build()
+            .map_err(|e| DaimonError::Model(format!("Bedrock tool config build error: {e}")))?;
+        Ok(Some(config))
     }
 
     fn parse_converse_output(
         &self,
         output: aws_sdk_bedrockruntime::operation::converse::ConverseOutput,
     ) -> Result<ChatResponse> {
-        let stop_reason = match *output.stop_reason() {
-            aws_sdk_bedrockruntime::types::StopReason::ToolUse => StopReason::ToolUse,
-            aws_sdk_bedrockruntime::types::StopReason::MaxTokens => StopReason::MaxTokens,
-            _ => StopReason::EndTurn,
-        };
+        let stop_reason = map_stop_reason(output.stop_reason());
 
         let mut text_content = String::new();
         let mut tool_calls = Vec::new();
@@ -310,14 +337,41 @@ pub(crate) fn modern_https_client() -> aws_smithy_runtime_api::client::http::Sha
         .build_https()
 }
 
-fn is_retryable_error(err: impl std::fmt::Display) -> bool {
-    let s = err.to_string();
-    let s_lower = s.to_lowercase();
-    s_lower.contains("throttl")
-        || s_lower.contains("service unavailable")
-        || s_lower.contains("internal server")
-        || s.contains("503")
-        || s.contains("429")
+/// Maps the Converse API's stop reason onto the framework's [`StopReason`].
+///
+/// Guardrail interventions and content filtering both surface as
+/// [`StopReason::ContentFiltered`] so callers can distinguish a blocked
+/// response from a natural end of turn.
+fn map_stop_reason(reason: &aws_sdk_bedrockruntime::types::StopReason) -> StopReason {
+    use aws_sdk_bedrockruntime::types::StopReason as AwsStopReason;
+    match reason {
+        AwsStopReason::ToolUse => StopReason::ToolUse,
+        AwsStopReason::MaxTokens => StopReason::MaxTokens,
+        AwsStopReason::GuardrailIntervened | AwsStopReason::ContentFiltered => {
+            StopReason::ContentFiltered
+        }
+        _ => StopReason::EndTurn,
+    }
+}
+
+/// Returns whether an AWS SDK error is transient and worth retrying.
+///
+/// Inspects the typed service-error code (via [`ProvideErrorMetadata`])
+/// instead of string-matching the rendered message, which broke whenever the
+/// SDK changed its `Display` output. Transport-level errors without a service
+/// code are not retried.
+fn is_retryable_error(err: &impl ProvideErrorMetadata) -> bool {
+    matches!(
+        err.code(),
+        Some(
+            "ThrottlingException"
+                | "TooManyRequestsException"
+                | "ServiceUnavailableException"
+                | "InternalServerException"
+                | "ModelTimeoutException"
+                | "ModelNotReadyException"
+        )
+    )
 }
 
 impl Model for Bedrock {
@@ -330,8 +384,8 @@ impl Model for Bedrock {
         let client = self.get_client().await?;
         tracing::debug!("obtained Bedrock client");
 
-        let (system_blocks, messages) = Self::build_messages(request, self.use_prompt_caching);
-        let tool_config = Self::build_tool_config(request, self.use_prompt_caching);
+        let (system_blocks, messages) = Self::build_messages(request, self.use_prompt_caching)?;
+        let tool_config = Self::build_tool_config(request, self.use_prompt_caching)?;
         tracing::debug!(
             system_blocks = system_blocks.len(),
             message_count = messages.len(),
@@ -378,18 +432,19 @@ impl Model for Bedrock {
                     return self.parse_converse_output(output);
                 }
                 Err(e) => {
+                    let retryable = is_retryable_error(&e);
                     last_error = Some(e.to_string());
-                    if is_retryable_error(e.to_string()) && attempt < self.max_retries {
-                        let delay_ms = 100u64
-                            .saturating_mul(2u64.saturating_pow(attempt))
-                            .min(30_000);
+                    if retryable && attempt < self.max_retries {
+                        // Shared jittered exponential backoff, same policy as
+                        // every other provider.
+                        let delay = daimon_core::stream_util::backoff_delay(attempt, None);
                         tracing::debug!(
                             attempt = attempt + 1,
                             max_retries = self.max_retries,
-                            delay_ms,
+                            delay_ms = delay.as_millis(),
                             "retryable error, backing off"
                         );
-                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                        tokio::time::sleep(delay).await;
                     } else {
                         return Err(DaimonError::Model(format!(
                             "Bedrock Converse error: {}",
@@ -411,8 +466,8 @@ impl Model for Bedrock {
         let client = self.get_client().await?;
         tracing::debug!("obtained Bedrock client for streaming");
 
-        let (system_blocks, messages) = Self::build_messages(request, self.use_prompt_caching);
-        let tool_config = Self::build_tool_config(request, self.use_prompt_caching);
+        let (system_blocks, messages) = Self::build_messages(request, self.use_prompt_caching)?;
+        let tool_config = Self::build_tool_config(request, self.use_prompt_caching)?;
         tracing::debug!(
             system_blocks = system_blocks.len(),
             message_count = messages.len(),
@@ -421,40 +476,65 @@ impl Model for Bedrock {
             "built request messages for stream"
         );
 
-        let mut req_builder = client.converse_stream().model_id(&self.model_id);
+        // Retry only the initial ConverseStream handshake — once the event
+        // stream is established, mid-stream failures must never be retried
+        // (the consumer has already observed a partial response).
+        let mut event_stream = None;
+        for attempt in 0..=self.max_retries {
+            let mut req_builder = client.converse_stream().model_id(&self.model_id);
 
-        for block in system_blocks {
-            req_builder = req_builder.system(block);
-        }
-        for msg in messages {
-            req_builder = req_builder.messages(msg);
-        }
-        if let Some(tc) = tool_config {
-            req_builder = req_builder.tool_config(tc);
-        }
+            for block in system_blocks.clone() {
+                req_builder = req_builder.system(block);
+            }
+            for msg in messages.clone() {
+                req_builder = req_builder.messages(msg);
+            }
+            if let Some(ref tc) = tool_config {
+                req_builder = req_builder.tool_config(tc.clone());
+            }
 
-        let mut inference_config = InferenceConfiguration::builder();
-        if let Some(temp) = request.temperature {
-            inference_config = inference_config.temperature(temp);
-        }
-        if let Some(max_tok) = request.max_tokens {
-            inference_config = inference_config.max_tokens(max_tok as i32);
-        }
-        req_builder = req_builder.inference_config(inference_config.build());
+            let mut inference_config = InferenceConfiguration::builder();
+            if let Some(temp) = request.temperature {
+                inference_config = inference_config.temperature(temp);
+            }
+            if let Some(max_tok) = request.max_tokens {
+                inference_config = inference_config.max_tokens(max_tok as i32);
+            }
+            req_builder = req_builder.inference_config(inference_config.build());
 
-        if let (Some(id), Some(version)) = (&self.guardrail_id, &self.guardrail_version) {
-            let guardrail_config = GuardrailStreamConfiguration::builder()
-                .guardrail_identifier(id)
-                .guardrail_version(version)
-                .build();
-            req_builder = req_builder.guardrail_config(guardrail_config);
-            tracing::debug!(guardrail_id = %id, "applied guardrail config for stream");
-        }
+            if let (Some(id), Some(version)) = (&self.guardrail_id, &self.guardrail_version) {
+                let guardrail_config = GuardrailStreamConfiguration::builder()
+                    .guardrail_identifier(id)
+                    .guardrail_version(version)
+                    .build();
+                req_builder = req_builder.guardrail_config(guardrail_config);
+                tracing::debug!(guardrail_id = %id, "applied guardrail config for stream");
+            }
 
-        let mut event_stream = req_builder
-            .send()
-            .await
-            .map_err(|e| DaimonError::Model(format!("Bedrock ConverseStream error: {e}")))?;
+            match req_builder.send().await {
+                Ok(stream) => {
+                    event_stream = Some(stream);
+                    break;
+                }
+                Err(e) => {
+                    if is_retryable_error(&e) && attempt < self.max_retries {
+                        let delay = daimon_core::stream_util::backoff_delay(attempt, None);
+                        tracing::debug!(
+                            attempt = attempt + 1,
+                            max_retries = self.max_retries,
+                            delay_ms = delay.as_millis(),
+                            "retryable error on stream handshake, backing off"
+                        );
+                        tokio::time::sleep(delay).await;
+                    } else {
+                        return Err(DaimonError::Model(format!(
+                            "Bedrock ConverseStream error: {e}"
+                        )));
+                    }
+                }
+            }
+        }
+        let mut event_stream = event_stream.expect("loop breaks with a stream or returns an error");
 
         tracing::debug!("stream established, processing events");
 
@@ -515,10 +595,34 @@ impl Model for Bedrock {
                             yield StreamEvent::ToolCallEnd { id };
                         }
                     }
-                    ConverseStreamOutput::MessageStop(_) => {
+                    ConverseStreamOutput::MessageStop(stop) => {
+                        // `StreamEvent::Done` carries no stop reason, so an
+                        // abnormal termination surfaces as an in-band Error —
+                        // the only channel that keeps a guardrail/content
+                        // block from ending the stream indistinguishably from
+                        // a normal turn.
+                        if map_stop_reason(stop.stop_reason()) == StopReason::ContentFiltered {
+                            yield StreamEvent::Error(format!(
+                                "Bedrock blocked the response (stop_reason={:?})",
+                                stop.stop_reason()
+                            ));
+                        }
                         yield StreamEvent::Done;
                     }
-                    _ => {}
+                    ConverseStreamOutput::Metadata(meta) => {
+                        // Provider-reported usage for the completed stream.
+                        // Done cannot carry it, so record it for diagnostics.
+                        if let Some(usage) = meta.usage() {
+                            tracing::debug!(
+                                input_tokens = usage.input_tokens(),
+                                output_tokens = usage.output_tokens(),
+                                "Bedrock stream usage (metadata event)"
+                            );
+                        }
+                    }
+                    other => {
+                        tracing::debug!(event = ?other, "ignoring unhandled Bedrock stream event");
+                    }
                 }
             }
         };
@@ -593,8 +697,8 @@ mod tests {
 
     #[test]
     fn test_bedrock_new() {
-        let model = Bedrock::new("us.anthropic.claude-sonnet-4-20250514");
-        assert_eq!(model.model_id, "us.anthropic.claude-sonnet-4-20250514");
+        let model = Bedrock::new("us.anthropic.claude-sonnet-5");
+        assert_eq!(model.model_id, "us.anthropic.claude-sonnet-5");
         assert!(model.client.is_none());
     }
 
@@ -638,7 +742,7 @@ mod tests {
             temperature: None,
             max_tokens: None,
         };
-        let (system, messages) = Bedrock::build_messages(&request, false);
+        let (system, messages) = Bedrock::build_messages(&request, false).unwrap();
         assert_eq!(system.len(), 1);
         assert_eq!(messages.len(), 1);
     }
@@ -659,7 +763,7 @@ mod tests {
             temperature: None,
             max_tokens: None,
         };
-        let (_, messages) = Bedrock::build_messages(&request, false);
+        let (_, messages) = Bedrock::build_messages(&request, false).unwrap();
         assert_eq!(messages.len(), 3);
     }
 
@@ -671,7 +775,7 @@ mod tests {
             temperature: None,
             max_tokens: None,
         };
-        let (system, _) = Bedrock::build_messages(&request, true);
+        let (system, _) = Bedrock::build_messages(&request, true).unwrap();
         assert_eq!(system.len(), 2, "should have text + cache point");
     }
 
@@ -683,7 +787,7 @@ mod tests {
             temperature: None,
             max_tokens: None,
         };
-        let (system, _) = Bedrock::build_messages(&request, true);
+        let (system, _) = Bedrock::build_messages(&request, true).unwrap();
         assert!(system.is_empty(), "no cache point when no system prompt");
     }
 
@@ -808,7 +912,11 @@ mod tests {
             temperature: None,
             max_tokens: None,
         };
-        assert!(Bedrock::build_tool_config(&request, false).is_none());
+        assert!(
+            Bedrock::build_tool_config(&request, false)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -823,12 +931,67 @@ mod tests {
             temperature: None,
             max_tokens: None,
         };
-        assert!(Bedrock::build_tool_config(&request, false).is_some());
+        assert!(
+            Bedrock::build_tool_config(&request, false)
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]
     fn test_with_prompt_caching() {
         let model = Bedrock::new("test").with_prompt_caching();
         assert!(model.use_prompt_caching);
+    }
+
+    #[test]
+    fn test_map_stop_reason_guardrail_and_filter_map_to_content_filtered() {
+        use aws_sdk_bedrockruntime::types::StopReason as AwsStopReason;
+        assert_eq!(
+            map_stop_reason(&AwsStopReason::GuardrailIntervened),
+            StopReason::ContentFiltered
+        );
+        assert_eq!(
+            map_stop_reason(&AwsStopReason::ContentFiltered),
+            StopReason::ContentFiltered
+        );
+        assert_eq!(
+            map_stop_reason(&AwsStopReason::EndTurn),
+            StopReason::EndTurn
+        );
+        assert_eq!(
+            map_stop_reason(&AwsStopReason::ToolUse),
+            StopReason::ToolUse
+        );
+        assert_eq!(
+            map_stop_reason(&AwsStopReason::MaxTokens),
+            StopReason::MaxTokens
+        );
+    }
+
+    #[test]
+    fn test_is_retryable_error_uses_typed_codes() {
+        use aws_sdk_bedrockruntime::operation::converse::ConverseError;
+        use aws_sdk_bedrockruntime::types::error::{ThrottlingException, ValidationException};
+        use aws_smithy_types::error::ErrorMetadata;
+
+        // The wire deserializer stamps the service error code into the
+        // metadata; mirror that here so the classification matches real
+        // responses.
+        let throttled = ConverseError::ThrottlingException(
+            ThrottlingException::builder()
+                .message("slow down")
+                .meta(ErrorMetadata::builder().code("ThrottlingException").build())
+                .build(),
+        );
+        assert!(is_retryable_error(&throttled));
+
+        let invalid = ConverseError::ValidationException(
+            ValidationException::builder()
+                .message("bad input")
+                .meta(ErrorMetadata::builder().code("ValidationException").build())
+                .build(),
+        );
+        assert!(!is_retryable_error(&invalid));
     }
 }

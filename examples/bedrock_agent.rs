@@ -8,7 +8,7 @@ async fn main() -> daimon::Result<()> {
         .init();
 
     let agent = Agent::builder()
-        .model(Bedrock::new("us.anthropic.claude-sonnet-4-20250514").with_region("us-east-1"))
+        .model(Bedrock::new("us.anthropic.claude-sonnet-5").with_region("us-east-1"))
         .system_prompt("You are a helpful assistant. Be concise.")
         .build()?;
 

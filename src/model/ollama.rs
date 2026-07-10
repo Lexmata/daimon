@@ -11,6 +11,8 @@
 //! let model = Ollama::new("llama3.1");
 //! ```
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use reqwest::Client;
@@ -32,6 +34,37 @@ pub struct Ollama {
     client: Client,
     timeout: Duration,
     keep_alive: Option<String>,
+    /// Client-wide monotonic counter for synthesized tool-call ids.
+    ///
+    /// Ollama does not assign tool-call ids, so this provider synthesizes
+    /// them as `ollama_tc_{seq}_{name}`. The counter is shared by the
+    /// streaming and non-streaming paths so ids never collide across turns
+    /// of a conversation (a per-response index restarts at 0 every reply).
+    /// The sequence number precedes the name so the function name — which may
+    /// itself contain digits and underscores — is unambiguously recoverable
+    /// from an echoed `tool_call_id`.
+    tool_call_seq: Arc<AtomicU64>,
+}
+
+/// Prefix used for synthesized tool-call ids (`ollama_tc_{seq}_{name}`).
+const TOOL_CALL_ID_PREFIX: &str = "ollama_tc_";
+
+/// Synthesizes a tool-call id in the `ollama_tc_{seq}_{name}` format.
+fn make_tool_call_id(seq: u64, name: &str) -> String {
+    format!("{TOOL_CALL_ID_PREFIX}{seq}_{name}")
+}
+
+/// Recovers the function name from a synthetic `ollama_tc_{seq}_{name}` id.
+///
+/// Returns `None` when the id does not follow the synthetic format; callers
+/// then omit the `tool_name` field gracefully.
+fn tool_name_from_call_id(id: &str) -> Option<&str> {
+    let rest = id.strip_prefix(TOOL_CALL_ID_PREFIX)?;
+    let (seq, name) = rest.split_once('_')?;
+    if seq.is_empty() || !seq.bytes().all(|b| b.is_ascii_digit()) || name.is_empty() {
+        return None;
+    }
+    Some(name)
 }
 
 impl Ollama {
@@ -48,6 +81,7 @@ impl Ollama {
                 .expect("failed to build HTTP client"),
             timeout: Duration::from_secs(300),
             keep_alive: None,
+            tool_call_seq: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -138,7 +172,7 @@ impl Model for Ollama {
             .await
             .map_err(|e| DaimonError::Model(e.to_string()))?;
 
-        parse_response(response)
+        parse_response(response, &self.tool_call_seq)
     }
 
     #[tracing::instrument(skip_all, fields(model = %self.model))]
@@ -161,16 +195,13 @@ impl Model for Ollama {
             return Err(DaimonError::Model(format!("Ollama {status}: {text}")));
         }
 
+        let tool_call_seq = Arc::clone(&self.tool_call_seq);
         let stream = async_stream::try_stream! {
             use futures::StreamExt;
             use crate::model::line_buffer::LineBuffer;
 
             let mut byte_stream = resp.bytes_stream();
             let mut buffer = LineBuffer::new();
-            // Monotonic across the whole stream: Ollama emits one tool call per
-            // NDJSON message, so a per-message index resets every iteration and
-            // collides across messages. A stream-wide counter keeps ids unique.
-            let mut tool_call_seq: u64 = 0;
 
             while let Some(chunk) = byte_stream.next().await {
                 let chunk = chunk.map_err(|e| DaimonError::Model(e.to_string()))?;
@@ -189,8 +220,8 @@ impl Model for Ollama {
                     if let Some(ref msg) = parsed.message {
                         if !msg.tool_calls.is_empty() {
                             for tc in &msg.tool_calls {
-                                let id = format!("ollama_tc_{tool_call_seq}");
-                                tool_call_seq += 1;
+                                let seq = tool_call_seq.fetch_add(1, Ordering::Relaxed);
+                                let id = make_tool_call_id(seq, &tc.function.name);
                                 yield StreamEvent::ToolCallStart {
                                     id: id.clone(),
                                     name: tc.function.name.clone(),
@@ -228,8 +259,8 @@ impl Model for Ollama {
                     if let Some(ref msg) = parsed.message {
                         if !msg.tool_calls.is_empty() {
                             for tc in &msg.tool_calls {
-                                let id = format!("ollama_tc_{tool_call_seq}");
-                                tool_call_seq += 1;
+                                let seq = tool_call_seq.fetch_add(1, Ordering::Relaxed);
+                                let id = make_tool_call_id(seq, &tc.function.name);
                                 yield StreamEvent::ToolCallStart {
                                     id: id.clone(),
                                     name: tc.function.name.clone(),
@@ -275,6 +306,15 @@ fn convert_message(msg: &Message) -> serde_json::Value {
         obj["content"] = serde_json::Value::String(content.clone());
     }
 
+    // Newer Ollama versions use `tool_name` to attribute a tool result to the
+    // function that produced it. The name is recoverable from this provider's
+    // synthetic id format; for foreign ids the field is omitted gracefully.
+    if msg.role == Role::Tool
+        && let Some(name) = msg.tool_call_id.as_deref().and_then(tool_name_from_call_id)
+    {
+        obj["tool_name"] = serde_json::Value::String(name.to_string());
+    }
+
     if !msg.tool_calls.is_empty() {
         let calls: Vec<serde_json::Value> = msg
             .tool_calls
@@ -305,21 +345,26 @@ fn convert_tool_spec(spec: &ToolSpec) -> serde_json::Value {
     })
 }
 
-fn parse_response(resp: OllamaResponse) -> Result<ChatResponse> {
+fn parse_response(resp: OllamaResponse, tool_call_seq: &AtomicU64) -> Result<ChatResponse> {
     let msg = resp
         .message
         .ok_or_else(|| DaimonError::Model("missing message in Ollama response".into()))?;
 
     let has_tool_calls = !msg.tool_calls.is_empty();
 
+    // Ids draw from the client-wide counter shared with the streaming path,
+    // so parallel calls and repeated turns never collide (a per-response
+    // index restarted at 0 on every reply).
     let tool_calls: Vec<ToolCall> = msg
         .tool_calls
         .into_iter()
-        .enumerate()
-        .map(|(i, tc)| ToolCall {
-            id: format!("ollama_tc_{i}"),
-            name: tc.function.name,
-            arguments: tc.function.arguments,
+        .map(|tc| {
+            let seq = tool_call_seq.fetch_add(1, Ordering::Relaxed);
+            ToolCall {
+                id: make_tool_call_id(seq, &tc.function.name),
+                name: tc.function.name,
+                arguments: tc.function.arguments,
+            }
         })
         .collect();
 
@@ -454,7 +499,7 @@ mod tests {
             prompt_eval_count: Some(10),
             eval_count: Some(5),
         };
-        let result = parse_response(resp).unwrap();
+        let result = parse_response(resp, &AtomicU64::new(0)).unwrap();
         assert_eq!(result.message.content.as_deref(), Some("Hello!"));
         assert_eq!(result.stop_reason, StopReason::EndTurn);
         assert_eq!(result.usage.as_ref().unwrap().input_tokens, 10);
@@ -476,10 +521,73 @@ mod tests {
             prompt_eval_count: None,
             eval_count: None,
         };
-        let result = parse_response(resp).unwrap();
+        let result = parse_response(resp, &AtomicU64::new(0)).unwrap();
         assert_eq!(result.stop_reason, StopReason::ToolUse);
         assert_eq!(result.message.tool_calls.len(), 1);
         assert_eq!(result.message.tool_calls[0].name, "calc");
+        assert_eq!(result.message.tool_calls[0].id, "ollama_tc_0_calc");
+    }
+
+    #[test]
+    fn test_parse_response_ids_do_not_collide_across_turns() {
+        // The counter is client-wide: two responses parsed through the same
+        // model must not reuse ids (a per-response index restarted at 0).
+        let make_resp = || OllamaResponse {
+            message: Some(OllamaMessage {
+                content: None,
+                tool_calls: vec![OllamaToolCall {
+                    function: OllamaFunction {
+                        name: "calc".into(),
+                        arguments: serde_json::json!({}),
+                    },
+                }],
+            }),
+            done: true,
+            prompt_eval_count: None,
+            eval_count: None,
+        };
+        let seq = AtomicU64::new(0);
+        let first = parse_response(make_resp(), &seq).unwrap();
+        let second = parse_response(make_resp(), &seq).unwrap();
+        assert_ne!(
+            first.message.tool_calls[0].id, second.message.tool_calls[0].id,
+            "tool-call ids must be unique across turns"
+        );
+    }
+
+    #[test]
+    fn test_tool_name_from_call_id() {
+        assert_eq!(tool_name_from_call_id("ollama_tc_0_calc"), Some("calc"));
+        // Function names may contain underscores and digits.
+        assert_eq!(
+            tool_name_from_call_id("ollama_tc_12_web_search_v2"),
+            Some("web_search_v2")
+        );
+        assert_eq!(tool_name_from_call_id("ollama_tc_3"), None);
+        assert_eq!(tool_name_from_call_id("ollama_tc_x_calc"), None);
+        assert_eq!(tool_name_from_call_id("foreign-id"), None);
+    }
+
+    #[test]
+    fn test_convert_message_tool_result_includes_tool_name() {
+        // Newer Ollama uses `tool_name` for attribution; it is derived from
+        // the synthetic tool_call_id format.
+        let msg = Message::tool_result("ollama_tc_4_calc", "42");
+        let json = convert_message(&msg);
+        assert_eq!(json["role"], "tool");
+        assert_eq!(json["content"], "42");
+        assert_eq!(json["tool_name"], "calc");
+    }
+
+    #[test]
+    fn test_convert_message_tool_result_omits_tool_name_for_foreign_id() {
+        let msg = Message::tool_result("some-other-id", "42");
+        let json = convert_message(&msg);
+        assert_eq!(json["role"], "tool");
+        assert!(
+            json.get("tool_name").is_none(),
+            "tool_name must be omitted when the name cannot be derived: {json}"
+        );
     }
 
     #[test]

@@ -54,7 +54,7 @@ impl StatusMap {
 /// all clones share the same underlying channels and state.
 ///
 /// Terminal task statuses (which embed the full [`TaskResult`]) are retained
-/// for the most recent [`MAX_TERMINAL_STATUSES`] tasks only — a long-running
+/// for the most recent `MAX_TERMINAL_STATUSES` tasks only — a long-running
 /// process no longer accumulates every result forever. Querying an evicted
 /// task returns [`TaskStatus::Pending`], the same answer given for unknown
 /// task ids.
