@@ -12,6 +12,10 @@ use crate::DistanceMetric;
 /// A [`VectorStore`] backed by PostgreSQL with the pgvector extension.
 ///
 /// Use [`PgVectorStoreBuilder`](crate::PgVectorStoreBuilder) to construct.
+///
+/// Statements are prepared through deadpool's per-connection statement cache
+/// (`prepare_cached`), so the constant upsert/query/delete/count SQL is
+/// parsed and planned once per pooled connection instead of per call.
 pub struct PgVectorStore {
     pub(crate) pool: Pool,
     pub(crate) table: String,
@@ -114,8 +118,12 @@ impl VectorStore for PgVectorStore {
             self.table
         );
 
+        let stmt = client
+            .prepare_cached(&sql)
+            .await
+            .map_err(|e| DaimonError::Other(format!("pgvector prepare error: {e}")))?;
         client
-            .execute(&sql as &str, &[&id, &vec, &document.content, &metadata])
+            .execute(&stmt, &[&id, &vec, &document.content, &metadata])
             .await
             .map_err(|e| DaimonError::Other(format!("pgvector upsert error: {e}")))?;
 
@@ -171,8 +179,12 @@ impl VectorStore for PgVectorStore {
                 params.push(content);
                 params.push(metadata);
             }
+            let stmt = client
+                .prepare_cached(&sql)
+                .await
+                .map_err(|e| DaimonError::Other(format!("pgvector prepare error: {e}")))?;
             client
-                .execute(&sql as &str, &params)
+                .execute(&stmt, &params)
                 .await
                 .map_err(|e| DaimonError::Other(format!("pgvector upsert error: {e}")))?;
         }
@@ -205,8 +217,12 @@ impl VectorStore for PgVectorStore {
             self.table
         );
 
+        let stmt = client
+            .prepare_cached(&sql)
+            .await
+            .map_err(|e| DaimonError::Other(format!("pgvector prepare error: {e}")))?;
         let rows = client
-            .query(&sql as &str, &[&vec, &(top_k as i64)])
+            .query(&stmt, &[&vec, &(top_k as i64)])
             .await
             .map_err(|e| DaimonError::Other(format!("pgvector query error: {e}")))?;
 
@@ -238,8 +254,12 @@ impl VectorStore for PgVectorStore {
             .map_err(|e| DaimonError::Other(format!("pgvector pool error: {e}")))?;
 
         let sql = format!("DELETE FROM {} WHERE id = $1", self.table);
+        let stmt = client
+            .prepare_cached(&sql)
+            .await
+            .map_err(|e| DaimonError::Other(format!("pgvector prepare error: {e}")))?;
         let deleted = client
-            .execute(&sql as &str, &[&id])
+            .execute(&stmt, &[&id])
             .await
             .map_err(|e| DaimonError::Other(format!("pgvector delete error: {e}")))?;
 
@@ -254,8 +274,12 @@ impl VectorStore for PgVectorStore {
             .map_err(|e| DaimonError::Other(format!("pgvector pool error: {e}")))?;
 
         let sql = format!("SELECT COUNT(*) AS cnt FROM {}", self.table);
+        let stmt = client
+            .prepare_cached(&sql)
+            .await
+            .map_err(|e| DaimonError::Other(format!("pgvector prepare error: {e}")))?;
         let row = client
-            .query_one(&sql as &str, &[])
+            .query_one(&stmt, &[])
             .await
             .map_err(|e| DaimonError::Other(format!("pgvector count error: {e}")))?;
 
