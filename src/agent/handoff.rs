@@ -133,7 +133,7 @@ impl HandoffNetwork {
                 if let Some(ref usage) = response.usage {
                     total_usage.accumulate(usage);
                     if let Some(tracker) = tracker {
-                        tracker.record("default", usage);
+                        tracker.record(agent.model.model_id_erased(), usage);
                     }
                 }
 

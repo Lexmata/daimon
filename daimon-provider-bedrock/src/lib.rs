@@ -321,6 +321,10 @@ fn is_retryable_error(err: impl std::fmt::Display) -> bool {
 }
 
 impl Model for Bedrock {
+    fn model_id(&self) -> &str {
+        &self.model_id
+    }
+
     #[tracing::instrument(skip_all, fields(model = %self.model_id))]
     async fn generate(&self, request: &ChatRequest) -> Result<ChatResponse> {
         let client = self.get_client().await?;

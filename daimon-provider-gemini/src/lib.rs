@@ -240,6 +240,10 @@ impl Gemini {
 }
 
 impl Model for Gemini {
+    fn model_id(&self) -> &str {
+        &self.model_id
+    }
+
     #[tracing::instrument(skip_all, fields(model = %self.model_id))]
     async fn generate(&self, request: &ChatRequest) -> Result<ChatResponse> {
         let body = self.build_request_body(request);

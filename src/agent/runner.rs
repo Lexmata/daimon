@@ -407,7 +407,7 @@ impl Agent {
             );
             total_usage.accumulate(usage);
             if let Some(tracker) = tracker {
-                *total_cost += tracker.record("default", usage);
+                *total_cost += tracker.record(self.model.model_id_erased(), usage);
             }
         }
 
@@ -711,8 +711,15 @@ impl Agent {
                 let state = AgentState { iteration, max_iterations };
                 hooks.on_iteration_start_erased(&state).await?;
 
+                // Estimate covers text content plus tool-call argument
+                // payloads — tool results (Role::Tool content) and echoed
+                // tool_calls both count as model input.
                 let input_chars: usize = messages.iter().map(|m| {
-                    m.content.as_ref().map_or(0, |c| c.len())
+                    let content = m.content.as_ref().map_or(0, |c| c.len());
+                    let tool_args: usize = m.tool_calls.iter()
+                        .map(|tc| tc.arguments.to_string().len())
+                        .sum();
+                    content + tool_args
                 }).sum();
 
                 let mut request = ChatRequest {
@@ -765,8 +772,14 @@ impl Agent {
                     }
                 }
 
+                // Streamed tool-call arguments are model output too; without
+                // them tool-heavy runs systematically under-estimate.
+                let tool_arg_chars: usize = pending_tool_calls
+                    .values()
+                    .map(|(_name, args)| args.len())
+                    .sum();
                 let est_input_tokens = (input_chars / 4).max(1) as u32;
-                let est_output_tokens = (text_buf.len() / 4).max(1) as u32;
+                let est_output_tokens = ((text_buf.len() + tool_arg_chars) / 4).max(1) as u32;
                 let est_usage = Usage {
                     input_tokens: est_input_tokens,
                     output_tokens: est_output_tokens,
@@ -774,7 +787,7 @@ impl Agent {
                 };
                 let estimated_cost = cost_tracker
                     .as_ref()
-                    .map(|t| t.record("default", &est_usage))
+                    .map(|t| t.record(model.model_id_erased(), &est_usage))
                     .unwrap_or(0.0);
 
                 yield StreamEvent::Usage {
@@ -2261,5 +2274,51 @@ mod tests {
         assert_eq!(messages[0].role, crate::model::types::Role::User);
         assert_eq!(messages[0].content.as_deref(), Some("custom"));
         assert_eq!(messages[1].role, crate::model::types::Role::Assistant);
+    }
+
+    #[tokio::test]
+    async fn test_cost_recorded_against_real_model_id() {
+        // The tracker must be handed the provider's model id, not "default" —
+        // otherwise every per-model pricing row is unreachable and cost
+        // accounting silently uses the fallback rate.
+        use crate::cost::{CostModel, TokenDirection};
+        use std::sync::Mutex;
+
+        struct NamedModel;
+        impl Model for NamedModel {
+            fn model_id(&self) -> &str {
+                "test-model-9000"
+            }
+            async fn generate(&self, request: &ChatRequest) -> Result<ChatResponse> {
+                EchoModel.generate(request).await
+            }
+            async fn generate_stream(&self, request: &ChatRequest) -> Result<ResponseStream> {
+                EchoModel.generate_stream(request).await
+            }
+        }
+
+        struct RecordingCostModel(Arc<Mutex<Vec<String>>>);
+        impl CostModel for RecordingCostModel {
+            fn cost_per_token(&self, model_id: &str, _direction: TokenDirection) -> f64 {
+                self.0.lock().unwrap().push(model_id.to_string());
+                1.0e-6
+            }
+        }
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let agent = Agent::builder()
+            .model(NamedModel)
+            .cost_model(RecordingCostModel(seen.clone()))
+            .build()
+            .unwrap();
+
+        agent.prompt("hi").await.unwrap();
+
+        let seen = seen.lock().unwrap();
+        assert!(!seen.is_empty(), "cost model was never consulted");
+        assert!(
+            seen.iter().all(|m| m == "test-model-9000"),
+            "expected the provider model id, got {seen:?}"
+        );
     }
 }

@@ -104,6 +104,10 @@ impl Ollama {
 }
 
 impl Model for Ollama {
+    fn model_id(&self) -> &str {
+        &self.model
+    }
+
     #[tracing::instrument(skip_all, fields(model = %self.model))]
     async fn generate(&self, request: &ChatRequest) -> Result<ChatResponse> {
         let body = self.build_request_body(request, false);

@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Cost tracking (DAIM-13):**
+  - Costs are recorded against the provider's real model id instead of the
+    literal `"default"`, which made every per-model pricing row unreachable.
+    `Model` gains a defaulted `model_id()` method (non-breaking) that all
+    bundled providers override.
+  - The Anthropic pricing table was a model generation stale (Claude-3-era
+    Opus/Haiku rates); it now carries Fable/Mythos 5 ($10/$50), Opus 4.x
+    ($5/$25), Haiku 4.5 ($1/$5), and keeps legacy Claude 3 rates for
+    3.x model ids.
+  - The streaming usage estimate now counts tool-call argument payloads in
+    both directions instead of only message text, removing a systematic
+    under-estimate on tool-heavy runs.
 - **Agent core (DAIM-8, breaking):**
   - Output guardrails now run *before* the final assistant message is
     persisted in the non-streaming path, matching the streaming path:
