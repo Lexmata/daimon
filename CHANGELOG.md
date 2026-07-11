@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-07-11
+
 ### Added
 
 - **CI & test coverage (DAIM-15):** CI now tests and lints the whole
@@ -729,7 +731,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `commitlint.toml` for Conventional Commits enforcement.
 - `rustfmt.toml` and `clippy.toml` for consistent code style.
 
-[Unreleased]: https://github.com/Lexmata/daimon/compare/v0.18.1...HEAD
+[Unreleased]: https://github.com/Lexmata/daimon/compare/v0.19.0...HEAD
+[0.19.0]: https://github.com/Lexmata/daimon/compare/v0.18.1...v0.19.0
 [0.18.1]: https://github.com/Lexmata/daimon/compare/v0.18.0...v0.18.1
 [0.18.0]: https://github.com/Lexmata/daimon/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/Lexmata/daimon/compare/v0.16.0...v0.17.0
