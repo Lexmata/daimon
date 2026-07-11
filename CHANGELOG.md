@@ -7,6 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-07-11
+
+### Added
+
+- **Local model providers (DAIM-22):** new `daimon-provider-local` crate
+  consolidates every locally-hosted model runtime: `Ollama` (moved from the
+  facade, unchanged behavior), `LlamaCpp` (absorbed from
+  `daimon-provider-llamacpp`), new `LlamaRs` (targets
+  [llama-rs](https://github.com/Lexmata/llama-rs)'s OpenAI-compatible
+  server), and new `OpenAiCompatible` (any other OpenAI-compatible local
+  server — vLLM, LM Studio, llamafile, LocalAI). `LlamaCpp`, `LlamaRs`, and
+  `OpenAiCompatible` share one HTTP client core (`openai_compat`) for
+  request shaping, SSE parsing, retry, and error surfacing; llama.cpp's
+  `content_filter` finish reason now maps to `StopReason::ContentFiltered`
+  like the other providers (previously unmapped). New features: `llamars`,
+  `local` (all four at once). `daimon-provider-llamacpp` is deprecated in
+  favor of `daimon-provider-local`; its old public items are re-exported
+  with a `#[deprecated]` note for one release.
+- **Tiered memory subsystems (DAIM-23):** additive, non-breaking extension
+  of the memory model beyond the linear conversation log, generalizing the
+  MemGPT/Letta-style tiered memory pattern:
+  - `CoreMemory` (`daimon_core::core_memory`): a small, bounded,
+    always-in-context set of labeled, editable blocks (persona, user
+    preferences) rendered into a system prompt via `render()`/`render_erased()`.
+    Built-ins: `InMemoryCoreMemory`, `SqliteCoreMemory` (feature = "sqlite").
+  - `ArchivalMemory` (`daimon_core::archival_memory`): explicit write/search
+    over long-term facts, decoupled from the turn-by-turn conversation log —
+    facts are retrieved by relevance, not recency. Built-ins:
+    `InMemoryArchivalMemory` (lexical substring scoring, no extra deps),
+    `VectorArchivalMemory<V, E>` (adapts any existing `VectorStore` +
+    `EmbeddingModel` for semantic search, reusing the RAG stack instead of
+    duplicating it), `SqliteArchivalMemory` (FTS5, feature = "sqlite").
+  - `EpisodicMemory` (`daimon_core::episodic_memory`): a structured,
+    timestamped event log distinct from chat messages, queryable by event
+    type and time range via `EpisodicQuery`. Built-ins:
+    `InMemoryEpisodicMemory`, `SqliteEpisodicMemory` (feature = "sqlite").
+  - `TieredMemory` composes a conversation `Memory` with optional core,
+    archival, and episodic tiers behind one type. It implements `Memory`
+    itself (delegating to the conversation tier) for drop-in use with
+    `AgentBuilder::memory()`, while exposing `core()`/`archival()`/`episodic()`
+    accessors and `system_prompt_block()` for consumers that want the richer
+    APIs directly. `Memory::clear()` on `TieredMemory` only clears the
+    conversation tier — archival facts and episodic events are long-term by
+    design.
+  - All three new traits follow the existing `Memory`/`VectorStore`
+    conventions: object-safe `Erased*` wrappers, `Shared*` `Arc` aliases,
+    and `daimon_core::error::Result` throughout.
+  - Not included: a knowledge-graph memory tier (no existing graph primitive
+    in daimon to build on, and a correct implementation is a large project
+    in its own right) and an LLM-driven archival consolidation job (the
+    conversation-side `SummaryMemory` already covers the analogous
+    LLM-summarization need; `ArchivalMemory` is a natural composition target
+    for a future consolidation job, but building the job itself is left for
+    later).
+  - The existing `Memory` trait, its built-in implementations
+    (`SlidingWindowMemory`, `TokenWindowMemory`, `SummaryMemory`,
+    `SqliteMemory`, `RedisMemory`), and the `VectorStore` trait are
+    unchanged.
+
 ## [0.20.0] - 2026-07-11
 
 > Version 0.19.0 is skipped: a stale facade-only `daimon@0.19.0` was
@@ -734,7 +793,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `commitlint.toml` for Conventional Commits enforcement.
 - `rustfmt.toml` and `clippy.toml` for consistent code style.
 
-[Unreleased]: https://github.com/Lexmata/daimon/compare/v0.20.0...HEAD
+[Unreleased]: https://github.com/Lexmata/daimon/compare/v0.21.0...HEAD
+[0.21.0]: https://github.com/Lexmata/daimon/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/Lexmata/daimon/compare/v0.18.1...v0.20.0
 [0.18.1]: https://github.com/Lexmata/daimon/compare/v0.18.0...v0.18.1
 [0.18.0]: https://github.com/Lexmata/daimon/compare/v0.17.0...v0.18.0

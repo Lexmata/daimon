@@ -1,0 +1,28 @@
+[package]
+name = "daimon-provider-local"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Locally-hosted model providers (Ollama, llama.cpp, llama-rs, OpenAI-compatible) for the Daimon AI agent framework"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/daimon-provider-local"
+keywords = ["ai", "agent", "llm", "local", "ollama"]
+categories = ["asynchronous", "api-bindings"]
+
+[package.metadata.docs.rs]
+all-features = true
+
+[features]
+default = []
+
+[dependencies]
+daimon-core = { workspace = true }
+tokio = { workspace = true, features = ["rt", "time", "sync"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+async-stream = { workspace = true }
+futures = { workspace = true }
+reqwest = { workspace = true }

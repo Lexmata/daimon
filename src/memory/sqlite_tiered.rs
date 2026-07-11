@@ -1,0 +1,760 @@
+//! SQLite-backed core, archival, and episodic memory.
+//!
+//! Requires the `sqlite` feature flag. Follows the same connection/session
+//! pattern as [`SqliteMemory`](super::SqliteMemory): a `tokio::sync::Mutex`-guarded
+//! `rusqlite::Connection`, all operations run via `spawn_blocking`.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use rusqlite::{Connection, OptionalExtension, params};
+use serde_json::Value;
+use tokio::sync::Mutex;
+
+use crate::error::{DaimonError, Result};
+use crate::memory::{ArchivalMemory, ArchivalRecord, CoreMemory, CoreMemoryBlock};
+use crate::memory::{EpisodicEvent, EpisodicMemory, EpisodicQuery};
+
+async fn spawn_blocking_err<T: Send + 'static>(
+    f: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<T> {
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| DaimonError::Other(format!("spawn_blocking: {e}")))?
+}
+
+// ---------------------------------------------------------------------
+// Core memory
+// ---------------------------------------------------------------------
+
+/// SQLite-backed [`CoreMemory`]. Persists blocks keyed by `(session_id, label)`.
+pub struct SqliteCoreMemory {
+    conn: Arc<Mutex<Connection>>,
+    session_id: String,
+}
+
+impl SqliteCoreMemory {
+    /// Opens (or creates) a SQLite database at the given path.
+    pub async fn open(path: impl Into<String>) -> Result<Self> {
+        let path = path.into();
+        let conn = tokio::task::spawn_blocking(move || {
+            Connection::open(&path).map_err(|e| DaimonError::Other(format!("sqlite open: {e}")))
+        })
+        .await
+        .map_err(|e| DaimonError::Other(format!("spawn_blocking: {e}")))??;
+        Self::from_connection(conn, default_session_id()).await
+    }
+
+    /// Creates an in-memory SQLite database (data lost when dropped).
+    pub async fn in_memory() -> Result<Self> {
+        let conn = Connection::open_in_memory()
+            .map_err(|e| DaimonError::Other(format!("sqlite open: {e}")))?;
+        Self::from_connection(conn, default_session_id()).await
+    }
+
+    /// Sets a custom session ID for partitioning core memory blocks.
+    pub fn with_session_id(mut self, id: impl Into<String>) -> Self {
+        self.session_id = id.into();
+        self
+    }
+
+    async fn from_connection(conn: Connection, session_id: String) -> Result<Self> {
+        let conn = Arc::new(Mutex::new(conn));
+        let mem = Self { conn, session_id };
+        mem.create_tables().await?;
+        Ok(mem)
+    }
+
+    async fn create_tables(&self) -> Result<()> {
+        let conn = self.conn.clone();
+        spawn_blocking_err(move || {
+            let conn = conn.blocking_lock();
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS core_memory_blocks (
+                    session_id TEXT NOT NULL,
+                    label TEXT NOT NULL,
+                    value TEXT NOT NULL,
+                    char_limit INTEGER,
+                    PRIMARY KEY (session_id, label)
+                );",
+            )
+            .map_err(|e| DaimonError::Other(format!("sqlite create tables: {e}")))
+        })
+        .await
+    }
+}
+
+fn check_limit(label: &str, value: &str, limit: Option<i64>) -> Result<()> {
+    if let Some(limit) = limit
+        && value.chars().count() as i64 > limit
+    {
+        return Err(DaimonError::Other(format!(
+            "core memory block '{label}' exceeds limit of {limit} characters"
+        )));
+    }
+    Ok(())
+}
+
+impl CoreMemory for SqliteCoreMemory {
+    async fn blocks(&self) -> Result<Vec<CoreMemoryBlock>> {
+        let conn = self.conn.clone();
+        let session_id = self.session_id.clone();
+        spawn_blocking_err(move || {
+            let conn = conn.blocking_lock();
+            let mut stmt = conn
+                .prepare(
+                    "SELECT label, value, char_limit FROM core_memory_blocks
+                     WHERE session_id = ?1 ORDER BY rowid ASC",
+                )
+                .map_err(|e| DaimonError::Other(format!("sqlite prepare: {e}")))?;
+            let rows = stmt
+                .query_map(params![session_id], |row| {
+                    Ok(CoreMemoryBlock {
+                        label: row.get(0)?,
+                        value: row.get(1)?,
+                        limit: row.get::<_, Option<i64>>(2)?.map(|n| n as usize),
+                    })
+                })
+                .map_err(|e| DaimonError::Other(format!("sqlite query: {e}")))?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|e| DaimonError::Other(format!("sqlite row: {e}")))
+        })
+        .await
+    }
+
+    async fn put_block(&self, block: CoreMemoryBlock) -> Result<()> {
+        check_limit(&block.label, &block.value, block.limit.map(|l| l as i64))?;
+        let conn = self.conn.clone();
+        let session_id = self.session_id.clone();
+        spawn_blocking_err(move || {
+            let conn = conn.blocking_lock();
+            conn.execute(
+                "INSERT INTO core_memory_blocks (session_id, label, value, char_limit)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(session_id, label) DO UPDATE SET value = excluded.value, char_limit = excluded.char_limit",
+                params![session_id, block.label, block.value, block.limit.map(|l| l as i64)],
+            )
+            .map_err(|e| DaimonError::Other(format!("sqlite upsert: {e}")))?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn append_block(&self, label: &str, text: &str) -> Result<()> {
+        let conn = self.conn.clone();
+        let session_id = self.session_id.clone();
+        let label = label.to_string();
+        let text = text.to_string();
+        spawn_blocking_err(move || {
+            let conn = conn.blocking_lock();
+            let existing: Option<(String, Option<i64>)> = conn
+                .query_row(
+                    "SELECT value, char_limit FROM core_memory_blocks WHERE session_id = ?1 AND label = ?2",
+                    params![session_id, label],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(|e| DaimonError::Other(format!("sqlite query: {e}")))?;
+
+            let (new_value, limit) = match existing {
+                Some((value, limit)) => (format!("{value}{text}"), limit),
+                None => (text.clone(), None),
+            };
+            check_limit(&label, &new_value, limit)?;
+
+            conn.execute(
+                "INSERT INTO core_memory_blocks (session_id, label, value, char_limit)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(session_id, label) DO UPDATE SET value = excluded.value",
+                params![session_id, label, new_value, limit],
+            )
+            .map_err(|e| DaimonError::Other(format!("sqlite upsert: {e}")))?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn remove_block(&self, label: &str) -> Result<bool> {
+        let conn = self.conn.clone();
+        let session_id = self.session_id.clone();
+        let label = label.to_string();
+        spawn_blocking_err(move || {
+            let conn = conn.blocking_lock();
+            let changed = conn
+                .execute(
+                    "DELETE FROM core_memory_blocks WHERE session_id = ?1 AND label = ?2",
+                    params![session_id, label],
+                )
+                .map_err(|e| DaimonError::Other(format!("sqlite delete: {e}")))?;
+            Ok(changed > 0)
+        })
+        .await
+    }
+}
+
+// ---------------------------------------------------------------------
+// Archival memory (FTS5)
+// ---------------------------------------------------------------------
+
+/// SQLite FTS5-backed [`ArchivalMemory`] for consumers without a vector
+/// store configured. Metadata is stored as a JSON blob.
+pub struct SqliteArchivalMemory {
+    conn: Arc<Mutex<Connection>>,
+    session_id: String,
+    next_id: std::sync::atomic::AtomicU64,
+}
+
+impl SqliteArchivalMemory {
+    /// Opens (or creates) a SQLite database at the given path.
+    pub async fn open(path: impl Into<String>) -> Result<Self> {
+        let path = path.into();
+        let conn = tokio::task::spawn_blocking(move || {
+            Connection::open(&path).map_err(|e| DaimonError::Other(format!("sqlite open: {e}")))
+        })
+        .await
+        .map_err(|e| DaimonError::Other(format!("spawn_blocking: {e}")))??;
+        Self::from_connection(conn, default_session_id()).await
+    }
+
+    /// Creates an in-memory SQLite database (data lost when dropped).
+    pub async fn in_memory() -> Result<Self> {
+        let conn = Connection::open_in_memory()
+            .map_err(|e| DaimonError::Other(format!("sqlite open: {e}")))?;
+        Self::from_connection(conn, default_session_id()).await
+    }
+
+    /// Sets a custom session ID for partitioning archival facts.
+    pub fn with_session_id(mut self, id: impl Into<String>) -> Self {
+        self.session_id = id.into();
+        self
+    }
+
+    async fn from_connection(conn: Connection, session_id: String) -> Result<Self> {
+        let conn = Arc::new(Mutex::new(conn));
+        let mem = Self {
+            conn,
+            session_id,
+            next_id: std::sync::atomic::AtomicU64::new(0),
+        };
+        mem.create_tables().await?;
+        Ok(mem)
+    }
+
+    async fn create_tables(&self) -> Result<()> {
+        let conn = self.conn.clone();
+        spawn_blocking_err(move || {
+            let conn = conn.blocking_lock();
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS archival_facts (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    metadata TEXT NOT NULL
+                );
+                CREATE VIRTUAL TABLE IF NOT EXISTS archival_facts_fts USING fts5(
+                    id UNINDEXED, session_id UNINDEXED, text
+                );",
+            )
+            .map_err(|e| DaimonError::Other(format!("sqlite create tables: {e}")))
+        })
+        .await
+    }
+}
+
+impl ArchivalMemory for SqliteArchivalMemory {
+    async fn insert(&self, text: &str, metadata: HashMap<String, Value>) -> Result<String> {
+        let id = format!(
+            "archival-{}",
+            self.next_id
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        let conn = self.conn.clone();
+        let session_id = self.session_id.clone();
+        let text = text.to_string();
+        let metadata_json = serde_json::to_string(&metadata)
+            .map_err(|e| DaimonError::Other(format!("serialize metadata: {e}")))?;
+        let id_clone = id.clone();
+        spawn_blocking_err(move || {
+            let conn = conn.blocking_lock();
+            conn.execute(
+                "INSERT INTO archival_facts (id, session_id, text, metadata) VALUES (?1, ?2, ?3, ?4)",
+                params![id_clone, session_id, text, metadata_json],
+            )
+            .map_err(|e| DaimonError::Other(format!("sqlite insert: {e}")))?;
+            conn.execute(
+                "INSERT INTO archival_facts_fts (id, session_id, text) VALUES (?1, ?2, ?3)",
+                params![id_clone, session_id, text],
+            )
+            .map_err(|e| DaimonError::Other(format!("sqlite fts insert: {e}")))?;
+            Ok(())
+        })
+        .await?;
+        Ok(id)
+    }
+
+    async fn search(&self, query: &str, top_k: usize) -> Result<Vec<ArchivalRecord>> {
+        if query.trim().is_empty() || top_k == 0 {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn.clone();
+        let session_id = self.session_id.clone();
+        // FTS5 query syntax treats bare terms as an implicit AND with
+        // special characters; quote each whitespace-split term so raw user
+        // text (punctuation, hyphens) doesn't break the query syntax.
+        let fts_query = query
+            .split_whitespace()
+            .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+
+        spawn_blocking_err(move || {
+            let conn = conn.blocking_lock();
+            let mut stmt = conn
+                .prepare(
+                    "SELECT f.id, f.text, f.metadata, bm25(archival_facts_fts) AS rank
+                     FROM archival_facts_fts fts
+                     JOIN archival_facts f ON f.id = fts.id
+                     WHERE archival_facts_fts MATCH ?1 AND fts.session_id = ?2
+                     ORDER BY rank LIMIT ?3",
+                )
+                .map_err(|e| DaimonError::Other(format!("sqlite prepare: {e}")))?;
+
+            let rows = stmt
+                .query_map(params![fts_query, session_id, top_k as i64], |row| {
+                    let id: String = row.get(0)?;
+                    let text: String = row.get(1)?;
+                    let metadata_json: String = row.get(2)?;
+                    // bm25() scores are negative and lower-is-better; expose
+                    // the negated value so higher-is-more-relevant holds
+                    // across all ArchivalMemory implementations.
+                    let rank: f64 = row.get(3)?;
+                    Ok((id, text, metadata_json, -rank))
+                })
+                .map_err(|e| DaimonError::Other(format!("sqlite query: {e}")))?;
+
+            let mut results = Vec::new();
+            for row in rows {
+                let (id, text, metadata_json, score) =
+                    row.map_err(|e| DaimonError::Other(format!("sqlite row: {e}")))?;
+                let metadata: HashMap<String, Value> = serde_json::from_str(&metadata_json)
+                    .map_err(|e| DaimonError::Other(format!("corrupted metadata JSON: {e}")))?;
+                results.push(ArchivalRecord {
+                    id,
+                    text,
+                    metadata,
+                    score: Some(score),
+                });
+            }
+            Ok(results)
+        })
+        .await
+    }
+
+    async fn delete(&self, id: &str) -> Result<bool> {
+        let conn = self.conn.clone();
+        let id = id.to_string();
+        spawn_blocking_err(move || {
+            let conn = conn.blocking_lock();
+            let changed = conn
+                .execute("DELETE FROM archival_facts WHERE id = ?1", params![id])
+                .map_err(|e| DaimonError::Other(format!("sqlite delete: {e}")))?;
+            conn.execute("DELETE FROM archival_facts_fts WHERE id = ?1", params![id])
+                .map_err(|e| DaimonError::Other(format!("sqlite fts delete: {e}")))?;
+            Ok(changed > 0)
+        })
+        .await
+    }
+
+    async fn count(&self) -> Result<usize> {
+        let conn = self.conn.clone();
+        let session_id = self.session_id.clone();
+        spawn_blocking_err(move || {
+            let conn = conn.blocking_lock();
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM archival_facts WHERE session_id = ?1",
+                    params![session_id],
+                    |row| row.get(0),
+                )
+                .map_err(|e| DaimonError::Other(format!("sqlite count: {e}")))?;
+            Ok(count as usize)
+        })
+        .await
+    }
+}
+
+// ---------------------------------------------------------------------
+// Episodic memory
+// ---------------------------------------------------------------------
+
+/// SQLite-backed [`EpisodicMemory`] event log.
+pub struct SqliteEpisodicMemory {
+    conn: Arc<Mutex<Connection>>,
+    session_id: String,
+    next_id: std::sync::atomic::AtomicU64,
+}
+
+impl SqliteEpisodicMemory {
+    /// Opens (or creates) a SQLite database at the given path.
+    pub async fn open(path: impl Into<String>) -> Result<Self> {
+        let path = path.into();
+        let conn = tokio::task::spawn_blocking(move || {
+            Connection::open(&path).map_err(|e| DaimonError::Other(format!("sqlite open: {e}")))
+        })
+        .await
+        .map_err(|e| DaimonError::Other(format!("spawn_blocking: {e}")))??;
+        Self::from_connection(conn, default_session_id()).await
+    }
+
+    /// Creates an in-memory SQLite database (data lost when dropped).
+    pub async fn in_memory() -> Result<Self> {
+        let conn = Connection::open_in_memory()
+            .map_err(|e| DaimonError::Other(format!("sqlite open: {e}")))?;
+        Self::from_connection(conn, default_session_id()).await
+    }
+
+    /// Sets a custom session ID for partitioning episodic events.
+    pub fn with_session_id(mut self, id: impl Into<String>) -> Self {
+        self.session_id = id.into();
+        self
+    }
+
+    async fn from_connection(conn: Connection, session_id: String) -> Result<Self> {
+        let conn = Arc::new(Mutex::new(conn));
+        let mem = Self {
+            conn,
+            session_id,
+            next_id: std::sync::atomic::AtomicU64::new(0),
+        };
+        mem.create_tables().await?;
+        Ok(mem)
+    }
+
+    async fn create_tables(&self) -> Result<()> {
+        let conn = self.conn.clone();
+        spawn_blocking_err(move || {
+            let conn = conn.blocking_lock();
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS episodic_events (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    timestamp_ms INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_episodic_session_ts
+                    ON episodic_events(session_id, timestamp_ms);",
+            )
+            .map_err(|e| DaimonError::Other(format!("sqlite create tables: {e}")))
+        })
+        .await
+    }
+}
+
+fn now_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
+}
+
+impl EpisodicMemory for SqliteEpisodicMemory {
+    async fn record(&self, event_type: &str, payload: Value) -> Result<String> {
+        let id = format!(
+            "event-{}",
+            self.next_id
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        let conn = self.conn.clone();
+        let session_id = self.session_id.clone();
+        let event_type = event_type.to_string();
+        let payload_json = serde_json::to_string(&payload)
+            .map_err(|e| DaimonError::Other(format!("serialize payload: {e}")))?;
+        let id_clone = id.clone();
+        let ts = now_ms();
+        spawn_blocking_err(move || {
+            let conn = conn.blocking_lock();
+            conn.execute(
+                "INSERT INTO episodic_events (id, session_id, event_type, payload, timestamp_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![id_clone, session_id, event_type, payload_json, ts],
+            )
+            .map_err(|e| DaimonError::Other(format!("sqlite insert: {e}")))?;
+            Ok(())
+        })
+        .await?;
+        Ok(id)
+    }
+
+    async fn query(&self, query: EpisodicQuery) -> Result<Vec<EpisodicEvent>> {
+        let conn = self.conn.clone();
+        let session_id = self.session_id.clone();
+        spawn_blocking_err(move || {
+            let conn = conn.blocking_lock();
+            let mut sql = String::from(
+                "SELECT id, event_type, payload, timestamp_ms FROM episodic_events WHERE session_id = ?1",
+            );
+            let mut bind_params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(session_id)];
+
+            if let Some(event_type) = &query.event_type {
+                sql.push_str(&format!(" AND event_type = ?{}", bind_params.len() + 1));
+                bind_params.push(Box::new(event_type.clone()));
+            }
+            if let Some(since) = query.since_ms {
+                sql.push_str(&format!(" AND timestamp_ms >= ?{}", bind_params.len() + 1));
+                bind_params.push(Box::new(since));
+            }
+            if let Some(until) = query.until_ms {
+                sql.push_str(&format!(" AND timestamp_ms <= ?{}", bind_params.len() + 1));
+                bind_params.push(Box::new(until));
+            }
+            // Break ties on identical millisecond timestamps by insertion
+            // order (rowid) so "most recent first" is deterministic even
+            // for events recorded in quick succession.
+            sql.push_str(" ORDER BY timestamp_ms DESC, rowid DESC");
+            if let Some(limit) = query.limit {
+                sql.push_str(&format!(" LIMIT {limit}"));
+            }
+
+            let mut stmt = conn
+                .prepare(&sql)
+                .map_err(|e| DaimonError::Other(format!("sqlite prepare: {e}")))?;
+            let param_refs: Vec<&dyn rusqlite::ToSql> =
+                bind_params.iter().map(|b| b.as_ref()).collect();
+
+            let rows = stmt
+                .query_map(param_refs.as_slice(), |row| {
+                    let id: String = row.get(0)?;
+                    let event_type: String = row.get(1)?;
+                    let payload_json: String = row.get(2)?;
+                    let timestamp_ms: i64 = row.get(3)?;
+                    Ok((id, event_type, payload_json, timestamp_ms))
+                })
+                .map_err(|e| DaimonError::Other(format!("sqlite query: {e}")))?;
+
+            let mut events = Vec::new();
+            for row in rows {
+                let (id, event_type, payload_json, timestamp_ms) =
+                    row.map_err(|e| DaimonError::Other(format!("sqlite row: {e}")))?;
+                let payload: Value = serde_json::from_str(&payload_json)
+                    .map_err(|e| DaimonError::Other(format!("corrupted payload JSON: {e}")))?;
+                events.push(EpisodicEvent {
+                    id,
+                    event_type,
+                    payload,
+                    timestamp_ms,
+                });
+            }
+            Ok(events)
+        })
+        .await
+    }
+
+    async fn clear(&self) -> Result<()> {
+        let conn = self.conn.clone();
+        let session_id = self.session_id.clone();
+        spawn_blocking_err(move || {
+            let conn = conn.blocking_lock();
+            conn.execute(
+                "DELETE FROM episodic_events WHERE session_id = ?1",
+                params![session_id],
+            )
+            .map_err(|e| DaimonError::Other(format!("sqlite delete: {e}")))?;
+            Ok(())
+        })
+        .await
+    }
+}
+
+/// Generates a session identifier, matching [`SqliteMemory`](super::SqliteMemory)'s scheme.
+fn default_session_id() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let pid = std::process::id();
+    let count = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let random = std::collections::hash_map::RandomState::new()
+        .build_hasher()
+        .finish();
+
+    format!("{ts:032x}-{pid:08x}-{count:016x}-{random:016x}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::memory::EpisodicQuery;
+
+    // --- CoreMemory ---
+
+    #[tokio::test]
+    async fn core_put_and_get_block() {
+        let mem = SqliteCoreMemory::in_memory().await.unwrap();
+        mem.put_block(CoreMemoryBlock::new("persona", "helpful"))
+            .await
+            .unwrap();
+        let blocks = mem.blocks().await.unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].value, "helpful");
+    }
+
+    #[tokio::test]
+    async fn core_put_block_overwrites() {
+        let mem = SqliteCoreMemory::in_memory().await.unwrap();
+        mem.put_block(CoreMemoryBlock::new("persona", "v1"))
+            .await
+            .unwrap();
+        mem.put_block(CoreMemoryBlock::new("persona", "v2"))
+            .await
+            .unwrap();
+        let blocks = mem.blocks().await.unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].value, "v2");
+    }
+
+    #[tokio::test]
+    async fn core_append_respects_limit() {
+        let mem = SqliteCoreMemory::in_memory().await.unwrap();
+        mem.put_block(CoreMemoryBlock::new("notes", "1234").with_limit(5))
+            .await
+            .unwrap();
+        mem.append_block("notes", "5").await.unwrap();
+        assert!(mem.append_block("notes", "6").await.is_err());
+        assert_eq!(mem.blocks().await.unwrap()[0].value, "12345");
+    }
+
+    #[tokio::test]
+    async fn core_remove_block() {
+        let mem = SqliteCoreMemory::in_memory().await.unwrap();
+        mem.put_block(CoreMemoryBlock::new("a", "x")).await.unwrap();
+        assert!(mem.remove_block("a").await.unwrap());
+        assert!(!mem.remove_block("a").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn core_session_isolation() {
+        let mem1 = SqliteCoreMemory::in_memory().await.unwrap();
+        let mem2 = SqliteCoreMemory {
+            conn: mem1.conn.clone(),
+            session_id: "other".into(),
+        };
+        mem1.put_block(CoreMemoryBlock::new("a", "1"))
+            .await
+            .unwrap();
+        assert!(mem2.blocks().await.unwrap().is_empty());
+    }
+
+    // --- ArchivalMemory ---
+
+    #[tokio::test]
+    async fn archival_insert_and_search() {
+        let mem = SqliteArchivalMemory::in_memory().await.unwrap();
+        let id = mem.insert("the sky is blue", HashMap::new()).await.unwrap();
+        mem.insert("grass is green", HashMap::new()).await.unwrap();
+
+        let results = mem.search("sky", 5).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, id);
+    }
+
+    #[tokio::test]
+    async fn archival_search_empty_query_returns_empty() {
+        let mem = SqliteArchivalMemory::in_memory().await.unwrap();
+        mem.insert("fact", HashMap::new()).await.unwrap();
+        assert!(mem.search("   ", 5).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn archival_delete_and_count() {
+        let mem = SqliteArchivalMemory::in_memory().await.unwrap();
+        let id = mem.insert("fact one", HashMap::new()).await.unwrap();
+        mem.insert("fact two", HashMap::new()).await.unwrap();
+        assert_eq!(mem.count().await.unwrap(), 2);
+        assert!(mem.delete(&id).await.unwrap());
+        assert_eq!(mem.count().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn archival_metadata_round_trips() {
+        let mem = SqliteArchivalMemory::in_memory().await.unwrap();
+        let mut metadata = HashMap::new();
+        metadata.insert("source".to_string(), Value::String("wiki".into()));
+        mem.insert("a fact", metadata).await.unwrap();
+        let results = mem.search("fact", 1).await.unwrap();
+        assert_eq!(results[0].metadata["source"], Value::String("wiki".into()));
+    }
+
+    #[tokio::test]
+    async fn archival_query_with_punctuation_does_not_error() {
+        let mem = SqliteArchivalMemory::in_memory().await.unwrap();
+        mem.insert("cost is $5.00 (approx)", HashMap::new())
+            .await
+            .unwrap();
+        let results = mem.search("$5.00 (approx)?", 5).await.unwrap();
+        assert!(!results.is_empty());
+    }
+
+    // --- EpisodicMemory ---
+
+    #[tokio::test]
+    async fn episodic_record_and_query() {
+        let mem = SqliteEpisodicMemory::in_memory().await.unwrap();
+        mem.record("login", serde_json::json!({"user": "a"}))
+            .await
+            .unwrap();
+        mem.record("logout", serde_json::json!({"user": "a"}))
+            .await
+            .unwrap();
+
+        let all = mem.query(EpisodicQuery::all()).await.unwrap();
+        assert_eq!(all.len(), 2);
+
+        let logins = mem
+            .query(EpisodicQuery::all().of_type("login"))
+            .await
+            .unwrap();
+        assert_eq!(logins.len(), 1);
+        assert_eq!(logins[0].payload["user"], "a");
+    }
+
+    #[tokio::test]
+    async fn episodic_query_respects_limit_and_recency() {
+        let mem = SqliteEpisodicMemory::in_memory().await.unwrap();
+        for i in 0..5 {
+            mem.record("tick", serde_json::json!({"i": i}))
+                .await
+                .unwrap();
+        }
+        let recent = mem.query(EpisodicQuery::all().limit(2)).await.unwrap();
+        assert_eq!(recent.len(), 2);
+        assert_eq!(recent[0].payload["i"], 4);
+    }
+
+    #[tokio::test]
+    async fn episodic_clear_removes_events() {
+        let mem = SqliteEpisodicMemory::in_memory().await.unwrap();
+        mem.record("tick", Value::Null).await.unwrap();
+        mem.clear().await.unwrap();
+        assert!(mem.query(EpisodicQuery::all()).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn episodic_session_isolation() {
+        let mem1 = SqliteEpisodicMemory::in_memory().await.unwrap();
+        let mem2 = SqliteEpisodicMemory {
+            conn: mem1.conn.clone(),
+            session_id: "other".into(),
+            next_id: std::sync::atomic::AtomicU64::new(0),
+        };
+        mem1.record("tick", Value::Null).await.unwrap();
+        assert!(mem2.query(EpisodicQuery::all()).await.unwrap().is_empty());
+    }
+}

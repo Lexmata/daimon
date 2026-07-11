@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{DaimonError, Result};
-use crate::model::EmbeddingModel;
+use daimon_core::stream_util::{backoff_delay, parse_retry_after_secs};
+use daimon_core::{DaimonError, EmbeddingModel, Result};
 
 /// Default total request timeout. Embedding calls are non-streaming and
 /// bounded, so a hung endpoint now fails after a minute instead of stalling
@@ -112,12 +112,17 @@ impl EmbeddingModel for OllamaEmbedding {
                 return Ok(data.embeddings);
             }
 
-            let retry_after = crate::model::retry::parse_retry_after(resp.headers());
+            let retry_after = resp
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(parse_retry_after_secs)
+                .map(Duration::from_secs);
             let text = resp.text().await.unwrap_or_default();
             let is_retryable = status.as_u16() == 429 || status.is_server_error();
 
             if is_retryable && attempt < self.max_retries {
-                let delay = crate::model::retry::backoff_delay(attempt, retry_after);
+                let delay = backoff_delay(attempt, retry_after);
                 tracing::debug!(status = %status, attempt, delay_ms = delay.as_millis(), "retryable embedding error, backing off");
                 tokio::time::sleep(delay).await;
             } else {
