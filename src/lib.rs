@@ -33,8 +33,10 @@
 //! | `gemini` | Google Gemini / Vertex AI provider (via `daimon-provider-gemini`) |
 //! | `azure` | Azure OpenAI Service provider (via `daimon-provider-azure`) |
 //! | `bedrock` | AWS Bedrock provider (via `daimon-provider-bedrock`) |
-//! | `ollama` | Ollama local model provider |
-//! | `llamacpp` | llama.cpp (llama-server) provider (via `daimon-provider-llamacpp`) |
+//! | `ollama` | Ollama local model provider (via `daimon-provider-local`) |
+//! | `llamacpp` | llama.cpp (llama-server) provider (via `daimon-provider-local`) |
+//! | `llamars` | llama-rs provider (via `daimon-provider-local`) |
+//! | `local` | All local providers at once: Ollama, llama.cpp, llama-rs, generic OpenAI-compatible |
 //! | `sqlite` | SQLite memory backend |
 //! | `redis` | Redis memory backend + task broker |
 //! | `nats` | NATS JetStream task broker |

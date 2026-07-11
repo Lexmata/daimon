@@ -144,7 +144,10 @@ async fn main() -> daimon::Result<()> {
 | `bedrock` | No | AWS Bedrock Converse API |
 | `gemini` | No | Google Gemini / Vertex AI provider |
 | `azure` | No | Azure OpenAI Service provider |
-| `ollama` | Yes | Ollama local model provider |
+| `ollama` | Yes | Ollama local model provider (via `daimon-provider-local`) |
+| `llamacpp` | No | llama.cpp (llama-server) provider |
+| `llamars` | No | llama-rs provider |
+| `local` | No | All local providers at once (Ollama, llama.cpp, llama-rs, generic OpenAI-compatible) |
 | `mcp` | No | Model Context Protocol client & server |
 | `sqlite` | No | SQLite memory backend |
 | `redis` | No | Redis memory backend + task broker + checkpoint |

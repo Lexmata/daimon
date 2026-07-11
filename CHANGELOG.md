@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Local model providers (DAIM-22):** new `daimon-provider-local` crate
+  consolidates every locally-hosted model runtime: `Ollama` (moved from the
+  facade, unchanged behavior), `LlamaCpp` (absorbed from
+  `daimon-provider-llamacpp`), new `LlamaRs` (targets
+  [llama-rs](https://github.com/Lexmata/llama-rs)'s OpenAI-compatible
+  server), and new `OpenAiCompatible` (any other OpenAI-compatible local
+  server — vLLM, LM Studio, llamafile, LocalAI). `LlamaCpp`, `LlamaRs`, and
+  `OpenAiCompatible` share one HTTP client core (`openai_compat`) for
+  request shaping, SSE parsing, retry, and error surfacing; llama.cpp's
+  `content_filter` finish reason now maps to `StopReason::ContentFiltered`
+  like the other providers (previously unmapped). New features: `llamars`,
+  `local` (all four at once). `daimon-provider-llamacpp` is deprecated in
+  favor of `daimon-provider-local`; its old public items are re-exported
+  with a `#[deprecated]` note for one release.
+
 ## [0.20.0] - 2026-07-11
 
 > Version 0.19.0 is skipped: a stale facade-only `daimon@0.19.0` was

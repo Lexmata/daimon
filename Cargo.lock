@@ -1569,14 +1569,7 @@ dependencies = [
 name = "daimon-provider-llamacpp"
 version = "0.20.0"
 dependencies = [
- "async-stream",
- "daimon-core",
- "futures",
- "reqwest 0.13.2",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
+ "daimon-provider-local",
 ]
 
 [[package]]

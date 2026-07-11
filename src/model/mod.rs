@@ -62,6 +62,12 @@ pub mod llamacpp {
     pub use daimon_provider_local::llamacpp::*;
 }
 
+#[cfg(feature = "llamars")]
+pub mod llamars {
+    //! llama-rs model provider (via [`daimon_provider_local`]).
+    pub use daimon_provider_local::llamars::*;
+}
+
 #[cfg(feature = "openai")]
 pub mod openai_embed;
 
