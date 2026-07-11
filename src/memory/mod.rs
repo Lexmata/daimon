@@ -10,12 +10,11 @@
 mod sliding_window;
 mod summary;
 mod token_window;
-mod traits;
 
+pub use daimon_core::{ErasedMemory, Memory, SharedMemory};
 pub use sliding_window::SlidingWindowMemory;
 pub use summary::SummaryMemory;
 pub use token_window::TokenWindowMemory;
-pub use traits::{ErasedMemory, Memory, SharedMemory};
 
 #[cfg(feature = "sqlite")]
 mod sqlite;

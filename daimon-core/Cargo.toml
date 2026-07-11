@@ -23,3 +23,6 @@ futures = { workspace = true }
 pin-project-lite = { workspace = true }
 async-stream = { workspace = true }
 tokio = { workspace = true, features = ["rt"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }

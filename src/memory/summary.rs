@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::Mutex;
 
 use crate::error::Result;
-use crate::memory::traits::Memory;
+use crate::memory::Memory;
 use crate::model::SharedModel;
 use crate::model::types::{ChatRequest, Message};
 

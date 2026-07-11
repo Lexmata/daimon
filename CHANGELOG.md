@@ -59,6 +59,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     native `fetch`), swapped `FontAwesomeModule` for the standalone
     `FaIconComponent` in header/sidebar, and removed the never-imported
     `@angular/forms` dependency.
+- **Core (DAIM-16):** `Memory`, `ErasedMemory`, `SharedMemory`, `Tool`,
+  `ErasedTool`, `SharedTool`, `ToolOutput`, `ToolChoice`, `ToolRetryPolicy`,
+  and `BackoffStrategy` moved from the `daimon` facade into `daimon-core` so
+  provider crates can implement them (groundwork for the Bedrock AgentCore
+  integration). All existing `daimon::memory::*` and `daimon::tool::*` paths
+  are preserved via re-exports — no consumer changes required.
 - **Performance (DAIM-18):**
   - `LineBuffer` (shared by every streaming provider) splits lines with a
     cursor instead of draining per line — per-chunk work is now linear and
