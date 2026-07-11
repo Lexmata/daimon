@@ -3,6 +3,38 @@ use std::sync::Arc;
 use crate::model::types::{ChatRequest, Message};
 use crate::model::{SharedEmbeddingModel, SharedModel};
 
+/// A regex pattern compiled once at construction.
+///
+/// Construct via `From<&str>` / `From<String>` (`Scorer::Regex("\\d+".into())`
+/// keeps working). An invalid pattern is retained for `Debug` output but never
+/// matches, preserving the previous behavior where a bad pattern scored
+/// `false` on every evaluation — while a valid pattern no longer pays a
+/// recompile per evaluated output.
+#[derive(Debug, Clone)]
+pub struct CompiledRegex {
+    pattern: String,
+    compiled: Option<regex_lite::Regex>,
+}
+
+impl CompiledRegex {
+    fn is_match(&self, text: &str) -> bool {
+        self.compiled.as_ref().is_some_and(|re| re.is_match(text))
+    }
+}
+
+impl From<String> for CompiledRegex {
+    fn from(pattern: String) -> Self {
+        let compiled = regex_lite::Regex::new(&pattern).ok();
+        Self { pattern, compiled }
+    }
+}
+
+impl From<&str> for CompiledRegex {
+    fn from(pattern: &str) -> Self {
+        Self::from(pattern.to_string())
+    }
+}
+
 /// A scoring strategy that evaluates agent output.
 pub enum Scorer {
     /// Output must exactly match the expected string.
@@ -10,7 +42,7 @@ pub enum Scorer {
     /// Output must contain the given substring.
     Contains(String),
     /// Output must match the regex pattern.
-    Regex(String),
+    Regex(CompiledRegex),
     /// Custom scoring function returning true for pass.
     Custom(Arc<dyn Fn(&str) -> bool + Send + Sync>),
     /// Cosine similarity between output and expected text must exceed threshold.
@@ -50,9 +82,7 @@ impl Scorer {
         match self {
             Scorer::ExactMatch(expected) => output == expected,
             Scorer::Contains(substring) => output.contains(substring.as_str()),
-            Scorer::Regex(pattern) => regex_lite::Regex::new(pattern)
-                .map(|re| re.is_match(output))
-                .unwrap_or(false),
+            Scorer::Regex(regex) => regex.is_match(output),
             Scorer::Custom(f) => f(output),
             Scorer::SemanticSimilarity {
                 expected,
@@ -106,7 +136,7 @@ impl std::fmt::Debug for Scorer {
         match self {
             Scorer::ExactMatch(s) => write!(f, "ExactMatch({s:?})"),
             Scorer::Contains(s) => write!(f, "Contains({s:?})"),
-            Scorer::Regex(s) => write!(f, "Regex({s:?})"),
+            Scorer::Regex(s) => write!(f, "Regex({:?})", s.pattern),
             Scorer::Custom(_) => write!(f, "Custom(...)"),
             Scorer::SemanticSimilarity {
                 expected,
@@ -170,6 +200,15 @@ mod tests {
         assert!(
             !Scorer::Regex(r"^\d+$".into())
                 .evaluate("answer is 42")
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn test_regex_invalid_pattern_scores_false() {
+        assert!(
+            !Scorer::Regex(r"[unclosed".into())
+                .evaluate("anything")
                 .await
         );
     }

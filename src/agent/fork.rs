@@ -70,9 +70,13 @@ impl Agent {
             .await?
             .ok_or_else(|| DaimonError::Other(format!("no checkpoint for run '{run_id}'")))?;
 
-        let memory = SlidingWindowMemory::new(state.messages.len() + 50);
+        // The window must leave real headroom beyond the seeded history: a
+        // fixed +50 margin evicts the seeded context after a short post-fork
+        // conversation, so scale the margin with the history size instead.
+        let capacity = (state.messages.len() * 2).max(state.messages.len() + 50);
+        let memory = SlidingWindowMemory::new(capacity);
         for msg in &state.messages {
-            memory.add_message(msg.clone()).await?;
+            memory.add_message(msg).await?;
         }
 
         let cost_tracker = self
@@ -140,10 +144,11 @@ impl Agent {
     ///     .system_prompt("You are a code reviewer.")
     ///     .tool(ReviewTool)
     ///     .remove_tool("search")
-    ///     .build();
+    ///     .build()?;
     /// ```
     pub fn fork_builder(&self) -> ForkBuilder {
         ForkBuilder {
+            tool_error: None,
             model: self.model.clone(),
             system_prompt: self.system_prompt.clone(),
             tools: self.tools.clone(),
@@ -187,6 +192,9 @@ pub struct ForkBuilder {
     cost_model: Option<Arc<dyn crate::cost::CostModel>>,
     max_budget: Option<f64>,
     tool_retry_policy: Option<ToolRetryPolicy>,
+    /// First tool-registration error, surfaced by [`build`](ForkBuilder::build)
+    /// so a duplicate tool name cannot be silently dropped.
+    tool_error: Option<DaimonError>,
 }
 
 impl ForkBuilder {
@@ -209,8 +217,15 @@ impl ForkBuilder {
     }
 
     /// Adds a tool to the forked agent's registry.
+    ///
+    /// A name collision with an inherited or previously added tool is an
+    /// error surfaced by [`build`](ForkBuilder::build) — the duplicate is
+    /// never silently dropped. Use [`remove_tool`](ForkBuilder::remove_tool)
+    /// first to replace an inherited tool.
     pub fn tool<T: Tool + 'static>(mut self, tool: T) -> Self {
-        let _ = self.tools.register(tool);
+        if let Err(e) = self.tools.register(tool) {
+            self.tool_error.get_or_insert(e);
+        }
         self
     }
 
@@ -281,7 +296,14 @@ impl ForkBuilder {
     }
 
     /// Builds the forked agent with all applied mutations.
-    pub fn build(mut self) -> Agent {
+    ///
+    /// Fails if a tool registration failed (e.g. [`tool`](ForkBuilder::tool)
+    /// collided with an inherited tool's name).
+    pub fn build(mut self) -> Result<Agent> {
+        if let Some(e) = self.tool_error {
+            return Err(e);
+        }
+
         let memory = self
             .memory
             .unwrap_or_else(|| Arc::new(SlidingWindowMemory::default()));
@@ -294,7 +316,7 @@ impl ForkBuilder {
 
         let cost_tracker = self.cost_model.map(CostTracker::new);
 
-        Agent {
+        Ok(Agent {
             model: self.model,
             system_prompt: self.system_prompt,
             tools: self.tools,
@@ -310,7 +332,7 @@ impl ForkBuilder {
             cost_tracker,
             max_budget: self.max_budget,
             tool_retry_policy: self.tool_retry_policy,
-        }
+        })
     }
 }
 
@@ -465,7 +487,11 @@ mod tests {
             .build()
             .unwrap();
 
-        let forked = agent.fork_builder().system_prompt("New prompt").build();
+        let forked = agent
+            .fork_builder()
+            .system_prompt("New prompt")
+            .build()
+            .unwrap();
 
         assert_eq!(forked.system_prompt.as_deref(), Some("New prompt"));
     }
@@ -478,7 +504,7 @@ mod tests {
             .build()
             .unwrap();
 
-        let forked = agent.fork_builder().no_system_prompt().build();
+        let forked = agent.fork_builder().no_system_prompt().build().unwrap();
         assert!(forked.system_prompt.is_none());
     }
 
@@ -497,7 +523,8 @@ mod tests {
             .fork_builder()
             .remove_tool("alpha")
             .tool(DummyTool { tool_name: "gamma" })
-            .build();
+            .build()
+            .unwrap();
 
         assert!(forked.tools.get("alpha").is_none());
         assert!(forked.tools.get("beta").is_some());
@@ -518,7 +545,8 @@ mod tests {
             .fork_builder()
             .max_iterations(20)
             .temperature(0.1)
-            .build();
+            .build()
+            .unwrap();
 
         assert_eq!(forked.max_iterations, 20);
         assert_eq!(forked.temperature, Some(0.1));
@@ -533,7 +561,7 @@ mod tests {
             .build()
             .unwrap();
 
-        let forked = agent.fork_builder().build();
+        let forked = agent.fork_builder().build().unwrap();
 
         assert_eq!(forked.system_prompt.as_deref(), Some("Keep me"));
         assert_eq!(forked.max_iterations, 8);
@@ -544,7 +572,7 @@ mod tests {
         let agent = Agent::builder().model(EchoModel).build().unwrap();
         agent.prompt("hello").await.unwrap();
 
-        let forked = agent.fork_builder().build();
+        let forked = agent.fork_builder().build().unwrap();
 
         let original_msgs = agent.memory.get_messages_erased().await.unwrap();
         let forked_msgs = forked.memory.get_messages_erased().await.unwrap();
@@ -557,7 +585,7 @@ mod tests {
         let agent = Agent::builder().model(EchoModel).build().unwrap();
 
         let mem = SlidingWindowMemory::new(3);
-        let forked = agent.fork_builder().memory(mem).build();
+        let forked = agent.fork_builder().memory(mem).build().unwrap();
 
         forked.prompt("a").await.unwrap();
         let msgs = forked.memory.get_messages_erased().await.unwrap();
@@ -581,9 +609,66 @@ mod tests {
         }
 
         let agent = Agent::builder().model(EchoModel).build().unwrap();
-        let forked = agent.fork_builder().model(AltModel).build();
+        let forked = agent.fork_builder().model(AltModel).build().unwrap();
 
         let resp = forked.prompt("test").await.unwrap();
         assert_eq!(resp.text(), "alt");
+    }
+
+    #[tokio::test]
+    async fn test_fork_builder_duplicate_tool_fails_build() {
+        // Adding a tool whose name collides with an inherited tool must
+        // surface as an error from build(), never be silently dropped.
+        let agent = Agent::builder()
+            .model(EchoModel)
+            .tool(DummyTool { tool_name: "alpha" })
+            .build()
+            .unwrap();
+
+        let result = agent
+            .fork_builder()
+            .tool(DummyTool { tool_name: "alpha" })
+            .build();
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            crate::error::DaimonError::DuplicateTool(name) if name == "alpha"
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_fork_from_checkpoint_scales_memory_with_history() {
+        // 60 seeded + 55 appended = 115 messages. The old fixed +50 margin
+        // capped the window at 110 and evicted the seeded context; the
+        // proportional margin (len * 2 = 120) retains it.
+        let agent = Agent::builder().model(EchoModel).build().unwrap();
+        let cp = Arc::new(InMemoryCheckpoint::new());
+
+        let seeded: Vec<Message> = (0..60)
+            .map(|i| Message::user(format!("seed-{i}")))
+            .collect();
+        let state = CheckpointState::new("run-k", seeded, 1);
+        cp.save(&state).await.unwrap();
+
+        let forked = agent
+            .fork_from_checkpoint("run-k", &(cp as Arc<_>))
+            .await
+            .unwrap();
+        for i in 0..55 {
+            forked
+                .memory
+                .add_message_erased(&Message::user(format!("post-{i}")))
+                .await
+                .unwrap();
+        }
+
+        let msgs = forked.memory.get_messages_erased().await.unwrap();
+        assert_eq!(msgs.len(), 115, "no message may be evicted at this depth");
+        assert_eq!(
+            msgs[0].content.as_deref(),
+            Some("seed-0"),
+            "the earliest seeded context must survive the post-fork conversation"
+        );
     }
 }

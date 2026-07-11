@@ -234,9 +234,14 @@ impl StreamingTaskWorker {
         }
     }
 
-    /// Processes a single task with streaming events.
+    /// Processes a single task with streaming events. Returns `Ok(None)` only
+    /// if the broker is permanently closed; an idle queue is polled until a
+    /// task arrives.
+    ///
+    /// A task whose agent errored is reported to the broker via `fail` (its
+    /// status becomes `Failed`), matching [`TaskWorker`](super::TaskWorker).
     pub async fn run_once(&self) -> Result<Option<TaskResult>> {
-        let task = match self.broker.receive_erased().await? {
+        let task = match super::worker::next_task(&self.broker).await? {
             Some(t) => t,
             None => return Ok(None),
         };
@@ -244,11 +249,19 @@ impl StreamingTaskWorker {
         let result = self.execute_streaming(&task).await;
 
         match &result {
-            Ok(tr) => {
-                self.broker
-                    .complete_erased(&task.task_id, tr.clone())
-                    .await?;
-            }
+            // Route agent errors to `fail` so the broker records `Failed`
+            // rather than `Completed` with an embedded error, keeping status
+            // semantics consistent with TaskWorker's paths.
+            Ok(tr) => match &tr.error {
+                Some(err) => {
+                    self.broker.fail_erased(&task.task_id, err.clone()).await?;
+                }
+                None => {
+                    self.broker
+                        .complete_erased(&task.task_id, tr.clone())
+                        .await?;
+                }
+            },
             Err(e) => {
                 self.broker
                     .fail_erased(&task.task_id, e.to_string())
@@ -259,7 +272,8 @@ impl StreamingTaskWorker {
         result.map(Some)
     }
 
-    /// Runs the streaming worker loop indefinitely.
+    /// Runs the streaming worker loop indefinitely, until the broker is
+    /// permanently closed. Idle polls do not stop the loop.
     pub async fn run(&self) -> Result<()> {
         loop {
             match self.run_once().await? {
@@ -405,6 +419,71 @@ mod tests {
             }
         }
         assert!(got_done);
+    }
+
+    #[tokio::test]
+    async fn test_streaming_worker_run_exits_on_broker_close() {
+        let broker = InProcessBroker::new(16);
+        let bus = InProcessEventBus::new(64);
+
+        let worker = StreamingTaskWorker::new(broker.clone(), bus, || {
+            Agent::builder().model(EchoModel).build().unwrap()
+        });
+
+        let id = broker.submit(AgentTask::new("drain me")).await.unwrap();
+        broker.close().await;
+
+        // The worker must drain the queued task and then exit promptly once
+        // the closed channel signals end-of-stream.
+        tokio::time::timeout(std::time::Duration::from_secs(5), worker.run())
+            .await
+            .expect("streaming worker.run() must exit after the broker closes")
+            .unwrap();
+
+        let status = broker.status(&id).await.unwrap();
+        assert!(matches!(
+            status,
+            crate::distributed::TaskStatus::Completed(_)
+        ));
+    }
+
+    /// Model whose streaming entry point always errors.
+    struct FailingStreamModel;
+
+    impl Model for FailingStreamModel {
+        async fn generate(&self, _request: &ChatRequest) -> DResult<ChatResponse> {
+            Err(DaimonError::Model("boom".into()))
+        }
+
+        async fn generate_stream(&self, _request: &ChatRequest) -> DResult<ResponseStream> {
+            Err(DaimonError::Model("boom".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_streaming_worker_agent_error_marks_task_failed() {
+        let broker = InProcessBroker::new(16);
+        let bus = InProcessEventBus::new(64);
+
+        let worker = StreamingTaskWorker::new(broker.clone(), bus, || {
+            Agent::builder().model(FailingStreamModel).build().unwrap()
+        });
+
+        let id = broker.submit(AgentTask::new("will fail")).await.unwrap();
+
+        // A mid-stream model error surfaces as `Err` from `run_once` (the
+        // stream broke), but only after the failure has been reported to the
+        // broker.
+        let result = worker.run_once().await;
+        assert!(result.is_err());
+
+        // The broker status must be Failed, not Completed with an embedded
+        // error, matching TaskWorker's unified error routing.
+        let status = broker.status(&id).await.unwrap();
+        assert!(
+            matches!(status, crate::distributed::TaskStatus::Failed(ref msg) if msg.contains("boom")),
+            "agent error must mark the task Failed, got {status:?}"
+        );
     }
 
     #[tokio::test]

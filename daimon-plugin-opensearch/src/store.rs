@@ -86,6 +86,77 @@ impl VectorStore for OpenSearchVectorStore {
         Ok(())
     }
 
+    async fn upsert_many(&self, items: Vec<(String, Vec<f32>, Document)>) -> Result<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        for (_, embedding, _) in &items {
+            if embedding.len() != self.dimensions {
+                return Err(DaimonError::Other(format!(
+                    "embedding dimension mismatch: expected {}, got {}",
+                    self.dimensions,
+                    embedding.len()
+                )));
+            }
+        }
+
+        // One `_bulk` request instead of one `index` request per document.
+        let mut body: Vec<opensearch::http::request::JsonBody<serde_json::Value>> =
+            Vec::with_capacity(items.len() * 2);
+        for (id, embedding, document) in items {
+            body.push(json!({ "index": { "_id": id } }).into());
+            body.push(
+                json!({
+                    "embedding": embedding,
+                    "content": document.content,
+                    "metadata": document.metadata,
+                })
+                .into(),
+            );
+        }
+
+        let response = self
+            .client
+            .bulk(opensearch::BulkParts::Index(&self.index))
+            .body(body)
+            .send()
+            .await
+            .map_err(Self::map_os_error)?;
+
+        let status = response.status_code();
+        if !status.is_success() {
+            let text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "unknown error".into());
+            return Err(DaimonError::Other(format!(
+                "opensearch bulk upsert failed ({status}): {text}"
+            )));
+        }
+
+        // A bulk request can return 200 with per-item failures.
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| DaimonError::Other(format!("opensearch response parse error: {e}")))?;
+        if body["errors"].as_bool().unwrap_or(false) {
+            let first_error = body["items"]
+                .as_array()
+                .and_then(|items| {
+                    items
+                        .iter()
+                        .find_map(|item| item["index"]["error"].as_object())
+                })
+                .map(|e| serde_json::Value::Object(e.clone()).to_string())
+                .unwrap_or_else(|| "unknown item error".into());
+            return Err(DaimonError::Other(format!(
+                "opensearch bulk upsert had item failures: {first_error}"
+            )));
+        }
+
+        Ok(())
+    }
+
     async fn query(&self, embedding: Vec<f32>, top_k: usize) -> Result<Vec<ScoredDocument>> {
         if embedding.len() != self.dimensions {
             return Err(DaimonError::Other(format!(

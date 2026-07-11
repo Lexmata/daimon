@@ -92,21 +92,56 @@ impl McpServer {
         let stdout = tokio::io::stdout();
         let mut reader = tokio::io::BufReader::new(stdin);
         let mut writer = tokio::io::BufWriter::new(stdout);
+        self.serve_streams(&mut reader, &mut writer).await
+    }
 
+    /// The `serve_stdio` loop over arbitrary streams, so it can be exercised
+    /// against in-memory buffers in tests.
+    async fn serve_streams<R, W>(self, reader: &mut R, writer: &mut W) -> Result<()>
+    where
+        R: tokio::io::AsyncBufRead + Unpin,
+        W: tokio::io::AsyncWrite + Unpin,
+    {
         loop {
-            let body = match read_message(&mut reader).await {
+            let body = match read_message(reader).await {
                 Ok(Some(body)) => body,
                 Ok(None) => break,
-                Err(e) => {
+                Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                    // A framing error (bad Content-Length, oversized
+                    // message): the offending frame is unreadable but the
+                    // stream itself is still alive, so keep serving.
                     tracing::warn!("failed to read message: {e}");
                     continue;
+                }
+                Err(e) => {
+                    // A real I/O error would recur on every retry; looping
+                    // on it would spin forever. Stop serving instead.
+                    tracing::warn!("stdio read failed, shutting down: {e}");
+                    break;
                 }
             };
 
             let request: IncomingRequest = match serde_json::from_str(&body) {
                 Ok(r) => r,
                 Err(e) => {
+                    // Per the JSON-RPC 2.0 spec, invalid JSON gets a Parse
+                    // Error (-32700) response with a null id — silently
+                    // dropping it leaves the client waiting forever.
                     tracing::warn!("invalid JSON-RPC: {e}");
+                    let out = OutgoingResponse {
+                        jsonrpc: "2.0".into(),
+                        id: serde_json::Value::Null,
+                        result: None,
+                        error: Some(RpcError {
+                            code: -32700,
+                            message: format!("Parse error: {e}"),
+                        }),
+                    };
+                    let body = serde_json::to_string(&out)
+                        .map_err(|e| DaimonError::Mcp(format!("serialize response: {e}")))?;
+                    write_message(writer, &body)
+                        .await
+                        .map_err(|e| DaimonError::Mcp(format!("write response: {e}")))?;
                     continue;
                 }
             };
@@ -137,7 +172,7 @@ impl McpServer {
             let body = serde_json::to_string(&out)
                 .map_err(|e| DaimonError::Mcp(format!("serialize response: {e}")))?;
 
-            write_message(&mut writer, &body)
+            write_message(writer, &body)
                 .await
                 .map_err(|e| DaimonError::Mcp(format!("write response: {e}")))?;
         }
@@ -251,6 +286,35 @@ impl McpServer {
     }
 }
 
+/// Returns true when `line` looks like an HTTP-style framing header
+/// (`Name: value` with a token-shaped name). Used to tell header-framed
+/// input apart from bare newline-delimited JSON: a JSON line also contains
+/// `:` but its "name" part carries `{` / `"` characters that never appear
+/// in a header field name.
+fn is_header_line(line: &str) -> bool {
+    match line.split_once(':') {
+        Some((name, _)) => {
+            !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        }
+        None => false,
+    }
+}
+
+/// Parses a `Content-Length` header's value, treating an unparseable value
+/// as a framing error rather than silently reading a zero-length body (which
+/// would desync the stream at the unconsumed body bytes).
+fn parse_content_length(value: &str) -> std::result::Result<usize, std::io::Error> {
+    value.trim().parse().map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("invalid Content-Length '{}': {e}", value.trim()),
+        )
+    })
+}
+
 async fn read_message<R: tokio::io::AsyncBufRead + Unpin>(
     reader: &mut R,
 ) -> std::result::Result<Option<String>, std::io::Error> {
@@ -260,24 +324,52 @@ async fn read_message<R: tokio::io::AsyncBufRead + Unpin>(
         return Ok(None);
     }
 
-    let content_length: usize = if header_line
-        .trim()
-        .to_lowercase()
-        .starts_with("content-length:")
-    {
-        header_line
-            .trim()
-            .split(':')
-            .nth(1)
-            .and_then(|s| s.trim().parse().ok())
-            .unwrap_or(0)
-    } else {
-        let content = header_line.trim().to_string();
-        if content.is_empty() {
-            return Ok(None);
+    let first = header_line.trim().to_string();
+    if first.is_empty() {
+        return Ok(None);
+    }
+
+    // Mixed-framing heuristic (deliberate): a first line that isn't an
+    // HTTP-style header is treated as one bare newline-delimited JSON
+    // message, so simple clients (and humans poking at the server) can skip
+    // Content-Length framing entirely. Anything header-shaped goes through
+    // full LSP-style framing below.
+    if !is_header_line(&first) {
+        return Ok(Some(first));
+    }
+
+    // Header-framed: consume header lines until the blank separator,
+    // picking up Content-Length wherever it appears. Assuming the very next
+    // line is the separator would desync the stream as soon as a client
+    // sends a standard extra header such as Content-Type.
+    let mut content_length: Option<usize> = None;
+    let mut line = header_line;
+    loop {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            break;
         }
-        return Ok(Some(content));
-    };
+        if let Some((name, value)) = trimmed.split_once(':')
+            && name.eq_ignore_ascii_case("content-length")
+        {
+            content_length = Some(parse_content_length(value)?);
+        }
+        line.clear();
+        let n = reader.read_line(&mut line).await?;
+        if n == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "stream ended inside framing headers",
+            ));
+        }
+    }
+
+    let content_length = content_length.ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "missing Content-Length header",
+        )
+    })?;
 
     if content_length > MAX_MESSAGE_SIZE {
         return Err(std::io::Error::new(
@@ -287,9 +379,6 @@ async fn read_message<R: tokio::io::AsyncBufRead + Unpin>(
             ),
         ));
     }
-
-    let mut separator = String::new();
-    reader.read_line(&mut separator).await?;
 
     let mut body = vec![0u8; content_length];
     tokio::io::AsyncReadExt::read_exact(reader, &mut body).await?;
@@ -436,6 +525,89 @@ mod tests {
         let mut reader = tokio::io::BufReader::new(framed.as_bytes());
         let body = read_message(&mut reader).await.unwrap();
         assert_eq!(body.as_deref(), Some("{}"));
+    }
+
+    #[tokio::test]
+    async fn test_read_message_with_extra_headers() {
+        // A standard Content-Type header (or any other header) between
+        // Content-Length and the blank separator must not desync framing.
+        let payload = r#"{"jsonrpc":"2.0"}"#;
+        let framed = format!(
+            "Content-Length: {}\r\nContent-Type: application/vscode-jsonrpc; charset=utf-8\r\n\r\n{payload}",
+            payload.len()
+        );
+        let mut reader = tokio::io::BufReader::new(framed.as_bytes());
+        let body = read_message(&mut reader).await.unwrap();
+        assert_eq!(body.as_deref(), Some(payload));
+    }
+
+    #[tokio::test]
+    async fn test_read_message_content_length_after_other_headers() {
+        let payload = "{}";
+        let framed = format!(
+            "Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{payload}",
+            payload.len()
+        );
+        let mut reader = tokio::io::BufReader::new(framed.as_bytes());
+        let body = read_message(&mut reader).await.unwrap();
+        assert_eq!(body.as_deref(), Some("{}"));
+    }
+
+    #[tokio::test]
+    async fn test_read_message_unparseable_content_length_is_an_error() {
+        // Historically this became length 0 via unwrap_or(0), silently
+        // reading an empty body and desyncing the stream.
+        let framed = "Content-Length: banana\r\n\r\n{}";
+        let mut reader = tokio::io::BufReader::new(framed.as_bytes());
+        let err = read_message(&mut reader).await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[tokio::test]
+    async fn test_read_message_newline_delimited_fallback() {
+        // A non-header first line is one bare newline-delimited JSON message.
+        let input = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n";
+        let mut reader = tokio::io::BufReader::new(input.as_bytes());
+        let body = read_message(&mut reader).await.unwrap();
+        assert_eq!(
+            body.as_deref(),
+            Some(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_serve_streams_responds_32700_to_malformed_json() {
+        // Per JSON-RPC 2.0, unparseable JSON must produce a Parse Error
+        // response (code -32700, id null) rather than being dropped.
+        let server = make_server();
+        let payload = "this is not json";
+        let input = format!("Content-Length: {}\r\n\r\n{payload}", payload.len());
+        let mut reader = tokio::io::BufReader::new(input.as_bytes());
+        let mut out = std::io::Cursor::new(Vec::new());
+
+        server.serve_streams(&mut reader, &mut out).await.unwrap();
+
+        let written = String::from_utf8(out.into_inner()).unwrap();
+        let json_start = written.find('{').expect("no JSON response written");
+        let parsed: serde_json::Value = serde_json::from_str(&written[json_start..]).unwrap();
+        assert_eq!(parsed["error"]["code"], -32700);
+        assert!(parsed["id"].is_null());
+    }
+
+    #[tokio::test]
+    async fn test_serve_streams_answers_valid_request() {
+        let server = make_server();
+        let payload = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+        let input = format!("Content-Length: {}\r\n\r\n{payload}", payload.len());
+        let mut reader = tokio::io::BufReader::new(input.as_bytes());
+        let mut out = std::io::Cursor::new(Vec::new());
+
+        server.serve_streams(&mut reader, &mut out).await.unwrap();
+
+        let written = String::from_utf8(out.into_inner()).unwrap();
+        let json_start = written.find('{').unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&written[json_start..]).unwrap();
+        assert_eq!(parsed["result"]["tools"][0]["name"], "greet");
     }
 
     #[tokio::test]

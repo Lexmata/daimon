@@ -5,6 +5,14 @@ on:
     branches: [develop, main]
   pull_request:
     branches: [develop]
+  # Used by the autofix job to re-run CI on a fix commit it pushed: pushes
+  # made with GITHUB_TOKEN never trigger workflows on their own.
+  workflow_dispatch:
+
+# Read-only token by default; the autofix job overrides with the write
+# scopes it needs.
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -20,7 +28,7 @@ jobs:
     name: Formatting
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -31,7 +39,7 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
@@ -40,7 +48,7 @@ jobs:
         run: cargo install cargo-commitlint --locked
       - name: Lint commits
         run: |
-          for sha in $(git log --format=%H origin/${{ github.base_ref }}..HEAD); do
+          for sha in $(git log --no-merges --format=%H origin/${{ github.base_ref }}..HEAD); do
             git log -1 --format=%s "$sha" | cargo commitlint check --config commitlint.toml
           done
 
@@ -60,7 +68,7 @@ jobs:
           - "--features bedrock"
           - "--features full"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.toolchain }}
@@ -71,13 +79,33 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - run: cargo check ${{ matrix.features }}
 
+  # ── Feature-flag isolation ────────────────────────────────────────
+  # Compiles every feature of the root crate in isolation so a feature
+  # that only builds when another happens to be enabled can't slip in.
+  hack:
+    name: Feature matrix (cargo hack)
+    runs-on: ubuntu-latest
+    needs: [fmt]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: hack
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-hack
+      - run: cargo hack check --each-feature --workspace
+
   # ── Linting ───────────────────────────────────────────────────────
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
     needs: [check]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -87,9 +115,9 @@ jobs:
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - name: Clippy (no default features)
-        run: cargo clippy --no-default-features --all-targets -- -D warnings
+        run: cargo clippy --workspace --no-default-features --all-targets -- -D warnings
       - name: Clippy (full features)
-        run: cargo clippy --features full --all-targets -- -D warnings
+        run: cargo clippy --workspace --features full --all-targets -- -D warnings
 
   # ── Tests ─────────────────────────────────────────────────────────
   test:
@@ -103,22 +131,22 @@ jobs:
           - "--no-default-features"
           - "--features full"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           key: test-${{ matrix.features }}
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      - run: cargo test ${{ matrix.features }} -- --nocapture
+      - run: cargo test --workspace ${{ matrix.features }} -- --nocapture
 
   # ── Coverage ──────────────────────────────────────────────────────
   coverage:
-    name: Coverage (≥84%)
+    name: Coverage (≥80%, full features)
     runs-on: ubuntu-latest
     needs: [test]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
@@ -128,8 +156,13 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      # Full features so feature-gated code (mcp, http-server, distributed
+      # backends, providers) is inside the gate; the previous 84% gate
+      # measured --no-default-features only. Full-feature baseline: 81.2%.
       - name: Generate coverage
-        run: cargo llvm-cov --no-default-features --fail-under-lines 84 --lcov --output-path lcov.info
+        run: cargo llvm-cov --features full --fail-under-lines 80 --lcov --output-path lcov.info
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v4
         with:
@@ -143,19 +176,15 @@ jobs:
     runs-on: ubuntu-latest
     needs: [check]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           key: examples
-      - name: Check simple_agent
-        run: cargo check --example simple_agent --features openai
-      - name: Check with_tools
-        run: cargo check --example with_tools --features openai
-      - name: Check streaming
-        run: cargo check --example streaming --features openai
-      - name: Check bedrock_agent
-        run: cargo check --example bedrock_agent --features bedrock
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Check all examples
+        run: cargo check --examples --features full
 
   # ── Documentation ─────────────────────────────────────────────────
   docs:
@@ -165,30 +194,82 @@ jobs:
     env:
       RUSTDOCFLAGS: -Dwarnings
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           key: docs
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      - run: cargo doc --features full --no-deps --document-private-items
+      - run: cargo doc --workspace --features full --no-deps --document-private-items
 
   # ── Dependency audit ──────────────────────────────────────────────
   deny:
     name: cargo-deny
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check advisories licenses bans
 
   # ── Final gate ────────────────────────────────────────────────────
+  # ── Lint autofix (PRs from this repo only) ────────────────────────
+  # Applies machine-fixable clippy lints and rustfmt, pushes the fix
+  # commit to the PR branch, and re-dispatches CI on it (GITHUB_TOKEN
+  # pushes never trigger workflows by themselves). Strict gates still
+  # run in the clippy/fmt jobs; this job only heals what it can.
+  autofix:
+    name: Lint autofix
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      # Third-party actions are SHA-pinned in this job (unlike the read-only
+      # jobs) because it holds write permissions: a compromised action here
+      # could push code or dispatch workflows.
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: autofix
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Apply clippy fixes
+        env:
+          # Unset -Dwarnings so unfixable lints don't abort the fix pass;
+          # the strict clippy job still gates them.
+          RUSTFLAGS: ""
+        run: cargo clippy --workspace --features full --all-targets --fix --allow-dirty
+      - name: Apply formatting
+        run: cargo fmt --all
+      - name: Push fixes and re-dispatch CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          if git diff --quiet; then
+            echo "No autofixable issues."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "style: apply automated clippy and rustfmt fixes"
+          git push origin "HEAD:refs/heads/$HEAD_REF"
+          gh workflow run ci.yml --ref "$HEAD_REF"
+          echo "::notice::Autofix pushed $(git rev-parse --short HEAD) to $HEAD_REF; CI re-dispatched on the fixed commit."
+
   ci-pass:
     name: CI passed
     if: always()
-    needs: [fmt, check, clippy, test, coverage, examples, docs, deny]
+    needs: [fmt, check, hack, clippy, test, coverage, examples, docs, deny]
     runs-on: ubuntu-latest
     steps:
       - name: Verify all jobs succeeded
@@ -196,6 +277,7 @@ jobs:
           results=( \
             "${{ needs.fmt.result }}" \
             "${{ needs.check.result }}" \
+            "${{ needs.hack.result }}" \
             "${{ needs.clippy.result }}" \
             "${{ needs.test.result }}" \
             "${{ needs.coverage.result }}" \

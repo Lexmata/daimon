@@ -211,9 +211,11 @@ If the response includes `usage`, it is accumulated into `total_usage` and `trac
 
 #### k. If No Tool Calls
 
-- Add the assistant message to memory and to the message list.
+- Run output guardrails on the final text: `Block` returns
+  `Err(DaimonError::GuardrailBlocked)` without persisting the response;
+  `Transform` rewrites it before persistence.
 - Call `hooks.on_iteration_end_erased(&state)`.
-- Run output guardrails on the final response.
+- Add the (possibly transformed) assistant message to memory and to the message list.
 - Return `AgentResponse { messages, final_text, iterations, usage, cost }`.
 
 ### Prompt Methods Comparison
@@ -221,8 +223,8 @@ If the response includes `usage`, it is accumulated into `total_usage` and `trac
 | Method | Input Guardrails | Output Guardrails | Memory | System Prompt |
 |--------|------------------|-------------------|--------|---------------|
 | `prompt(input)` | Yes | Yes | Load + update | Yes |
-| `prompt_with_cancellation(input, cancel)` | No | No | Load + update | Yes |
-| `prompt_with_messages(messages)` | No | No | Bypassed | Bypassed |
+| `prompt_with_cancellation(input, cancel)` | Yes | Yes | Load + update | Yes |
+| `prompt_with_messages(messages)` | Yes (last user message) | Yes | Update only (caller-provided messages are persisted, no load) | Bypassed (caller supplies) |
 
 Use `prompt_with_cancellation` when you need cooperative cancellation (e.g., user timeout). Use `prompt_with_messages` for replay, custom context injection, or when you manage the full message history yourself.
 
@@ -566,18 +568,20 @@ agent.input_guardrail(guard);
 
 #### RegexFilterGuardrail
 
-Blocks or redacts input matching regex patterns.
+Blocks or redacts input matching regex patterns. `block` and `redact` are
+fallible: an invalid regex returns an error instead of being silently
+dropped, so a typo'd filter can never fail open.
 
 ```rust
 use daimon::guardrails::RegexFilterGuardrail;
 
 // Block when pattern matches
 let guard = RegexFilterGuardrail::new()
-    .block(r"(?i)password\s*[:=]", "potential credential leak");
+    .block(r"(?i)password\s*[:=]", "potential credential leak")?;
 
 // Redact matched text
 let guard = RegexFilterGuardrail::new()
-    .redact(r"\b\d{3}-\d{2}-\d{4}\b", "[SSN REDACTED]");
+    .redact(r"\b\d{3}-\d{2}-\d{4}\b", "[SSN REDACTED]")?;
 ```
 
 #### ContentPolicyGuardrail
@@ -816,7 +820,7 @@ impl AgentResponse {
 | Observe execution | `hooks(MyHook)` |
 | Mutate/short-circuit | `middleware(MyMiddleware)` |
 | Block long input | `input_guardrail(MaxTokenGuardrail::new(4096))` |
-| Redact PII | `input_guardrail(RegexFilterGuardrail::new().redact(...))` |
+| Redact PII | `input_guardrail(RegexFilterGuardrail::new().redact(...)?)` |
 | LLM content policy | `input_guardrail(ContentPolicyGuardrail::new(model, policy))` |
 | Track spend | `cost_model(OpenAiCostModel).max_budget(0.50)` |
 | Retry transient tool failures | `tool_retry_policy(ToolRetryPolicy::exponential(3))` |

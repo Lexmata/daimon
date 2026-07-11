@@ -55,6 +55,11 @@ pub enum NodeOutcome {
     /// Route directly to a named node, ignoring edges.
     Route(String),
     /// Execute multiple branches in parallel, then continue from the merge node.
+    ///
+    /// Each branch node must itself return [`NodeOutcome::Continue`]; any
+    /// other outcome from a branch aborts the run with an error. Branch
+    /// writes are merged in the order the branches are listed here, so
+    /// same-key writes resolve to the later-listed branch.
     FanOut {
         /// Nodes to execute in parallel.
         branches: Vec<String>,
@@ -330,6 +335,17 @@ impl Graph {
         )))
     }
 
+    /// Executes fan-out branches concurrently and merges their state.
+    ///
+    /// Branch results are merged **deterministically** in the order the
+    /// branches were listed in [`NodeOutcome::FanOut`], not in task
+    /// completion order: when two branches write the same key, the
+    /// later-listed branch's value wins.
+    ///
+    /// Every branch must return [`NodeOutcome::Continue`]. `Route`, `FanOut`,
+    /// and `Done` cannot be honored from inside a parallel branch (the graph
+    /// has a single cursor, which moves to the merge node), so returning one
+    /// of them is reported as an error instead of being silently ignored.
     async fn execute_fan_out(
         &self,
         ctx: GraphContext,
@@ -344,18 +360,34 @@ impl Graph {
                 DaimonError::Orchestration(format!("fan-out node '{branch_name}' not found"))
             })?;
             let mut branch_ctx = ctx.clone();
+            let name = branch_name.clone();
             join_set.spawn(async move {
-                node.process(&mut branch_ctx).await?;
-                Ok::<_, DaimonError>(branch_ctx)
+                match node.process(&mut branch_ctx).await? {
+                    NodeOutcome::Continue => Ok::<_, DaimonError>((name, branch_ctx)),
+                    other => Err(DaimonError::Orchestration(format!(
+                        "fan-out branch '{name}' returned {other:?}; fan-out branches must \
+                         return NodeOutcome::Continue — route, fan out, or finish from the \
+                         merge node instead"
+                    ))),
+                }
             });
         }
 
-        let mut merged = ctx;
+        // Collect all branch results first, then merge in branch-list order
+        // so same-key writes resolve identically on every run.
+        let mut results: HashMap<String, GraphContext> = HashMap::with_capacity(branches.len());
         while let Some(result) = join_set.join_next().await {
-            let branch_ctx =
+            let (name, branch_ctx) =
                 result.map_err(|e| DaimonError::Orchestration(format!("fan-out join: {e}")))??;
-            for (key, value) in branch_ctx.state {
-                merged.state.insert(key, value);
+            results.insert(name, branch_ctx);
+        }
+
+        let mut merged = ctx;
+        for branch_name in branches {
+            if let Some(branch_ctx) = results.remove(branch_name) {
+                for (key, value) in branch_ctx.state {
+                    merged.state.insert(key, value);
+                }
             }
         }
 
@@ -551,6 +583,116 @@ mod tests {
         let result = graph.run(GraphContext::new()).await.unwrap();
         assert_eq!(result.get("from_a"), Some(&serde_json::json!(true)));
         assert_eq!(result.get("from_b"), Some(&serde_json::json!(true)));
+    }
+
+    #[tokio::test]
+    async fn test_graph_fan_out_merge_is_deterministic() {
+        struct FanOutNode;
+
+        impl GraphNode for FanOutNode {
+            fn process<'a>(
+                &'a self,
+                _ctx: &'a mut GraphContext,
+            ) -> Pin<Box<dyn Future<Output = Result<NodeOutcome>> + Send + 'a>> {
+                Box::pin(async {
+                    Ok(NodeOutcome::FanOut {
+                        branches: vec!["slow".into(), "fast".into()],
+                        merge: "merge".into(),
+                    })
+                })
+            }
+        }
+
+        struct SlowWriter;
+
+        impl GraphNode for SlowWriter {
+            fn process<'a>(
+                &'a self,
+                ctx: &'a mut GraphContext,
+            ) -> Pin<Box<dyn Future<Output = Result<NodeOutcome>> + Send + 'a>> {
+                Box::pin(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    ctx.set("shared", serde_json::json!("from-slow"));
+                    Ok(NodeOutcome::Continue)
+                })
+            }
+        }
+
+        struct FastWriter;
+
+        impl GraphNode for FastWriter {
+            fn process<'a>(
+                &'a self,
+                ctx: &'a mut GraphContext,
+            ) -> Pin<Box<dyn Future<Output = Result<NodeOutcome>> + Send + 'a>> {
+                Box::pin(async move {
+                    ctx.set("shared", serde_json::json!("from-fast"));
+                    Ok(NodeOutcome::Continue)
+                })
+            }
+        }
+
+        // "slow" is listed FIRST in the fan-out but finishes LAST. The
+        // completion-order fold used to let it win nondeterministically;
+        // the later-listed branch ("fast") must win on every run.
+        for _ in 0..20 {
+            let graph = Graph::builder()
+                .node("start", FanOutNode)
+                .node("slow", SlowWriter)
+                .node("fast", FastWriter)
+                .node("merge", DoneNode)
+                .build()
+                .unwrap();
+
+            let result = graph.run(GraphContext::new()).await.unwrap();
+            assert_eq!(
+                result.get("shared"),
+                Some(&serde_json::json!("from-fast")),
+                "same-key writes must resolve to the later-listed branch"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_graph_fan_out_branch_non_continue_outcome_errors() {
+        struct FanOutNode;
+
+        impl GraphNode for FanOutNode {
+            fn process<'a>(
+                &'a self,
+                _ctx: &'a mut GraphContext,
+            ) -> Pin<Box<dyn Future<Output = Result<NodeOutcome>> + Send + 'a>> {
+                Box::pin(async {
+                    Ok(NodeOutcome::FanOut {
+                        branches: vec!["router".into()],
+                        merge: "merge".into(),
+                    })
+                })
+            }
+        }
+
+        // A branch that tries to Route from inside a fan-out used to be
+        // silently treated as Continue; it must now fail loudly.
+        let graph = Graph::builder()
+            .node("start", FanOutNode)
+            .node("router", RouterNode)
+            .node("merge", DoneNode)
+            .build()
+            .unwrap();
+
+        let err = graph
+            .run(GraphContext::new())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("fan-out branch 'router'"),
+            "error must name the offending branch, got: {err}"
+        );
+        assert!(
+            err.contains("Continue"),
+            "error must explain the required outcome, got: {err}"
+        );
     }
 
     #[tokio::test]

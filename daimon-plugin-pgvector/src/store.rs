@@ -12,6 +12,10 @@ use crate::DistanceMetric;
 /// A [`VectorStore`] backed by PostgreSQL with the pgvector extension.
 ///
 /// Use [`PgVectorStoreBuilder`](crate::PgVectorStoreBuilder) to construct.
+///
+/// Statements are prepared through deadpool's per-connection statement cache
+/// (`prepare_cached`), so the constant upsert/query/delete/count SQL is
+/// parsed and planned once per pooled connection instead of per call.
 pub struct PgVectorStore {
     pub(crate) pool: Pool,
     pub(crate) table: String,
@@ -60,6 +64,33 @@ impl PgVectorStore {
     }
 }
 
+/// Rows per multi-row `INSERT`: Postgres caps statements at 65535 bind
+/// parameters and each row binds 4 (id, embedding, content, metadata).
+const MAX_ROWS_PER_INSERT: usize = 65_535 / 4;
+
+/// Builds the multi-row upsert statement for `rows` rows.
+fn multi_upsert_sql(table: &str, rows: usize) -> String {
+    let mut values = String::with_capacity(rows * 24);
+    for i in 0..rows {
+        if i > 0 {
+            values.push_str(", ");
+        }
+        let base = i * 4;
+        values.push_str(&format!(
+            "(${}, ${}, ${}, ${})",
+            base + 1,
+            base + 2,
+            base + 3,
+            base + 4
+        ));
+    }
+    format!(
+        "INSERT INTO {table} (id, embedding, content, metadata) VALUES {values} \
+         ON CONFLICT (id) DO UPDATE SET embedding = EXCLUDED.embedding, \
+         content = EXCLUDED.content, metadata = EXCLUDED.metadata"
+    )
+}
+
 impl VectorStore for PgVectorStore {
     async fn upsert(&self, id: &str, embedding: Vec<f32>, document: Document) -> Result<()> {
         if embedding.len() != self.dimensions {
@@ -87,10 +118,76 @@ impl VectorStore for PgVectorStore {
             self.table
         );
 
+        let stmt = client
+            .prepare_cached(&sql)
+            .await
+            .map_err(|e| DaimonError::Other(format!("pgvector prepare error: {e}")))?;
         client
-            .execute(&sql as &str, &[&id, &vec, &document.content, &metadata])
+            .execute(&stmt, &[&id, &vec, &document.content, &metadata])
             .await
             .map_err(|e| DaimonError::Other(format!("pgvector upsert error: {e}")))?;
+
+        Ok(())
+    }
+
+    async fn upsert_many(&self, items: Vec<(String, Vec<f32>, Document)>) -> Result<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        for (_, embedding, _) in &items {
+            if embedding.len() != self.dimensions {
+                return Err(DaimonError::Other(format!(
+                    "embedding dimension mismatch: expected {}, got {}",
+                    self.dimensions,
+                    embedding.len()
+                )));
+            }
+        }
+
+        // Postgres rejects duplicate ids within one ON CONFLICT statement
+        // ("cannot affect row a second time"), so dedupe keeping the last
+        // occurrence — the same outcome the sequential upsert loop produced.
+        let mut index: HashMap<String, usize> = HashMap::with_capacity(items.len());
+        let mut rows: Vec<(String, Vector, String, serde_json::Value)> =
+            Vec::with_capacity(items.len());
+        for (id, embedding, document) in items {
+            let metadata = serde_json::to_value(&document.metadata)
+                .map_err(|e| DaimonError::Other(format!("metadata serialization error: {e}")))?;
+            let row = (id, Vector::from(embedding), document.content, metadata);
+            match index.entry(row.0.clone()) {
+                std::collections::hash_map::Entry::Occupied(e) => rows[*e.get()] = row,
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert(rows.len());
+                    rows.push(row);
+                }
+            }
+        }
+
+        let client = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| DaimonError::Other(format!("pgvector pool error: {e}")))?;
+
+        for chunk in rows.chunks(MAX_ROWS_PER_INSERT) {
+            let sql = multi_upsert_sql(&self.table, chunk.len());
+            let mut params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+                Vec::with_capacity(chunk.len() * 4);
+            for (id, vec, content, metadata) in chunk {
+                params.push(id);
+                params.push(vec);
+                params.push(content);
+                params.push(metadata);
+            }
+            let stmt = client
+                .prepare_cached(&sql)
+                .await
+                .map_err(|e| DaimonError::Other(format!("pgvector prepare error: {e}")))?;
+            client
+                .execute(&stmt, &params)
+                .await
+                .map_err(|e| DaimonError::Other(format!("pgvector upsert error: {e}")))?;
+        }
 
         Ok(())
     }
@@ -120,8 +217,12 @@ impl VectorStore for PgVectorStore {
             self.table
         );
 
+        let stmt = client
+            .prepare_cached(&sql)
+            .await
+            .map_err(|e| DaimonError::Other(format!("pgvector prepare error: {e}")))?;
         let rows = client
-            .query(&sql as &str, &[&vec, &(top_k as i64)])
+            .query(&stmt, &[&vec, &(top_k as i64)])
             .await
             .map_err(|e| DaimonError::Other(format!("pgvector query error: {e}")))?;
 
@@ -153,8 +254,12 @@ impl VectorStore for PgVectorStore {
             .map_err(|e| DaimonError::Other(format!("pgvector pool error: {e}")))?;
 
         let sql = format!("DELETE FROM {} WHERE id = $1", self.table);
+        let stmt = client
+            .prepare_cached(&sql)
+            .await
+            .map_err(|e| DaimonError::Other(format!("pgvector prepare error: {e}")))?;
         let deleted = client
-            .execute(&sql as &str, &[&id])
+            .execute(&stmt, &[&id])
             .await
             .map_err(|e| DaimonError::Other(format!("pgvector delete error: {e}")))?;
 
@@ -169,8 +274,12 @@ impl VectorStore for PgVectorStore {
             .map_err(|e| DaimonError::Other(format!("pgvector pool error: {e}")))?;
 
         let sql = format!("SELECT COUNT(*) AS cnt FROM {}", self.table);
+        let stmt = client
+            .prepare_cached(&sql)
+            .await
+            .map_err(|e| DaimonError::Other(format!("pgvector prepare error: {e}")))?;
         let row = client
-            .query_one(&sql as &str, &[])
+            .query_one(&stmt, &[])
             .await
             .map_err(|e| DaimonError::Other(format!("pgvector count error: {e}")))?;
 
@@ -229,6 +338,21 @@ mod tests {
             ..l2
         };
         assert_eq!(ip.score_expr(), "-(embedding <#> $1)");
+    }
+
+    #[test]
+    fn test_multi_upsert_sql_placeholders() {
+        let one = multi_upsert_sql("t", 1);
+        assert!(one.contains("VALUES ($1, $2, $3, $4) ON CONFLICT"));
+
+        let two = multi_upsert_sql("t", 2);
+        assert!(two.contains("VALUES ($1, $2, $3, $4), ($5, $6, $7, $8) ON CONFLICT"));
+
+        // The largest chunk stays under Postgres's 65535-parameter cap.
+        let max = multi_upsert_sql("t", MAX_ROWS_PER_INSERT);
+        assert!(max.contains(&format!("${}", MAX_ROWS_PER_INSERT * 4)));
+        assert!(!max.contains(&format!("${}", MAX_ROWS_PER_INSERT * 4 + 1)));
+        const { assert!(MAX_ROWS_PER_INSERT * 4 <= 65_535) };
     }
 
     fn create_dummy_pool() -> Pool {

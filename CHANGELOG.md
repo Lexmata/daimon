@@ -7,6 +7,298 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-07-11
+
+### Added
+
+- **CI & test coverage (DAIM-15):** CI now tests and lints the whole
+  workspace (member-crate tests previously never ran in CI), compiles every
+  root-crate feature in isolation via `cargo hack --each-feature`, checks
+  all examples instead of four, builds workspace rustdoc, and gates
+  coverage on full-feature builds (≥80%; the old 84% gate measured
+  `--no-default-features` code only). New `tests/broker_contract.rs`
+  runs an identical submit/receive/complete/fail/idle contract against
+  `InProcessBroker` unconditionally and against live Redis/NATS/RabbitMQ
+  behind `#[ignore]` — the class of bug where broker `None` semantics
+  diverged now has a pinning suite.
+- **llama.cpp provider (DAIM-17):** new `daimon-provider-llamacpp` crate
+  (feature `llamacpp`, included in `full`) targeting a running `llama-server`
+  over its OpenAI-compatible `/v1/chat/completions` and `/v1/embeddings`
+  endpoints. `LlamaCpp` implements `Model` (sync + SSE streaming, tool
+  calling via `--jinja` templates) with llama.cpp-native sampling extras
+  (`grammar`, `json_schema`, `min_p`, `top_k`, `repeat_penalty`,
+  `cache_prompt`); `LlamaCppEmbedding` implements `EmbeddingModel`. Server
+  error bodies are surfaced verbatim so grammar/template failures are
+  diagnosable. Re-exported as `daimon::model::llamacpp`.
+
+### Changed
+
+- **Performance cleanups (DAIM-19):**
+  - In-memory vector stores (`InMemoryVectorStore`,
+    `InMemoryVectorStoreBackend`) precompute entry norms at insert and
+    partition the top-k to the front instead of fully sorting every entry per
+    query — O(n + k log k) instead of O(n log n), with only a dot product
+    paid per entry.
+  - `PromptTemplate` renders in a single pass instead of one full-string
+    `replace` per variable. Substituted values are now inserted verbatim:
+    the old loop could re-expand a placeholder appearing inside an earlier
+    substitution, with the result depending on `HashMap` iteration order.
+  - **Breaking:** `Scorer::Regex` now carries a `CompiledRegex` (compiled
+    once at construction) instead of a `String`. `Scorer::Regex(s.into())`
+    and `EvalScenario::expect_regex` keep working; an invalid pattern still
+    scores `false` on every evaluation.
+  - **Breaking:** `Memory::add_message` (and `ErasedMemory::
+    add_message_erased`) now take `&Message` instead of `Message`. The agent
+    runner keeps every message it persists, so passing by value forced a
+    deep clone per ReAct iteration; serializing backends (Redis, SQLite)
+    never needed ownership at all, and the in-memory backends clone
+    internally. Implementors change the signature and add one `.clone()`
+    where they store; callers drop their clones.
+  - pgvector statements go through deadpool's per-connection
+    `prepare_cached`, so the constant upsert/query/delete/count SQL is
+    parsed and planned once per pooled connection instead of per call.
+  - Docs site: dropped the unused `provideHttpClient` provider (the app uses
+    native `fetch`), swapped `FontAwesomeModule` for the standalone
+    `FaIconComponent` in header/sidebar, and removed the never-imported
+    `@angular/forms` dependency.
+- **Core (DAIM-16):** `Memory`, `ErasedMemory`, `SharedMemory`, `Tool`,
+  `ErasedTool`, `SharedTool`, `ToolOutput`, `ToolChoice`, `ToolRetryPolicy`,
+  and `BackoffStrategy` moved from the `daimon` facade into `daimon-core` so
+  provider crates can implement them (groundwork for the Bedrock AgentCore
+  integration). All existing `daimon::memory::*` and `daimon::tool::*` paths
+  are preserved via re-exports — no consumer changes required.
+- **Performance (DAIM-18):**
+  - `LineBuffer` (shared by every streaming provider) splits lines with a
+    cursor instead of draining per line — per-chunk work is now linear and
+    each line costs one allocation instead of two; the anthropic and
+    llama.cpp SSE parsers additionally reuse one event buffer across the
+    stream instead of allocating a `Vec` per token.
+  - `VectorStore` gains `upsert_many` (default: loop `upsert`); knowledge-base
+    ingest batches through it, pgvector overrides it with chunked multi-row
+    `INSERT ... ON CONFLICT`, and OpenSearch with a single `_bulk` request —
+    N-document ingest drops from N roundtrips to one (or a few chunks).
+  - `RedisBroker` and `RedisCheckpoint` reuse a `ConnectionManager` instead of
+    opening a TCP connection per operation (`BRPOP` polling gets a dedicated
+    connection so the blocking wait can't stall other commands), and the
+    broker's submit/complete write pairs are atomic single-roundtrip
+    pipelines.
+  - `RedisMemory::get_messages` reads only the tail appended since the last
+    call (with full refetch if the list shrinks externally) instead of
+    re-transferring and re-parsing the whole history every iteration.
+  - `InProcessBroker` retains at most 1024 terminal task statuses (oldest
+    evicted; evicted ids read as `Pending`) instead of growing without bound.
+  - `EvalRunner` actually honors `concurrency`: scenario chunks and
+    per-scenario scorers are polled with `join_all` instead of being awaited
+    serially.
+  - All chat providers apply a 10s connect timeout (dead upstreams fail fast;
+    streaming generations remain unbounded). Embedding clients (`openai`,
+    `ollama`, `gemini`, `azure`) get a 60s default request timeout, a connect
+    timeout, and a `with_timeout` builder — previously they could hang
+    forever with no way to configure a bound.
+  - Docs site: highlight.js now bundles only the grammars the docs use
+    (~200 kB gzipped smaller docs chunk).
+
+### Fixed
+
+- **Providers (DAIM-9):**
+  - **Gemini multi-turn tool use works.** Synthetic tool-call ids are now
+    `gemini_{seq}_{name}` and `functionResponse.name` resolves back to the
+    real function name (previously the synthetic id was sent verbatim and
+    Gemini rejected or misattributed the response); parallel calls to the
+    same function get distinct ids in both streaming and non-streaming
+    paths.
+  - Safety terminations stop masquerading as normal completions: Gemini
+    SAFETY/RECITATION/prompt-block, Anthropic `refusal`/`pause_turn`,
+    OpenAI/Azure `content_filter`, and Bedrock guardrail interventions map
+    to `StopReason::ContentFiltered`/`Refusal`/`PauseTurn` (non-streaming)
+    or an in-band stream error before `Done` (streaming).
+  - The Gemini API key moved from the `?key=` query parameter to the
+    `x-goog-api-key` header — reqwest error strings include the full URL,
+    so any transport error was logging the live key.
+  - Default HTTP timeouts everywhere: chat `generate` gets a 120s
+    per-request default (connect timeout 30s; SSE streams deliberately get
+    no whole-request deadline), embeddings/queue clients get 60s/30s with
+    `with_timeout` builders.
+  - OpenAI/Azure streaming: real `call_…` tool ids are used when present
+    (previously the chunk index), `ToolCallEnd` is emitted, `finish_reason`
+    is honored, and the duplicated SSE parsing is extracted into tested
+    handlers; malformed tool arguments surface an error instead of
+    silently becoming `null`. OpenAI sends `max_completion_tokens`.
+  - Anthropic: obsolete `prompt-caching-2024-07-31` beta header removed
+    (caching is GA), mid-stream `error` events surface instead of being
+    dropped, `message_delta` stop reasons are handled, and the client gains
+    a redacting `Debug` impl.
+  - Bedrock: retryability is classified via typed AWS error codes instead
+    of string-matching `Display` output (real throttling errors were not
+    retried), backoff uses the shared jittered helper, and the seven
+    `.build().expect(...)` panics in the request path are proper errors.
+  - Embeddings: OpenAI/Azure `with_dimensions()` is actually sent to the
+    API (previously vectors came back full-size while `dimensions()`
+    reported the truncated size); Bedrock errors on non-numeric embedding
+    elements instead of returning silently short vectors; all embedding
+    clients retry transient failures like their chat siblings.
+  - Ollama tool-call ids no longer collide across turns, and tool messages
+    carry `tool_name` for newer Ollama versions.
+  - Deprecated `claude-sonnet-4-20250514` model ids in docs, tests, and
+    examples replaced with current-generation ids.
+- **Cleanups (DAIM-14):**
+  - `HotSwapAgent` no longer holds its lock across the whole ReAct loop —
+    prompts run on an `Arc` snapshot, so a swap never waits for in-flight
+    prompts (which finish on the old agent, now documented) and new prompts
+    never stall behind a queued writer. `add_tool` pre-warms the registry
+    caches on the swapped-in agent.
+  - The tool registry's spec cache actually caches for `&self` callers, and
+    `validate_input` on an unregistered tool reports an error instead of
+    silently passing validation.
+  - DAG and graph parallel-branch merges are deterministic (registration /
+    declaration order, later wins — documented) instead of last-writer-wins
+    in completion order; a DAG branch selecting a non-successor and a graph
+    fan-out branch returning a non-`Continue` outcome are now descriptive
+    errors instead of silent no-ops.
+  - Workflow `.edge(a, b, &[])` now maps zero fields (previously it silently
+    behaved like `edge_passthrough`), and builds fail on nodes unreachable
+    from START.
+  - The HTTP agent server's SSE events are serialized via
+    `SerializableStreamEvent` JSON instead of Rust `Debug` strings, and
+    `serve()` warns when starting without an API key.
+  - `DaimonError` gains a `Storage { transient }` variant; file and NATS KV
+    checkpoint errors are classified so callers can make retry decisions.
+- **Cost tracking (DAIM-13):**
+  - Costs are recorded against the provider's real model id instead of the
+    literal `"default"`, which made every per-model pricing row unreachable.
+    `Model` gains a defaulted `model_id()` method (non-breaking) that all
+    bundled providers override.
+  - The Anthropic pricing table was a model generation stale (Claude-3-era
+    Opus/Haiku rates); it now carries Fable/Mythos 5 ($10/$50), Opus 4.x
+    ($5/$25), Haiku 4.5 ($1/$5), and keeps legacy Claude 3 rates for
+    3.x model ids.
+  - The streaming usage estimate now counts tool-call argument payloads in
+    both directions instead of only message text, removing a systematic
+    under-estimate on tool-heavy runs.
+- **Agent core (DAIM-8, breaking):**
+  - Output guardrails now run *before* the final assistant message is
+    persisted in the non-streaming path, matching the streaming path:
+    blocked text never reaches memory, transformed text is what gets
+    persisted (and what resumable checkpoints store). The redundant
+    post-loop guardrail pass is gone.
+  - `HandoffNetwork::run` no longer bypasses per-agent controls: entry-agent
+    input guardrails, per-agent output guardrails, per-agent budgets, and
+    the runner's full tool middleware/validation/retry path all apply.
+    Handing off to an agent without a system prompt removes the previous
+    agent's system message; assistant text alongside tool calls is
+    preserved; a hallucinated `transfer_to_*` target returns a tool error
+    instead of aborting the run; genuine tools named `transfer_to_*` are no
+    longer hijacked.
+  - One panicked parallel tool task no longer aborts its in-flight
+    siblings and mislabels their results.
+  - Concurrent `prompt()` calls use per-run cost trackers; they previously
+    reset the shared tracker and under-enforced `max_budget`.
+  - Streamed tool-call arguments that fail JSON parsing surface a parse
+    error to the model instead of executing the tool with `{}`.
+  - Tool-call middleware `ShortCircuit` values are used as the tool result
+    instead of a fixed placeholder string.
+  - `prompt_with_messages` persists the caller's messages to memory so the
+    next prompt's history isn't missing its own question.
+  - Resuming a run already at `max_iterations` fails immediately instead of
+    burning one model call per resume.
+  - `AgentBuilder`/`ForkBuilder` surface duplicate tool registrations from
+    `build()` instead of silently dropping the second tool
+    (`ForkBuilder::build` now returns `Result`).
+  - `StopReason` is `#[non_exhaustive]` and gains `Refusal`,
+    `ContentFiltered`, and `PauseTurn` variants so provider safety stops
+    can stop masquerading as normal completions.
+- **Distributed (DAIM-10):**
+  - Workers no longer exit permanently the first time a Redis or NATS queue
+    is idle. `TaskBroker` gains `none_means_closed()` so polling brokers'
+    empty polls are retried while `InProcessBroker`'s channel closure (and
+    AMQP consumer cancellation) still terminate the worker. `InProcessBroker`
+    gains an explicit `close()`.
+  - The NATS broker writes task result/status to KV *before* acking the
+    JetStream message; a crash mid-completion no longer loses the task with
+    its status stuck at `running`.
+  - The AMQP broker sets `basic_qos` (default prefetch 16, configurable via
+    `with_prefetch`); RabbitMQ no longer pushes an entire queue to the first
+    consumer.
+  - `TaskWorker::run_once` and the streaming worker now mark agent-errored
+    tasks `Failed`, matching `run_parallel`, instead of `Completed` with an
+    embedded error.
+  - gRPC broker client: RPCs are no longer serialized behind a mutex.
+- **Checkpoints (DAIM-10):**
+  - `NatsKvCheckpoint::connect` no longer fails when the KV bucket already
+    exists; run ids are validated against the NATS key charset; missing-key
+    detection uses typed errors instead of string matching.
+  - `CheckpointSync`/`CheckpointReplicator` refresh runs that advanced on
+    the source instead of only copying missing ids, and `delete` removes
+    remote before local so a failed remote delete can't resurrect the run.
+  - `FileCheckpoint::save` treats a failed fsync as an error instead of
+    logging a warning and reporting the checkpoint durable.
+- **A2A (DAIM-10):**
+  - `tasks/cancel` actually cancels: the in-flight agent run is aborted via
+    a per-task cancellation token, and a completion racing the cancel can no
+    longer overwrite `Canceled` with `Completed`.
+  - Continuing a task preserves its history and artifacts and sends the
+    full conversation to the agent instead of only the newest message.
+  - Task/request ids are UUID-formatted and collision-resistant under
+    concurrency (previously bare nanosecond timestamps).
+- **MCP (DAIM-11, breaking):**
+  - Request ids are now allocated by the transport instead of per
+    `McpToolBridge`; two bridges sharing one `SseTransport` no longer send
+    colliding ids that misroute or hang responses. `McpTransport::send` is
+    replaced by `McpTransport::request(method, params)`.
+  - The stdio and WebSocket transports match responses by JSON-RPC id and
+    skip server notifications instead of returning the next frame blindly.
+  - `SseTransport` fails fast after the event stream dies (previously every
+    subsequent call hung forever), validates the server-sent `endpoint` URL
+    against the connection origin per the MCP spec (a malicious server can
+    no longer redirect authenticated POSTs off-origin), and aborts its
+    reader task on drop.
+  - The MCP server's stdio framing tolerates additional headers
+    (`Content-Type` no longer desyncs the stream), rejects unparseable
+    `Content-Length`, and answers malformed JSON with a spec-compliant
+    `-32700` Parse Error instead of silence.
+  - `McpClient::list_tools` surfaces deserialization failures instead of
+    returning a silently empty tool list, and follows `nextCursor`
+    pagination.
+  - HTTP-based transports apply a 30s default request timeout
+    (configurable); response ids may be numbers or numeric strings.
+- **Memory (DAIM-12):**
+  - `SummaryMemory` no longer loses messages when the summarizer model call
+    fails — messages are only drained after a successful summary, concurrent
+    summarizations are serialized, and a failed summarization logs a warning
+    instead of aborting the caller's agent run. A `clear()` racing an
+    in-flight summarization no longer resurrects deleted messages.
+  - Sliding-window and token-window eviction now treat an assistant
+    tool-call message and its tool results as an atomic group, so eviction
+    can no longer orphan tool results and produce histories providers
+    reject with a 400.
+  - The Redis memory backend uses `redis::aio::ConnectionManager`; a dropped
+    connection now reconnects instead of failing every subsequent operation.
+  - The SQLite backend surfaces corrupted `tool_calls` JSON as an error
+    instead of silently rewriting history, and session IDs are now
+    collision-resistant across processes.
+- **Guardrails (DAIM-12, breaking):** `RegexFilterGuardrail::block()` /
+  `redact()` return `Result` and reject invalid regex patterns loudly.
+  Previously a pattern that failed to compile was silently dropped — a
+  typo'd credential filter became no filter at all.
+
+### Added
+
+- **MCP `SseTransport`** — HTTP+SSE client transport for the Model Context
+  Protocol, with endpoint discovery, out-of-order response correlation, and a
+  real-TCP test harness. **`WebSocketTransport` is restored** (removed in
+  0.17.0); the `mcp` feature therefore depends on `tokio-tungstenite` again.
+
+### Changed
+
+- **Workspace crates now version in lockstep** via `[workspace.package]`; all
+  eight crates share one version (0.19.0) and common dependency declarations
+  moved to `[workspace.dependencies]`. Member crates no longer drift behind
+  the root crate between releases.
+- Bumped the AWS SDK group and adapted the Bedrock provider to the SDK's
+  infallible guardrail builders.
+- `jsonschema` no longer enables default features, dropping `reqwest`/`hyper`
+  from `--no-default-features` builds (remote `$ref` resolution was unused).
+
 ## [0.18.1] - 2026-07-08
 
 ### Security
@@ -439,7 +731,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `commitlint.toml` for Conventional Commits enforcement.
 - `rustfmt.toml` and `clippy.toml` for consistent code style.
 
-[Unreleased]: https://github.com/Lexmata/daimon/compare/v0.18.1...HEAD
+[Unreleased]: https://github.com/Lexmata/daimon/compare/v0.19.0...HEAD
+[0.19.0]: https://github.com/Lexmata/daimon/compare/v0.18.1...v0.19.0
 [0.18.1]: https://github.com/Lexmata/daimon/compare/v0.18.0...v0.18.1
 [0.18.0]: https://github.com/Lexmata/daimon/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/Lexmata/daimon/compare/v0.16.0...v0.17.0

@@ -46,12 +46,12 @@ let model = OpenAi::with_api_key("gpt-4o", std::env::var("OPENAI_API_KEY")?)
 |--------|-------------|
 | `.with_api_key(model_id, key)` | Explicit API key (otherwise reads `OPENAI_API_KEY`) |
 | `.with_base_url(url)` | Custom base URL (proxies, local endpoints) |
-| `.with_timeout(duration)` | HTTP request timeout |
+| `.with_timeout(duration)` | Timeout for non-streaming requests (default: 120s; streams use a connect timeout only) |
 | `.with_max_retries(n)` | Retries for 429 and 5xx (default: 3) |
 | `.with_response_format(format)` | `"json_object"` or `"text"` |
 | `.with_parallel_tool_calls(enabled)` | Allow multiple tool calls per turn |
 
-**Models:** `gpt-4o`, `gpt-4o-mini`, `gpt-4-turbo`, `gpt-4`, `gpt-3.5-turbo`, `o1`, `o3-mini`
+**Models:** `gpt-5`, `gpt-5-mini`, `gpt-4.1`, `gpt-4o`, `gpt-4o-mini`, `o3`, `o4-mini`
 
 **Capabilities:** Tool calls, streaming, JSON mode, parallel tool calls, response format. Caching: system message caching via API (reported in `usage.cached_tokens`).
 
@@ -92,9 +92,9 @@ let agent = Agent::builder()
 use daimon::model::anthropic::Anthropic;
 use std::time::Duration;
 
-let model = Anthropic::new("claude-sonnet-4-20250514");
+let model = Anthropic::new("claude-sonnet-5");
 
-let model = Anthropic::with_api_key("claude-sonnet-4-20250514", std::env::var("ANTHROPIC_API_KEY")?)
+let model = Anthropic::with_api_key("claude-sonnet-5", std::env::var("ANTHROPIC_API_KEY")?)
     .with_base_url("https://api.anthropic.com")
     .with_timeout(Duration::from_secs(60))
     .with_max_retries(5)
@@ -107,11 +107,11 @@ let model = Anthropic::with_api_key("claude-sonnet-4-20250514", std::env::var("A
 |--------|-------------|
 | `.with_api_key(model_id, key)` | Explicit API key (otherwise `ANTHROPIC_API_KEY`) |
 | `.with_base_url(url)` | Custom base URL |
-| `.with_timeout(duration)` | HTTP timeout |
+| `.with_timeout(duration)` | Timeout for non-streaming requests (default: 120s; streams use a connect timeout only) |
 | `.with_max_retries(n)` | Retries for 429, 529, 5xx (default: 3) |
 | `.with_prompt_caching()` | Enables `cache_control` breakpoints (system, tools) |
 
-**Models:** `claude-sonnet-4-20250514`, `claude-3-5-haiku`, `claude-3-opus`, `claude-3-haiku`, etc.
+**Models:** `claude-sonnet-5`, `claude-opus-4-8`, `claude-haiku-4-5`, etc.
 
 **Capabilities:** Tool calls, streaming, overloaded retry (429/529/5xx). Caching: native `cache_control` breakpoints for system and tool definitions; `usage.cached_tokens` reports cache reads.
 
@@ -121,7 +121,7 @@ let model = Anthropic::with_api_key("claude-sonnet-4-20250514", std::env::var("A
 use daimon::cost::AnthropicCostModel;
 
 let agent = Agent::builder()
-    .model(Anthropic::new("claude-sonnet-4-20250514"))
+    .model(Anthropic::new("claude-sonnet-5"))
     .cost_model(AnthropicCostModel)
     .build()?;
 ```
@@ -199,12 +199,12 @@ let model = Gemini::with_api_key("gemini-2.0-flash", std::env::var("GOOGLE_API_K
 |--------|-------------|
 | `.with_api_key(model_id, key)` | Explicit key (otherwise `GOOGLE_API_KEY`) |
 | `.with_base_url(url)` | Custom URL (e.g. Vertex AI) |
-| `.with_timeout(duration)` | HTTP timeout |
+| `.with_timeout(duration)` | Timeout for non-streaming requests (default: 120s; streams use a connect timeout only) |
 | `.with_max_retries(n)` | Retries for 429, 5xx |
-| `.with_bearer_token()` | Use `Authorization: Bearer` (Vertex AI) |
+| `.with_bearer_token()` | Use `Authorization: Bearer` (Vertex AI; API keys are sent via the `x-goog-api-key` header) |
 | `.with_cached_content(name)` | Reference pre-created cached content |
 
-**Models:** `gemini-2.0-flash`, `gemini-pro`, `gemini-1.5-pro`, `gemini-1.5-flash`
+**Models:** `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.0-flash`
 
 **Capabilities:** Tool calls, streaming. Caching: system instruction caching via `with_cached_content` or Gemini Caching API.
 
@@ -259,7 +259,7 @@ let model = AzureOpenAi::with_api_key(
 |--------|-------------|
 | `.with_api_key(resource_url, deployment, key)` | Explicit key (otherwise `AZURE_OPENAI_API_KEY`) |
 | `.with_api_version(version)` | API version (default: `2024-10-21`) |
-| `.with_timeout(duration)` | HTTP timeout |
+| `.with_timeout(duration)` | Timeout for non-streaming requests (default: 120s; streams use a connect timeout only) |
 | `.with_max_retries(n)` | Retries |
 | `.with_bearer_token()` | Microsoft Entra ID (Azure AD) auth |
 
@@ -298,7 +298,7 @@ With feature `servicebus`: `ServiceBusBroker` for Azure Service Bus task distrib
 use daimon::model::bedrock::Bedrock;
 use std::time::Duration;
 
-let model = Bedrock::new("us.anthropic.claude-sonnet-4-20250514-v1:0")
+let model = Bedrock::new("us.anthropic.claude-sonnet-5")
     .with_region("us-east-1")
     .with_max_retries(5)
     .with_guardrail("guardrail-id", "DRAFT")
@@ -354,7 +354,7 @@ fn select_model(use_openai: bool) -> SharedModel {
     if use_openai {
         Arc::new(OpenAi::new("gpt-4o"))
     } else {
-        Arc::new(Anthropic::new("claude-sonnet-4-20250514"))
+        Arc::new(Anthropic::new("claude-sonnet-5"))
     }
 }
 
@@ -384,7 +384,7 @@ let hot = HotSwapAgent::new(agent);
 let response = hot.prompt("Hello").await?;
 
 // Swap model at runtime
-hot.swap_model(Anthropic::new("claude-sonnet-4-20250514")).await;
+hot.swap_model(Anthropic::new("claude-sonnet-5")).await;
 
 // Next prompt uses the new model
 let response = hot.prompt("Hello again").await?;
@@ -406,7 +406,7 @@ let base = Agent::builder()
 
 // Variant A: different model
 let variant_a = base.fork_builder()
-    .model(Anthropic::new("claude-sonnet-4-20250514"))
+    .model(Anthropic::new("claude-sonnet-5"))
     .build();
 
 // Variant B: different system prompt

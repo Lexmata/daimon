@@ -3,8 +3,6 @@
 #[cfg(any(
     feature = "openai",
     feature = "anthropic",
-    feature = "gemini",
-    feature = "azure",
     feature = "ollama",
     feature = "mcp",
 ))]
@@ -13,8 +11,6 @@ use std::time::Duration;
 #[cfg(any(
     feature = "openai",
     feature = "anthropic",
-    feature = "gemini",
-    feature = "azure",
     feature = "ollama",
     feature = "mcp",
 ))]
@@ -23,8 +19,6 @@ use crate::error::{DaimonError, Result};
 #[cfg(any(
     feature = "openai",
     feature = "anthropic",
-    feature = "gemini",
-    feature = "azure",
     feature = "ollama",
     feature = "mcp",
 ))]
@@ -38,8 +32,6 @@ pub struct A2aClient {
     #[cfg(any(
         feature = "openai",
         feature = "anthropic",
-        feature = "gemini",
-        feature = "azure",
         feature = "ollama",
         feature = "mcp",
     ))]
@@ -55,8 +47,6 @@ impl A2aClient {
             #[cfg(any(
                 feature = "openai",
                 feature = "anthropic",
-                feature = "gemini",
-                feature = "azure",
                 feature = "ollama",
                 feature = "mcp",
             ))]
@@ -79,8 +69,6 @@ impl A2aClient {
     #[cfg(any(
         feature = "openai",
         feature = "anthropic",
-        feature = "gemini",
-        feature = "azure",
         feature = "ollama",
         feature = "mcp",
     ))]
@@ -96,8 +84,6 @@ impl A2aClient {
     #[cfg(any(
         feature = "openai",
         feature = "anthropic",
-        feature = "gemini",
-        feature = "azure",
         feature = "ollama",
         feature = "mcp",
     ))]
@@ -113,8 +99,6 @@ impl A2aClient {
     #[cfg(any(
         feature = "openai",
         feature = "anthropic",
-        feature = "gemini",
-        feature = "azure",
         feature = "ollama",
         feature = "mcp",
     ))]
@@ -133,8 +117,6 @@ impl A2aClient {
     #[cfg(any(
         feature = "openai",
         feature = "anthropic",
-        feature = "gemini",
-        feature = "azure",
         feature = "ollama",
         feature = "mcp",
     ))]
@@ -153,8 +135,6 @@ impl A2aClient {
     #[cfg(any(
         feature = "openai",
         feature = "anthropic",
-        feature = "gemini",
-        feature = "azure",
         feature = "ollama",
         feature = "mcp",
     ))]
@@ -178,8 +158,6 @@ impl A2aClient {
     #[cfg(any(
         feature = "openai",
         feature = "anthropic",
-        feature = "gemini",
-        feature = "azure",
         feature = "ollama",
         feature = "mcp",
     ))]

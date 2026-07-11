@@ -22,6 +22,14 @@ pub trait Model: Send + Sync {
         &self,
         request: &ChatRequest,
     ) -> impl Future<Output = Result<ResponseStream>> + Send;
+
+    /// The provider-side model identifier (e.g. `"claude-sonnet-5"`), used
+    /// for cost attribution. Defaults to `"default"` so existing
+    /// implementations keep compiling; providers should override it with the
+    /// configured model name.
+    fn model_id(&self) -> &str {
+        "default"
+    }
 }
 
 /// Shared ownership of a model via `Arc<dyn ErasedModel>`.
@@ -40,6 +48,9 @@ pub trait ErasedModel: Send + Sync {
         &'a self,
         request: &'a ChatRequest,
     ) -> Pin<Box<dyn Future<Output = Result<ResponseStream>> + Send + 'a>>;
+
+    /// Object-safe version of [`Model::model_id`].
+    fn model_id_erased(&self) -> &str;
 }
 
 impl<T: Model> ErasedModel for T {
@@ -55,5 +66,9 @@ impl<T: Model> ErasedModel for T {
         request: &'a ChatRequest,
     ) -> Pin<Box<dyn Future<Output = Result<ResponseStream>> + Send + 'a>> {
         Box::pin(self.generate_stream(request))
+    }
+
+    fn model_id_erased(&self) -> &str {
+        self.model_id()
     }
 }

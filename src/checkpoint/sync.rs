@@ -58,49 +58,63 @@ impl CheckpointSync {
 
     /// Pulls all checkpoints from the remote store into the local store.
     ///
-    /// Returns the number of run IDs that were synced (i.e. missing locally).
+    /// Returns the number of runs that were copied — those missing locally
+    /// plus those whose remote checkpoint has advanced past the local copy.
     pub async fn pull_all(&self) -> Result<usize> {
-        let remote_runs = self.remote.list_runs_erased().await?;
-        let local_runs = self.local.list_runs_erased().await?;
-
-        let local_set: std::collections::HashSet<&str> =
-            local_runs.iter().map(|s| s.as_str()).collect();
-
-        let mut synced = 0;
-        for run_id in &remote_runs {
-            if !local_set.contains(run_id.as_str())
-                && let Some(state) = self.remote.load_erased(run_id).await?
-            {
-                self.local.save_erased(&state).await?;
-                synced += 1;
-            }
-        }
-
-        Ok(synced)
+        replicate(&*self.remote, &*self.local).await
     }
 
     /// Pushes all checkpoints from the local store to the remote store.
     ///
-    /// Returns the number of run IDs that were pushed (i.e. missing remotely).
+    /// Returns the number of runs that were copied — those missing remotely
+    /// plus those whose local checkpoint has advanced past the remote copy.
     pub async fn push_all(&self) -> Result<usize> {
-        let local_runs = self.local.list_runs_erased().await?;
-        let remote_runs = self.remote.list_runs_erased().await?;
-
-        let remote_set: std::collections::HashSet<&str> =
-            remote_runs.iter().map(|s| s.as_str()).collect();
-
-        let mut pushed = 0;
-        for run_id in &local_runs {
-            if !remote_set.contains(run_id.as_str())
-                && let Some(state) = self.local.load_erased(run_id).await?
-            {
-                self.remote.save_erased(&state).await?;
-                pushed += 1;
-            }
-        }
-
-        Ok(pushed)
+        replicate(&*self.local, &*self.remote).await
     }
+}
+
+/// Returns whether `source` represents more recent progress than `target`
+/// for the same run.
+///
+/// A higher iteration always wins. At equal iterations a completed
+/// checkpoint supersedes an in-progress one, and a later `created_at`
+/// breaks the remaining ties. Replication previously only copied run IDs
+/// missing on the target, so a run that advanced on the source was never
+/// refreshed once the target held any (however stale) copy of it.
+fn source_is_newer(source: &CheckpointState, target: &CheckpointState) -> bool {
+    if source.iteration != target.iteration {
+        return source.iteration > target.iteration;
+    }
+    if source.completed != target.completed {
+        return source.completed;
+    }
+    source.created_at > target.created_at
+}
+
+/// Copies every run from `source` to `target` that is missing on the target
+/// or newer on the source (see [`source_is_newer`]). Returns the number of
+/// runs copied.
+async fn replicate(source: &dyn ErasedCheckpoint, target: &dyn ErasedCheckpoint) -> Result<usize> {
+    let source_runs = source.list_runs_erased().await?;
+
+    let mut copied = 0;
+    for run_id in &source_runs {
+        let Some(source_state) = source.load_erased(run_id).await? else {
+            continue;
+        };
+
+        let should_copy = match target.load_erased(run_id).await? {
+            None => true,
+            Some(target_state) => source_is_newer(&source_state, &target_state),
+        };
+
+        if should_copy {
+            target.save_erased(&source_state).await?;
+            copied += 1;
+        }
+    }
+
+    Ok(copied)
 }
 
 impl Checkpoint for CheckpointSync {
@@ -139,8 +153,14 @@ impl Checkpoint for CheckpointSync {
     }
 
     async fn delete(&self, run_id: &str) -> Result<()> {
-        self.local.delete_erased(run_id).await?;
+        // Delete from the remote first. If the local copy were removed first
+        // and the remote delete then failed, the run would survive on the
+        // remote and a replicator (or a `load` fallback) would resurrect it
+        // locally — the delete would silently un-happen. Failing after the
+        // remote delete instead leaves only a stale local copy, which a
+        // retried delete removes for good.
         self.remote.delete_erased(run_id).await?;
+        self.local.delete_erased(run_id).await?;
         Ok(())
     }
 }
@@ -189,14 +209,14 @@ impl CheckpointReplicator {
         }
     }
 
-    /// Runs the replicator loop indefinitely, pulling new checkpoints
-    /// from the remote store at the configured interval.
+    /// Runs the replicator loop indefinitely, pulling new and advanced
+    /// checkpoints from the remote store at the configured interval.
     pub async fn run(&self) -> Result<()> {
         loop {
             match self.pull_once().await {
                 Ok(count) => {
                     if count > 0 {
-                        tracing::info!(synced = count, "checkpoint replicator: pulled new runs");
+                        tracing::info!(synced = count, "checkpoint replicator: pulled runs");
                     }
                 }
                 Err(e) => {
@@ -208,24 +228,12 @@ impl CheckpointReplicator {
         }
     }
 
-    /// Performs a single pull, returning the number of new runs synced.
+    /// Performs a single pull, returning the number of runs synced — those
+    /// missing locally plus those whose remote checkpoint has advanced past
+    /// the local copy (see [`CheckpointSync::pull_all`], which shares the
+    /// same replication logic).
     pub async fn pull_once(&self) -> Result<usize> {
-        let remote_runs = self.remote.list_runs_erased().await?;
-        let local_runs = self.local.list_runs_erased().await?;
-
-        let local_set: std::collections::HashSet<String> = local_runs.into_iter().collect();
-
-        let mut synced = 0;
-        for run_id in &remote_runs {
-            if !local_set.contains(run_id)
-                && let Some(state) = self.remote.load_erased(run_id).await?
-            {
-                self.local.save_erased(&state).await?;
-                synced += 1;
-            }
-        }
-
-        Ok(synced)
+        replicate(&*self.remote, &*self.local).await
     }
 }
 
@@ -410,5 +418,173 @@ mod tests {
 
         let synced = replicator.pull_once().await.unwrap();
         assert_eq!(synced, 0);
+    }
+
+    #[test]
+    fn test_source_is_newer_ordering() {
+        let base = CheckpointState::new("r", vec![], 2);
+
+        // Higher iteration wins in either direction.
+        let advanced = CheckpointState::new("r", vec![], 5);
+        assert!(source_is_newer(&advanced, &base));
+        assert!(!source_is_newer(&base, &advanced));
+
+        // At equal iterations, completion supersedes in-progress.
+        let done = CheckpointState::new("r", vec![], 2).mark_completed();
+        assert!(source_is_newer(&done, &base));
+        assert!(!source_is_newer(&base, &done));
+
+        // Identical progress is not "newer" — no pointless copies.
+        assert!(!source_is_newer(&base, &base.clone()));
+    }
+
+    #[tokio::test]
+    async fn test_pull_all_refreshes_stale_local_run() {
+        let local = Arc::new(InMemoryCheckpoint::new());
+        let remote = Arc::new(InMemoryCheckpoint::new());
+
+        // The run exists on both sides, but the remote has advanced. A
+        // missing-only sync would skip it and the local copy would stay
+        // stale forever.
+        local
+            .save(&CheckpointState::new("run-1", vec![], 2))
+            .await
+            .unwrap();
+        remote
+            .save(&CheckpointState::new(
+                "run-1",
+                vec![Message::user("progress")],
+                7,
+            ))
+            .await
+            .unwrap();
+
+        let sync = CheckpointSync::from_erased(local.clone(), remote);
+        let synced = sync.pull_all().await.unwrap();
+        assert_eq!(synced, 1);
+
+        let refreshed = local.load("run-1").await.unwrap().unwrap();
+        assert_eq!(refreshed.iteration, 7);
+        assert_eq!(refreshed.messages.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_pull_all_does_not_clobber_newer_local_run() {
+        let local = Arc::new(InMemoryCheckpoint::new());
+        let remote = Arc::new(InMemoryCheckpoint::new());
+
+        local
+            .save(&CheckpointState::new("run-1", vec![], 9))
+            .await
+            .unwrap();
+        remote
+            .save(&CheckpointState::new("run-1", vec![], 3))
+            .await
+            .unwrap();
+
+        let sync = CheckpointSync::from_erased(local.clone(), remote);
+        let synced = sync.pull_all().await.unwrap();
+        assert_eq!(synced, 0, "a stale remote copy must not overwrite local");
+
+        let kept = local.load("run-1").await.unwrap().unwrap();
+        assert_eq!(kept.iteration, 9);
+    }
+
+    #[tokio::test]
+    async fn test_push_all_refreshes_stale_remote_run() {
+        let local = Arc::new(InMemoryCheckpoint::new());
+        let remote = Arc::new(InMemoryCheckpoint::new());
+
+        local
+            .save(&CheckpointState::new("run-1", vec![], 6).mark_completed())
+            .await
+            .unwrap();
+        remote
+            .save(&CheckpointState::new("run-1", vec![], 6))
+            .await
+            .unwrap();
+
+        let sync = CheckpointSync::from_erased(local, remote.clone());
+        let pushed = sync.push_all().await.unwrap();
+        assert_eq!(
+            pushed, 1,
+            "a completed local run must refresh the in-progress remote copy"
+        );
+
+        let refreshed = remote.load("run-1").await.unwrap().unwrap();
+        assert!(refreshed.completed);
+    }
+
+    #[tokio::test]
+    async fn test_replicator_pull_once_refreshes_stale_run() {
+        let local = Arc::new(InMemoryCheckpoint::new());
+        let remote = Arc::new(InMemoryCheckpoint::new());
+
+        local
+            .save(&CheckpointState::new("rep-1", vec![], 1))
+            .await
+            .unwrap();
+        remote
+            .save(&CheckpointState::new("rep-1", vec![], 4))
+            .await
+            .unwrap();
+
+        let replicator =
+            CheckpointReplicator::new(local.clone(), remote, std::time::Duration::from_secs(60));
+
+        let synced = replicator.pull_once().await.unwrap();
+        assert_eq!(synced, 1);
+
+        let refreshed = local.load("rep-1").await.unwrap().unwrap();
+        assert_eq!(refreshed.iteration, 4);
+    }
+
+    /// Checkpoint whose `delete` always fails, delegating everything else to
+    /// an in-memory store. Models an unreachable remote during deletion.
+    struct FailingDeleteCheckpoint {
+        inner: InMemoryCheckpoint,
+    }
+
+    impl Checkpoint for FailingDeleteCheckpoint {
+        async fn save(&self, state: &CheckpointState) -> Result<()> {
+            self.inner.save(state).await
+        }
+
+        async fn load(&self, run_id: &str) -> Result<Option<CheckpointState>> {
+            self.inner.load(run_id).await
+        }
+
+        async fn list_runs(&self) -> Result<Vec<String>> {
+            self.inner.list_runs().await
+        }
+
+        async fn delete(&self, _run_id: &str) -> Result<()> {
+            Err(crate::error::DaimonError::Other(
+                "remote delete unavailable".into(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_delete_keeps_local_when_remote_delete_fails() {
+        let local = Arc::new(InMemoryCheckpoint::new());
+        let remote = FailingDeleteCheckpoint {
+            inner: InMemoryCheckpoint::new(),
+        };
+
+        let state = CheckpointState::new("run-del", vec![], 1);
+        local.save(&state).await.unwrap();
+        remote.save(&state).await.unwrap();
+
+        let sync = CheckpointSync::from_erased(local.clone(), Arc::new(remote));
+        assert!(sync.delete("run-del").await.is_err());
+
+        // The remote delete failed, so the local copy must still exist:
+        // deleting local-first would have left the run only on the remote,
+        // from where a replicator would resurrect it.
+        assert!(
+            local.load("run-del").await.unwrap().is_some(),
+            "local copy must survive a failed remote delete"
+        );
     }
 }

@@ -26,7 +26,9 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 
 use crate::agent::Agent;
+use crate::distributed::SerializableStreamEvent;
 use crate::error::Result;
+use crate::stream::StreamEvent;
 
 struct AppState {
     agent: Agent,
@@ -83,7 +85,19 @@ impl AgentServer {
     }
 
     /// Starts the HTTP server. This blocks until the server shuts down.
+    ///
+    /// Logs a warning when no API key is configured: the default bind
+    /// address is `0.0.0.0:8080`, which exposes the agent to every network
+    /// interface without authentication.
     pub async fn serve(self) -> Result<()> {
+        if self.api_key.is_none() {
+            tracing::warn!(
+                addr = %self.bind_addr,
+                "agent server starting WITHOUT authentication — every endpoint is publicly \
+                 callable on this address; call .api_key(...) to require an API key"
+            );
+        }
+
         let state = Arc::new(AppState {
             agent: self.agent,
             api_key: self.api_key,
@@ -197,11 +211,22 @@ async fn prompt_stream_handler(
 
     let sse_stream = stream.map(|event| {
         let event = event.map_err(axum::Error::new)?;
-        let data = serde_json::to_string(&format!("{event:?}")).unwrap_or_default();
-        Ok(Event::default().data(data))
+        Ok(Event::default().data(sse_event_json(&event)))
     });
 
     Ok(Sse::new(sse_stream))
+}
+
+/// Serializes a [`StreamEvent`] as a machine-parseable JSON SSE payload via
+/// [`SerializableStreamEvent`] (previously the `Debug` string was sent, which
+/// clients could not parse).
+fn sse_event_json(event: &StreamEvent) -> String {
+    let serializable = SerializableStreamEvent::from(event);
+    serde_json::to_string(&serializable).unwrap_or_else(|e| {
+        // These plain enums serialize infallibly in practice; if that ever
+        // changes, still emit valid JSON rather than panicking mid-stream.
+        serde_json::json!({ "Error": format!("event serialization failed: {e}") }).to_string()
+    })
 }
 
 #[cfg(test)]
@@ -280,5 +305,33 @@ mod tests {
         let state = state_with_key(Some("s3cr3t"));
         let headers = HeaderMap::new();
         assert!(check_api_key(&state, &headers).is_err());
+    }
+
+    #[test]
+    fn test_sse_event_payload_is_parseable_json() {
+        let json = sse_event_json(&StreamEvent::TextDelta("hello".into()));
+        let parsed: SerializableStreamEvent = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, SerializableStreamEvent::TextDelta(ref t) if t == "hello"));
+    }
+
+    #[test]
+    fn test_sse_tool_call_event_round_trips() {
+        let json = sse_event_json(&StreamEvent::ToolCallStart {
+            id: "tc-1".into(),
+            name: "calc".into(),
+        });
+        let parsed: SerializableStreamEvent = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            parsed,
+            SerializableStreamEvent::ToolCallStart { ref id, ref name }
+                if id == "tc-1" && name == "calc"
+        ));
+    }
+
+    #[test]
+    fn test_sse_done_event_round_trips() {
+        let json = sse_event_json(&StreamEvent::Done);
+        let parsed: SerializableStreamEvent = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, SerializableStreamEvent::Done));
     }
 }

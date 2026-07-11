@@ -34,6 +34,7 @@
 //! | `azure` | Azure OpenAI Service provider (via `daimon-provider-azure`) |
 //! | `bedrock` | AWS Bedrock provider (via `daimon-provider-bedrock`) |
 //! | `ollama` | Ollama local model provider |
+//! | `llamacpp` | llama.cpp (llama-server) provider (via `daimon-provider-llamacpp`) |
 //! | `sqlite` | SQLite memory backend |
 //! | `redis` | Redis memory backend + task broker |
 //! | `nats` | NATS JetStream task broker |
@@ -72,6 +73,8 @@
 //! - [`distributed`] — Distributed agent execution across processes
 //! - [`mcp`] — Model Context Protocol client and server (stdio, HTTP)
 //! - [`telemetry`] — OpenTelemetry OTLP export (feature = "otel")
+//! - [`server`] — HTTP agent server (feature = "http-server")
+//! - [`eval`] — evaluation harness for agent behavior (feature = "eval")
 
 pub mod a2a;
 pub mod agent;

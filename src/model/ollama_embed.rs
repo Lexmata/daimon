@@ -1,9 +1,30 @@
 //! Ollama embeddings provider.
 
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 
 use crate::error::{DaimonError, Result};
 use crate::model::EmbeddingModel;
+
+/// Default total request timeout. Embedding calls are non-streaming and
+/// bounded, so a hung endpoint now fails after a minute instead of stalling
+/// RAG ingest or retrieval forever; override with `with_timeout`.
+const DEFAULT_EMBED_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Upper bound on establishing a TCP connection, so a dead or unreachable
+/// endpoint fails fast.
+const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+const DEFAULT_MAX_RETRIES: u32 = 3;
+
+fn build_client(timeout: Duration) -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(timeout)
+        .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
+        .build()
+        .expect("failed to build HTTP client")
+}
 
 /// Ollama embedding model client.
 pub struct OllamaEmbedding {
@@ -11,16 +32,23 @@ pub struct OllamaEmbedding {
     model_id: String,
     base_url: String,
     dimensions: usize,
+    max_retries: u32,
 }
 
 impl OllamaEmbedding {
+    /// Creates a new Ollama embedding client.
+    ///
+    /// Reads the server URL from `OLLAMA_HOST` (default
+    /// `http://localhost:11434`). Requests carry a 60-second default timeout;
+    /// override with [`with_timeout`](Self::with_timeout).
     pub fn new(model_id: impl Into<String>) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: build_client(DEFAULT_EMBED_TIMEOUT),
             model_id: model_id.into(),
             base_url: std::env::var("OLLAMA_HOST")
                 .unwrap_or_else(|_| "http://localhost:11434".into()),
             dimensions: 768,
+            max_retries: DEFAULT_MAX_RETRIES,
         }
     }
 
@@ -29,8 +57,20 @@ impl OllamaEmbedding {
         self
     }
 
+    /// Sets the total request timeout (default: 60 seconds).
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.client = build_client(timeout);
+        self
+    }
+
     pub fn with_dimensions(mut self, dims: usize) -> Self {
         self.dimensions = dims;
+        self
+    }
+
+    /// Set the maximum number of retries for transient errors (default: 3).
+    pub fn with_max_retries(mut self, retries: u32) -> Self {
+        self.max_retries = retries;
         self
     }
 }
@@ -52,32 +92,70 @@ impl EmbeddingModel for OllamaEmbedding {
             model: &self.model_id,
             input: texts,
         };
+        let url = format!("{}/api/embed", self.base_url);
 
-        let resp = self
-            .client
-            .post(format!("{}/api/embed", self.base_url))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| DaimonError::Model(format!("Ollama embedding HTTP error: {e}")))?;
-
-        if !resp.status().is_success() {
+        // Same transient-error retry policy as the chat providers.
+        for attempt in 0..=self.max_retries {
+            let resp = self
+                .client
+                .post(&url)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| DaimonError::Model(format!("Ollama embedding HTTP error: {e}")))?;
             let status = resp.status();
+
+            if status.is_success() {
+                let data: EmbedResponse = resp.json().await.map_err(|e| {
+                    DaimonError::Model(format!("Ollama embedding parse error: {e}"))
+                })?;
+                return Ok(data.embeddings);
+            }
+
+            let retry_after = crate::model::retry::parse_retry_after(resp.headers());
             let text = resp.text().await.unwrap_or_default();
-            return Err(DaimonError::Model(format!(
-                "Ollama embedding error {status}: {text}"
-            )));
+            let is_retryable = status.as_u16() == 429 || status.is_server_error();
+
+            if is_retryable && attempt < self.max_retries {
+                let delay = crate::model::retry::backoff_delay(attempt, retry_after);
+                tracing::debug!(status = %status, attempt, delay_ms = delay.as_millis(), "retryable embedding error, backing off");
+                tokio::time::sleep(delay).await;
+            } else {
+                return Err(DaimonError::Model(format!(
+                    "Ollama embedding error {status}: {text}"
+                )));
+            }
         }
 
-        let data: EmbedResponse = resp
-            .json()
-            .await
-            .map_err(|e| DaimonError::Model(format!("Ollama embedding parse error: {e}")))?;
-
-        Ok(data.embeddings)
+        unreachable!("loop always returns or retries")
     }
 
     fn dimensions(&self) -> usize {
         self.dimensions
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ollama_embedding_defaults() {
+        let embed = OllamaEmbedding::new("nomic-embed-text");
+        assert_eq!(embed.model_id, "nomic-embed-text");
+        assert_eq!(embed.dimensions, 768);
+        assert_eq!(embed.max_retries, DEFAULT_MAX_RETRIES);
+    }
+
+    #[test]
+    fn test_builder_chain() {
+        let embed = OllamaEmbedding::new("nomic-embed-text")
+            .with_base_url("http://remote:11434")
+            .with_dimensions(1024)
+            .with_timeout(Duration::from_secs(5))
+            .with_max_retries(1);
+        assert_eq!(embed.base_url, "http://remote:11434");
+        assert_eq!(embed.dimensions, 1024);
+        assert_eq!(embed.max_retries, 1);
     }
 }
