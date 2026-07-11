@@ -7,7 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.19.0] - 2026-07-11
+## [0.20.0] - 2026-07-11
+
+> Version 0.19.0 is skipped: a stale facade-only `daimon@0.19.0` was
+> published to crates.io ahead of this release and versions are immutable.
 
 ### Added
 
@@ -291,7 +294,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **Workspace crates now version in lockstep** via `[workspace.package]`; all
-  eight crates share one version (0.19.0) and common dependency declarations
+  nine crates share one version (0.20.0) and common dependency declarations
   moved to `[workspace.dependencies]`. Member crates no longer drift behind
   the root crate between releases.
 - Bumped the AWS SDK group and adapted the Bedrock provider to the SDK's
@@ -731,8 +734,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `commitlint.toml` for Conventional Commits enforcement.
 - `rustfmt.toml` and `clippy.toml` for consistent code style.
 
-[Unreleased]: https://github.com/Lexmata/daimon/compare/v0.19.0...HEAD
-[0.19.0]: https://github.com/Lexmata/daimon/compare/v0.18.1...v0.19.0
+[Unreleased]: https://github.com/Lexmata/daimon/compare/v0.20.0...HEAD
+[0.20.0]: https://github.com/Lexmata/daimon/compare/v0.18.1...v0.20.0
 [0.18.1]: https://github.com/Lexmata/daimon/compare/v0.18.0...v0.18.1
 [0.18.0]: https://github.com/Lexmata/daimon/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/Lexmata/daimon/compare/v0.16.0...v0.17.0
