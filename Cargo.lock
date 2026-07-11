@@ -1438,7 +1438,7 @@ dependencies = [
  "daimon-provider-azure",
  "daimon-provider-bedrock",
  "daimon-provider-gemini",
- "daimon-provider-llamacpp",
+ "daimon-provider-local",
  "futures",
  "itoa",
  "jsonschema",
@@ -1567,6 +1567,13 @@ dependencies = [
 
 [[package]]
 name = "daimon-provider-llamacpp"
+version = "0.20.0"
+dependencies = [
+ "daimon-provider-local",
+]
+
+[[package]]
+name = "daimon-provider-local"
 version = "0.20.0"
 dependencies = [
  "async-stream",

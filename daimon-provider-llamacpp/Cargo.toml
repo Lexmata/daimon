@@ -3,7 +3,7 @@ name = "daimon-provider-llamacpp"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "llama.cpp (llama-server) provider for the Daimon AI agent framework"
+description = "Deprecated: re-exports daimon-provider-local::llamacpp. Depend on daimon-provider-local directly."
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
@@ -18,11 +18,4 @@ all-features = true
 default = []
 
 [dependencies]
-daimon-core = { workspace = true }
-tokio = { workspace = true, features = ["rt", "time", "sync"] }
-serde = { workspace = true }
-serde_json = { workspace = true }
-tracing = { workspace = true }
-async-stream = { workspace = true }
-futures = { workspace = true }
-reqwest = { workspace = true }
+daimon-provider-local = { workspace = true }

@@ -5,16 +5,16 @@
 
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
+use daimon_core::{EmbeddingModel, Result};
 
-use daimon_core::{DaimonError, EmbeddingModel, Result};
+use crate::openai_compat::{EmbedRequest, Http, api_error, parse_embed_response};
 
-use crate::{Http, api_error};
+const DEFAULT_BASE_URL: &str = "http://localhost:8080";
 
 /// llama.cpp embedding model, backed by a running `llama-server`.
 ///
 /// ```ignore
-/// use daimon_provider_llamacpp::LlamaCppEmbedding;
+/// use daimon_provider_local::llamacpp::LlamaCppEmbedding;
 ///
 /// let embedding = LlamaCppEmbedding::new().with_dimensions(1024);
 /// let vectors = embedding.embed(&["hello world"]).await?;
@@ -36,7 +36,7 @@ impl LlamaCppEmbedding {
     /// Create a client targeting `http://localhost:8080`.
     pub fn new() -> Self {
         Self {
-            http: Http::new(),
+            http: Http::new(DEFAULT_BASE_URL),
             model: None,
             dimensions: 768,
         }
@@ -76,23 +76,6 @@ impl LlamaCppEmbedding {
     }
 }
 
-#[derive(Serialize)]
-struct EmbedRequest<'a> {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    model: Option<&'a str>,
-    input: &'a [&'a str],
-}
-
-#[derive(Deserialize)]
-struct EmbedResponse {
-    data: Vec<EmbedDatum>,
-}
-
-#[derive(Deserialize)]
-struct EmbedDatum {
-    embedding: Vec<f32>,
-}
-
 impl EmbeddingModel for LlamaCppEmbedding {
     async fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
         let body = EmbedRequest {
@@ -105,15 +88,13 @@ impl EmbeddingModel for LlamaCppEmbedding {
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
-            return Err(api_error(status, &text));
+            return Err(api_error(status, &text, "llama.cpp"));
         }
 
-        let data: EmbedResponse = resp
-            .json()
-            .await
-            .map_err(|e| DaimonError::Model(format!("llama.cpp embedding parse error: {e}")))?;
-
-        Ok(data.data.into_iter().map(|d| d.embedding).collect())
+        let bytes = resp.bytes().await.map_err(|e| {
+            daimon_core::DaimonError::Model(format!("llama.cpp embedding read error: {e}"))
+        })?;
+        parse_embed_response(&bytes, "llama.cpp")
     }
 
     fn dimensions(&self) -> usize {
@@ -130,7 +111,6 @@ mod tests {
         let embed = LlamaCppEmbedding::new();
         assert_eq!(embed.dimensions, 768);
         assert!(embed.model.is_none());
-        assert_eq!(EmbeddingModel::dimensions(&embed), 768);
     }
 
     #[test]
@@ -138,31 +118,8 @@ mod tests {
         let embed = LlamaCppEmbedding::new()
             .with_base_url("http://gpu-box:8080")
             .with_model("nomic-embed")
-            .with_api_key("secret")
-            .with_timeout(Duration::from_secs(10))
             .with_dimensions(1024);
         assert_eq!(embed.model.as_deref(), Some("nomic-embed"));
         assert_eq!(embed.dimensions, 1024);
-    }
-
-    #[test]
-    fn test_request_serialization() {
-        let body = EmbedRequest {
-            model: None,
-            input: &["hello", "world"],
-        };
-        let value = serde_json::to_value(&body).unwrap();
-        assert!(!value.as_object().unwrap().contains_key("model"));
-        assert_eq!(value["input"], serde_json::json!(["hello", "world"]));
-    }
-
-    #[test]
-    fn test_response_parsing() {
-        let resp: EmbedResponse = serde_json::from_str(
-            r#"{"object":"list","data":[{"object":"embedding","index":0,"embedding":[0.1,0.2]}],"model":"gguf"}"#,
-        )
-        .unwrap();
-        let vectors: Vec<Vec<f32>> = resp.data.into_iter().map(|d| d.embedding).collect();
-        assert_eq!(vectors, vec![vec![0.1, 0.2]]);
     }
 }

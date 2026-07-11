@@ -2,6 +2,7 @@
 members = [
     "daimon-core",
     "daimon-macros",
+    "daimon-provider-local",
     "daimon-provider-bedrock",
     "daimon-provider-gemini",
     "daimon-provider-azure",
@@ -22,6 +23,7 @@ homepage = "https://github.com/Lexmata/daimon"
 [workspace.dependencies]
 daimon-core = { path = "daimon-core", version = "0.20.0" }
 daimon-macros = { path = "daimon-macros", version = "0.20.0" }
+daimon-provider-local = { path = "daimon-provider-local", version = "0.20.0" }
 daimon-provider-bedrock = { path = "daimon-provider-bedrock", version = "0.20.0" }
 daimon-provider-gemini = { path = "daimon-provider-gemini", version = "0.20.0" }
 daimon-provider-azure = { path = "daimon-provider-azure", version = "0.20.0" }
@@ -62,12 +64,14 @@ openai = ["dep:reqwest"]
 anthropic = ["dep:reqwest"]
 gemini = ["dep:daimon-provider-gemini"]
 azure = ["dep:daimon-provider-azure"]
-llamacpp = ["dep:daimon-provider-llamacpp"]
+llamacpp = ["dep:daimon-provider-local"]
 bedrock = ["dep:daimon-provider-bedrock"]
 sqs = ["bedrock", "daimon-provider-bedrock/sqs"]
 pubsub = ["gemini", "daimon-provider-gemini/pubsub"]
 servicebus = ["azure", "daimon-provider-azure/servicebus"]
-ollama = ["dep:reqwest"]
+ollama = ["dep:reqwest", "dep:daimon-provider-local"]
+local = ["dep:daimon-provider-local"]
+llamars = ["dep:daimon-provider-local"]
 sqlite = ["dep:rusqlite"]
 redis = ["dep:redis"]
 nats = ["dep:async-nats"]
@@ -80,7 +84,7 @@ pgvector = ["dep:daimon-plugin-pgvector"]
 opensearch = ["dep:daimon-plugin-opensearch"]
 grpc = ["dep:tonic", "dep:prost", "dep:tonic-prost"]
 eval = []
-full = ["openai", "anthropic", "gemini", "azure", "bedrock", "ollama", "llamacpp", "macros", "mcp", "sqlite", "redis", "nats", "amqp", "otel", "http-server", "qdrant", "pgvector", "opensearch", "grpc", "eval", "sqs", "pubsub", "servicebus"]
+full = ["openai", "anthropic", "gemini", "azure", "bedrock", "ollama", "llamacpp", "llamars", "local", "macros", "mcp", "sqlite", "redis", "nats", "amqp", "otel", "http-server", "qdrant", "pgvector", "opensearch", "grpc", "eval", "sqs", "pubsub", "servicebus"]
 
 [dependencies]
 daimon-core = { workspace = true }
@@ -102,7 +106,7 @@ daimon-macros = { workspace = true, optional = true }
 daimon-provider-bedrock = { workspace = true, optional = true }
 daimon-provider-gemini = { workspace = true, optional = true }
 daimon-provider-azure = { workspace = true, optional = true }
-daimon-provider-llamacpp = { workspace = true, optional = true }
+daimon-provider-local = { workspace = true, optional = true }
 daimon-plugin-pgvector = { workspace = true, optional = true }
 daimon-plugin-opensearch = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }

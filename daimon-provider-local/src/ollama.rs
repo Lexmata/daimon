@@ -18,11 +18,10 @@ use std::time::Duration;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-use crate::error::{DaimonError, Result};
-use crate::model::Model;
-use crate::model::types::{ChatRequest, ChatResponse, Message, Role, StopReason, ToolSpec, Usage};
-use crate::stream::{ResponseStream, StreamEvent};
-use crate::tool::ToolCall;
+use daimon_core::{
+    ChatRequest, ChatResponse, DaimonError, Message, Model, ResponseStream, Result, Role,
+    StopReason, StreamEvent, ToolCall, ToolSpec, Usage,
+};
 
 /// Ollama model provider.
 ///
