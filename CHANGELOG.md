@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-07-11
+
 ### Added
 
 - **Local model providers (DAIM-22):** new `daimon-provider-local` crate
@@ -791,7 +793,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `commitlint.toml` for Conventional Commits enforcement.
 - `rustfmt.toml` and `clippy.toml` for consistent code style.
 
-[Unreleased]: https://github.com/Lexmata/daimon/compare/v0.20.0...HEAD
+[Unreleased]: https://github.com/Lexmata/daimon/compare/v0.21.0...HEAD
+[0.21.0]: https://github.com/Lexmata/daimon/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/Lexmata/daimon/compare/v0.18.1...v0.20.0
 [0.18.1]: https://github.com/Lexmata/daimon/compare/v0.18.0...v0.18.1
 [0.18.0]: https://github.com/Lexmata/daimon/compare/v0.17.0...v0.18.0
