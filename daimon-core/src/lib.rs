@@ -27,9 +27,12 @@
 //! }
 //! ```
 
+mod archival_memory;
+mod core_memory;
 pub mod distributed;
 mod document;
 mod embedding;
+mod episodic_memory;
 mod error;
 mod memory;
 mod model;
@@ -40,9 +43,18 @@ mod tool_types;
 mod types;
 pub mod vector_store;
 
+pub use archival_memory::{
+    ArchivalMemory, ArchivalRecord, ErasedArchivalMemory, SharedArchivalMemory,
+};
+pub use core_memory::{
+    CoreMemory, CoreMemoryBlock, ErasedCoreMemory, SharedCoreMemory, render_blocks,
+};
 pub use distributed::{AgentTask, ErasedTaskBroker, TaskBroker, TaskResult, TaskStatus};
 pub use document::{Document, ScoredDocument};
 pub use embedding::{EmbeddingModel, ErasedEmbeddingModel, SharedEmbeddingModel};
+pub use episodic_memory::{
+    EpisodicEvent, EpisodicMemory, EpisodicQuery, ErasedEpisodicMemory, SharedEpisodicMemory,
+};
 pub use error::{DaimonError, Result};
 pub use memory::{ErasedMemory, Memory, SharedMemory};
 pub use model::{ErasedModel, Model, SharedModel};

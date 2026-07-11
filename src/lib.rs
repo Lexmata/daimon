@@ -65,7 +65,8 @@
 //! - [`agent`] — Agent builder, ReAct loop, multi-agent patterns, resumable runs
 //! - [`model`] — LLM provider trait and implementations
 //! - [`tool`] — Tool trait, registry, and execution
-//! - [`memory`] — Conversation memory implementations
+//! - [`memory`] — Conversation memory, plus optional core/archival/episodic
+//!   tiered memory subsystems
 //! - [`stream`] — Streaming response types
 //! - [`hooks`] — Lifecycle hooks for observability and control
 //! - [`orchestration`] — Chain, graph, DAG, and workflow orchestration
