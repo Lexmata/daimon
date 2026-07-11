@@ -7,7 +7,7 @@
 mod traits;
 pub mod types;
 
-#[cfg(any(feature = "openai", feature = "anthropic", feature = "ollama"))]
+#[cfg(any(feature = "openai", feature = "anthropic"))]
 pub(crate) mod retry;
 
 pub use traits::{
@@ -38,17 +38,35 @@ pub mod bedrock {
     pub use daimon_provider_bedrock::*;
 }
 
-#[cfg(feature = "llamacpp")]
-pub mod llamacpp {
-    //! llama.cpp model provider (via [`daimon_provider_llamacpp`]).
-    pub use daimon_provider_llamacpp::*;
+#[cfg(any(
+    feature = "ollama",
+    feature = "llamacpp",
+    feature = "llamars",
+    feature = "local"
+))]
+pub mod local {
+    //! Locally-hosted model providers (via [`daimon_provider_local`]).
+    pub use daimon_provider_local::*;
 }
 
 #[cfg(feature = "ollama")]
-pub mod ollama;
+pub mod ollama {
+    //! Ollama local model provider (via [`daimon_provider_local`]).
+    pub use daimon_provider_local::ollama::*;
+}
+
+#[cfg(feature = "llamacpp")]
+#[allow(unused_imports)]
+pub mod llamacpp {
+    //! llama.cpp model provider (via [`daimon_provider_local`]).
+    pub use daimon_provider_local::llamacpp::*;
+}
 
 #[cfg(feature = "openai")]
 pub mod openai_embed;
 
 #[cfg(feature = "ollama")]
-pub mod ollama_embed;
+pub mod ollama_embed {
+    //! Ollama embeddings provider (via [`daimon_provider_local`]).
+    pub use daimon_provider_local::ollama_embed::*;
+}
