@@ -15,16 +15,16 @@
 
 mod openai_compat;
 
+pub mod generic;
 pub mod llamacpp;
 pub mod llamacpp_embed;
+pub mod llamars;
 pub mod ollama;
 pub mod ollama_embed;
-// pub mod llamars;
-// pub mod generic;
 
+pub use generic::{OpenAiCompatible, OpenAiCompatibleEmbedding};
 pub use llamacpp::LlamaCpp;
 pub use llamacpp_embed::LlamaCppEmbedding;
-// pub use llamars::{LlamaRs, LlamaRsEmbedding};
-// pub use generic::{OpenAiCompatible, OpenAiCompatibleEmbedding};
+pub use llamars::{LlamaRs, LlamaRsEmbedding};
 pub use ollama::Ollama;
 pub use ollama_embed::OllamaEmbedding;
