@@ -27,6 +27,8 @@ use crate::openai_compat::{
     Http, api_error, build_chat_request, parse_chat_response, stream_chat_response,
 };
 
+pub use crate::llamacpp_embed::LlamaCppEmbedding;
+
 const DEFAULT_BASE_URL: &str = "http://localhost:8080";
 
 /// llama.cpp model provider, backed by a running `llama-server`.
@@ -248,13 +250,15 @@ mod tests {
             .with_min_p(0.05)
             .with_top_k(40)
             .with_repeat_penalty(1.1)
-            .with_cache_prompt(true);
+            .with_cache_prompt(true)
+            .with_json_schema(serde_json::json!({"type": "object"}));
         let extra = model.extra_fields();
         assert_eq!(extra["grammar"], "root ::= \"yes\"");
         assert_eq!(extra["min_p"], 0.05f32 as f64);
         assert_eq!(extra["top_k"], 40);
         assert_eq!(extra["repeat_penalty"], 1.1f32 as f64);
         assert_eq!(extra["cache_prompt"], true);
+        assert_eq!(extra["json_schema"], serde_json::json!({"type": "object"}));
     }
 
     #[test]
@@ -290,5 +294,18 @@ mod tests {
         let dbg = format!("{model:?}");
         assert!(!dbg.contains("sk-supersecret-key-value"));
         assert!(dbg.contains("[redacted]"));
+    }
+
+    #[test]
+    fn test_llamacpp_embedding_reachable_from_llamacpp_module() {
+        // Regression test: LlamaCppEmbedding must be reachable via
+        // `crate::llamacpp::LlamaCppEmbedding` (not just the crate root), because
+        // the facade's `daimon::model::llamacpp` feature module re-exports
+        // `daimon_provider_local::llamacpp::*` specifically, not the crate root.
+        // This path broke once already when llamacpp.rs and llamacpp_embed.rs were
+        // split into separate files — this test pins it.
+        fn _assert_reachable() -> super::LlamaCppEmbedding {
+            super::LlamaCppEmbedding::new()
+        }
     }
 }

@@ -4,8 +4,6 @@
 //! each owns its own request-shaping and defaults, and calls into this module
 //! for the wire format, SSE parsing, retry, and error surfacing they share.
 
-#![allow(dead_code)]
-
 use std::time::Duration;
 
 use reqwest::Client;
@@ -62,14 +60,17 @@ impl Http {
         self.client = build_client(Some(timeout));
     }
 
+    #[cfg(test)]
     pub(crate) fn base_url(&self) -> &str {
         &self.base_url
     }
 
+    #[cfg(test)]
     pub(crate) fn api_key(&self) -> Option<&str> {
         self.api_key.as_deref()
     }
 
+    #[cfg(test)]
     pub(crate) fn timeout(&self) -> Option<Duration> {
         self.timeout
     }
