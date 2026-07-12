@@ -102,6 +102,14 @@ impl LlamaCpp {
         self
     }
 
+    /// Opts back into warn-and-send for an API key sent over a plaintext
+    /// `http://` base URL (default: hard error). Only use this for a
+    /// genuinely local, unauthenticated-but-keyed server.
+    pub fn allow_plaintext_api_key(mut self) -> Self {
+        self.http.set_allow_plaintext_api_key(true);
+        self
+    }
+
     /// Constrain sampling with a [GBNF grammar](https://github.com/ggml-org/llama.cpp/tree/master/grammars).
     pub fn with_grammar(mut self, gbnf: impl Into<String>) -> Self {
         self.grammar = Some(gbnf.into());
@@ -306,6 +314,26 @@ mod tests {
         let dbg = format!("{model:?}");
         assert!(!dbg.contains("sk-supersecret-key-value"));
         assert!(dbg.contains("[redacted]"));
+    }
+
+    #[tokio::test]
+    async fn test_plaintext_api_key_over_http_is_blocked_by_default() {
+        let model = LlamaCpp::new().with_api_key("secret");
+        let request = ChatRequest::new(vec![Message::user("hi")]);
+        let err = model.generate(&request).await.unwrap_err();
+        assert!(matches!(err, DaimonError::Builder(_)));
+    }
+
+    #[tokio::test]
+    async fn test_plaintext_api_key_allowed_when_opted_in() {
+        let model = LlamaCpp::new()
+            .with_base_url("http://localhost:1")
+            .with_api_key("secret")
+            .with_max_retries(0)
+            .allow_plaintext_api_key();
+        let request = ChatRequest::new(vec![Message::user("hi")]);
+        let err = model.generate(&request).await.unwrap_err();
+        assert!(!matches!(err, DaimonError::Builder(_)));
     }
 
     #[test]

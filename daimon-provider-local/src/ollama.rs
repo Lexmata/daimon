@@ -28,6 +28,8 @@ use daimon_core::{
     StopReason, StreamEvent, ToolCall, ToolSpec, Usage,
 };
 
+use crate::openai_compat::{is_retryable_status, is_retryable_transport_error};
+
 /// Default number of retries for transient (429 / 5xx) errors on the initial
 /// request. Matches [`crate::ollama_embed`]'s `DEFAULT_MAX_RETRIES`.
 const DEFAULT_MAX_RETRIES: u32 = 3;
@@ -157,40 +159,52 @@ impl Ollama {
 
         body
     }
-}
 
-impl Model for Ollama {
-    fn model_id(&self) -> &str {
-        &self.model
-    }
-
-    #[tracing::instrument(skip_all, fields(model = %self.model))]
-    async fn generate(&self, request: &ChatRequest) -> Result<ChatResponse> {
-        let body = self.build_request_body(request, false);
+    /// Sends `body` to `/api/chat`, retrying transient failures — both
+    /// HTTP-status (429 / 5xx) and connection-level (refused, reset, DNS,
+    /// timeout) — with jittered backoff, mirroring
+    /// [`crate::openai_compat::Http::post_with_retry`]'s shape. Shared by
+    /// [`Model::generate`] and the handshake of [`Model::generate_stream`];
+    /// once a stream is established, mid-stream failures are never retried
+    /// (the consumer has already observed a partial response).
+    async fn send_with_retry(&self, body: &serde_json::Value) -> Result<reqwest::Response> {
         let url = format!("{}/api/chat", self.base_url);
 
         for attempt in 0..=self.max_retries {
-            let resp = self
+            let send_result = self
                 .client
                 .post(&url)
                 .timeout(self.timeout)
-                .json(&body)
+                .json(body)
                 .send()
-                .await
-                .map_err(|e| DaimonError::Model(e.to_string()))?;
+                .await;
+
+            let resp = match send_result {
+                Ok(resp) => resp,
+                Err(e) => {
+                    if is_retryable_transport_error(&e) && attempt < self.max_retries {
+                        let delay = backoff_delay(attempt, None);
+                        tracing::debug!(
+                            error = %e,
+                            attempt,
+                            delay_ms = delay.as_millis(),
+                            "retryable Ollama transport error, backing off"
+                        );
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    return Err(DaimonError::Model(e.to_string()));
+                }
+            };
 
             let status = resp.status();
             if status.is_success() {
-                let response: OllamaResponse = resp
-                    .json()
-                    .await
-                    .map_err(|e| DaimonError::Model(e.to_string()))?;
-                return parse_response(response, &self.tool_call_seq);
+                return Ok(resp);
             }
 
             let retry_after = parse_retry_after(&resp);
             let text = resp.text().await.unwrap_or_default();
-            let is_retryable = status.as_u16() == 429 || status.is_server_error();
+            let is_retryable = is_retryable_status(status);
 
             if is_retryable && attempt < self.max_retries {
                 let delay = backoff_delay(attempt, retry_after);
@@ -203,45 +217,29 @@ impl Model for Ollama {
 
         unreachable!("loop always returns or retries")
     }
+}
+
+impl Model for Ollama {
+    fn model_id(&self) -> &str {
+        &self.model
+    }
+
+    #[tracing::instrument(skip_all, fields(model = %self.model))]
+    async fn generate(&self, request: &ChatRequest) -> Result<ChatResponse> {
+        let body = self.build_request_body(request, false);
+        let resp = self.send_with_retry(&body).await?;
+
+        let response: OllamaResponse = resp
+            .json()
+            .await
+            .map_err(|e| DaimonError::Model(e.to_string()))?;
+        parse_response(response, &self.tool_call_seq)
+    }
 
     #[tracing::instrument(skip_all, fields(model = %self.model))]
     async fn generate_stream(&self, request: &ChatRequest) -> Result<ResponseStream> {
         let body = self.build_request_body(request, true);
-        let url = format!("{}/api/chat", self.base_url);
-
-        // Retry only the initial POST/handshake — once the stream is
-        // established, mid-stream failures must never be retried (the
-        // consumer has already observed a partial response).
-        let mut response = None;
-        for attempt in 0..=self.max_retries {
-            let resp = self
-                .client
-                .post(&url)
-                .timeout(self.timeout)
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| DaimonError::Model(e.to_string()))?;
-
-            let status = resp.status();
-            if status.is_success() {
-                response = Some(resp);
-                break;
-            }
-
-            let retry_after = parse_retry_after(&resp);
-            let text = resp.text().await.unwrap_or_default();
-            let is_retryable = status.as_u16() == 429 || status.is_server_error();
-
-            if is_retryable && attempt < self.max_retries {
-                let delay = backoff_delay(attempt, retry_after);
-                tracing::debug!(status = %status, attempt, delay_ms = delay.as_millis(), "retryable Ollama stream-handshake error, backing off");
-                tokio::time::sleep(delay).await;
-            } else {
-                return Err(DaimonError::Model(format!("Ollama {status}: {text}")));
-            }
-        }
-        let resp = response.expect("loop breaks with a response or returns an error");
+        let resp = self.send_with_retry(&body).await?;
 
         let tool_call_seq = Arc::clone(&self.tool_call_seq);
         let stream = async_stream::try_stream! {
@@ -504,6 +502,68 @@ mod tests {
     fn test_with_max_retries() {
         let model = Ollama::new("llama3.1").with_max_retries(5);
         assert_eq!(model.max_retries, 5);
+    }
+
+    #[tokio::test]
+    async fn test_generate_retries_connection_level_failures_then_succeeds() {
+        // Finding 1 (DAIM-33): connection-level failures (refused, reset)
+        // previously bypassed retry entirely because `send()`'s error was
+        // mapped straight to `Err` with `?`. This proves `generate` now
+        // retries through a real server that resets the first connection(s)
+        // before accepting one.
+        use std::io::Write;
+        use std::net::TcpListener;
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicUsize;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accept_count = Arc::new(AtomicUsize::new(0));
+        let accept_count_thread = Arc::clone(&accept_count);
+
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let n = accept_count_thread.fetch_add(1, Ordering::SeqCst);
+                let Ok(mut stream) = stream else { continue };
+                if n < 1 {
+                    // First connection: reset without responding.
+                    drop(stream);
+                } else {
+                    // Read (and discard) the client's request headers before
+                    // responding — writing a response before the client has
+                    // finished sending its request confuses hyper's
+                    // client-side parser (observed as a spurious
+                    // `Canceled`/`UnexpectedMessage` error unrelated to what
+                    // this test exercises).
+                    let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+                    loop {
+                        use std::io::BufRead;
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                            break;
+                        }
+                    }
+
+                    let body = r#"{"message":{"role":"assistant","content":"hi"},"done":true}"#;
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    break;
+                }
+            }
+        });
+
+        let model = Ollama::new("llama3.1").with_base_url(format!("http://{addr}"));
+        let request = ChatRequest::new(vec![Message::user("hi")]);
+        let response = model
+            .generate(&request)
+            .await
+            .expect("should succeed after retrying a connection-level failure");
+        assert_eq!(response.message.content.as_deref(), Some("hi"));
+        assert!(accept_count.load(Ordering::SeqCst) >= 2);
     }
 
     #[test]

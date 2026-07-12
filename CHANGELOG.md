@@ -21,6 +21,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     Consumers using `A2aClient`/`A2aHandler` who were not already on one
     of those four features must add `features = ["a2a"]` (or `"full"`)
     to their `Cargo.toml` dependency on `daimon`.
+- **Local provider retry/timeout hardening (DAIM-33), following on from
+  DAIM-26:**
+  - **Behavior change (from DAIM-26, previously undocumented):** malformed
+    tool-call argument JSON returned by a local model now surfaces as an
+    `Err(DaimonError::Model(...))` from `daimon-provider-local`'s chat
+    providers instead of silently becoming `null` arguments.
+  - **Behavior change (from DAIM-26, previously undocumented):** non-streaming
+    requests get a default 120s whole-request timeout and up to 3 retries
+    with jittered backoff on 429/5xx responses; streaming requests are
+    exempt from the whole-request timeout (a healthy SSE stream must not be
+    aborted mid-body). Both are configurable via `with_timeout`/
+    `with_max_retries` on every local provider.
+  - Retry now also covers connection-level failures — connection
+    refused/reset, DNS failure, client-side timeout — not just HTTP-status
+    failures. Previously `reqwest::Error` from `send()` bypassed retry
+    entirely via `?`, so the dominant local-server failure modes (server
+    still loading, connection refused) got zero retries.
+  - The streaming handshake (the `send()` call up to response headers) now
+    has its own 30s bound, distinct from the intentionally-unbounded body
+    stream — previously nothing but the 10s TCP connect timeout guarded
+    against a server that accepts the connection and then never responds.
+  - Sending an API key over a plaintext `http://` base URL is now a hard
+    `DaimonError::Builder` error by default instead of a warn-and-send;
+    opt back in per-provider with the new `.allow_plaintext_api_key()`
+    builder method for genuinely local, unauthenticated-but-keyed servers.
 - **Provider crate extraction (DAIM-30):** `OpenAi`/`OpenAiEmbedding` and
   `Anthropic` moved out of the `daimon` facade into new standalone crates,
   `daimon-provider-openai` and `daimon-provider-anthropic`, matching the
