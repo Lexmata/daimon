@@ -228,10 +228,18 @@ impl VectorStore for PgVectorStore {
 
         let mut results = Vec::with_capacity(rows.len());
         for row in rows {
-            let id: String = row.get("id");
-            let content: String = row.get("content");
-            let metadata_val: serde_json::Value = row.get("metadata");
-            let score: f64 = row.get("score");
+            let id: String = row.try_get("id").map_err(|e| {
+                DaimonError::Other(format!("pgvector row missing/invalid id column: {e}"))
+            })?;
+            let content: String = row.try_get("content").map_err(|e| {
+                DaimonError::Other(format!("pgvector row missing/invalid content column: {e}"))
+            })?;
+            let metadata_val: serde_json::Value = row.try_get("metadata").map_err(|e| {
+                DaimonError::Other(format!("pgvector row missing/invalid metadata column: {e}"))
+            })?;
+            let score: f64 = row.try_get("score").map_err(|e| {
+                DaimonError::Other(format!("pgvector row missing/invalid score column: {e}"))
+            })?;
 
             let metadata: HashMap<String, serde_json::Value> =
                 serde_json::from_value(metadata_val).unwrap_or_default();
