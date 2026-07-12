@@ -64,6 +64,33 @@ struct LockInfo {
     message_id: String,
 }
 
+impl std::fmt::Debug for LockInfo {
+    /// Hand-written to avoid leaking the lock_token in logs or panic output;
+    /// a derived `Debug` would print the plaintext lock token verbatim.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LockInfo")
+            .field("lock_token", &"[redacted]")
+            .field("message_id", &self.message_id)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for ServiceBusBroker {
+    /// Hand-written to avoid leaking the plaintext SAS token in logs or panic
+    /// output; a derived `Debug` would print `sas_token` verbatim.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServiceBusBroker")
+            .field("client", &self.client)
+            .field("namespace_url", &self.namespace_url)
+            .field("queue_name", &self.queue_name)
+            .field("sas_token", &"[redacted]")
+            .field("statuses", &self.statuses)
+            .field("lock_tokens", &self.lock_tokens)
+            .field("lock_duration", &self.lock_duration)
+            .finish()
+    }
+}
+
 impl ServiceBusBroker {
     /// Creates a new Service Bus broker.
     ///
@@ -346,5 +373,35 @@ mod tests {
             url,
             "https://ns.servicebus.windows.net/q/messages/msg-1/lock-abc"
         );
+    }
+
+    #[test]
+    fn test_debug_redacts_sas_token() {
+        let broker = ServiceBusBroker::new(
+            "https://my-ns.servicebus.windows.net",
+            "my-queue",
+            "servicebus-supersecret-sas-token",
+        );
+        let dbg = format!("{broker:?}");
+        assert!(
+            !dbg.contains("servicebus-supersecret-sas-token"),
+            "Debug output must not contain the plaintext SAS token: {dbg}"
+        );
+        assert!(dbg.contains("[redacted]"));
+    }
+
+    #[test]
+    fn test_lock_info_debug_redacts_lock_token() {
+        let lock_info = LockInfo {
+            lock_token: "lock-supersecret-token-value".to_string(),
+            message_id: "msg-123".to_string(),
+        };
+        let dbg = format!("{lock_info:?}");
+        assert!(
+            !dbg.contains("lock-supersecret-token-value"),
+            "Debug output must not contain the plaintext lock token: {dbg}"
+        );
+        assert!(dbg.contains("[redacted]"));
+        assert!(dbg.contains("msg-123"));
     }
 }

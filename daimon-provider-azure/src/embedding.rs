@@ -56,6 +56,24 @@ pub struct AzureOpenAiEmbedding {
     use_bearer_token: bool,
 }
 
+impl std::fmt::Debug for AzureOpenAiEmbedding {
+    /// Hand-written to avoid leaking the plaintext API key in logs or panic
+    /// output; a derived `Debug` would print `api_key` verbatim.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AzureOpenAiEmbedding")
+            .field("client", &self.client)
+            .field("api_key", &"[redacted]")
+            .field("resource_url", &self.resource_url)
+            .field("deployment_id", &self.deployment_id)
+            .field("api_version", &self.api_version)
+            .field("dimensions", &self.dimensions)
+            .field("dimensions_explicit", &self.dimensions_explicit)
+            .field("max_retries", &self.max_retries)
+            .field("use_bearer_token", &self.use_bearer_token)
+            .finish()
+    }
+}
+
 impl AzureOpenAiEmbedding {
     /// Creates a new Azure OpenAI embedding client, reading
     /// `AZURE_OPENAI_API_KEY` from the environment.
@@ -278,5 +296,18 @@ mod tests {
             json.get("dimensions").is_none(),
             "dimensions must be absent unless explicitly requested: {json}"
         );
+    }
+
+    #[test]
+    fn test_debug_redacts_api_key() {
+        let embed =
+            AzureOpenAiEmbedding::new("https://x.openai.azure.com", "text-embedding-3-small")
+                .with_api_key("azure-embed-supersecret-key");
+        let dbg = format!("{embed:?}");
+        assert!(
+            !dbg.contains("azure-embed-supersecret-key"),
+            "Debug output must not contain the plaintext API key: {dbg}"
+        );
+        assert!(dbg.contains("[redacted]"));
     }
 }

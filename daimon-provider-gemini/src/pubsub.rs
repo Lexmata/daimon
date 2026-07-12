@@ -57,6 +57,26 @@ pub struct PubSubBroker {
     ack_ids: Arc<Mutex<HashMap<String, String>>>,
 }
 
+impl std::fmt::Debug for PubSubBroker {
+    /// Hand-written to avoid leaking the plaintext API key or bearer token in
+    /// logs or panic output; a derived `Debug` would print them verbatim.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PubSubBroker")
+            .field("client", &self.client)
+            .field("project", &self.project)
+            .field("topic", &self.topic)
+            .field("subscription", &self.subscription)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[redacted]"))
+            .field(
+                "bearer_token",
+                &self.bearer_token.as_ref().map(|_| "[redacted]"),
+            )
+            .field("statuses", &self.statuses)
+            .field("ack_ids", &self.ack_ids)
+            .finish()
+    }
+}
+
 impl PubSubBroker {
     /// Creates a new Pub/Sub broker with an API key.
     ///
@@ -385,5 +405,37 @@ mod tests {
         let json = serde_json::to_string(&result).unwrap();
         let deser: TaskResult = serde_json::from_str(&json).unwrap();
         assert_eq!(deser.output, "pubsub result");
+    }
+
+    #[test]
+    fn test_debug_redacts_api_key() {
+        let broker = PubSubBroker::with_api_key(
+            "my-project",
+            "my-topic",
+            "my-sub",
+            "pubsub-supersecret-api-key",
+        );
+        let dbg = format!("{broker:?}");
+        assert!(
+            !dbg.contains("pubsub-supersecret-api-key"),
+            "Debug output must not contain the plaintext API key: {dbg}"
+        );
+        assert!(dbg.contains("[redacted]"));
+    }
+
+    #[test]
+    fn test_debug_redacts_bearer_token() {
+        let broker = PubSubBroker::with_bearer_token(
+            "my-project",
+            "my-topic",
+            "my-sub",
+            "pubsub-supersecret-bearer-token",
+        );
+        let dbg = format!("{broker:?}");
+        assert!(
+            !dbg.contains("pubsub-supersecret-bearer-token"),
+            "Debug output must not contain the plaintext bearer token: {dbg}"
+        );
+        assert!(dbg.contains("[redacted]"));
     }
 }
