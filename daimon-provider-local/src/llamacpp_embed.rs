@@ -66,6 +66,13 @@ impl LlamaCppEmbedding {
         self
     }
 
+    /// Set the maximum number of retries for transient (429 / 5xx) errors
+    /// on the initial request (default: 3).
+    pub fn with_max_retries(mut self, retries: u32) -> Self {
+        self.http.set_max_retries(retries);
+        self
+    }
+
     /// Declare the dimensionality of the loaded model's embeddings.
     ///
     /// llama-server does not truncate or expand vectors; this must match the
@@ -118,8 +125,10 @@ mod tests {
         let embed = LlamaCppEmbedding::new()
             .with_base_url("http://gpu-box:8080")
             .with_model("nomic-embed")
-            .with_dimensions(1024);
+            .with_dimensions(1024)
+            .with_max_retries(5);
         assert_eq!(embed.model.as_deref(), Some("nomic-embed"));
         assert_eq!(embed.dimensions, 1024);
+        assert_eq!(embed.http.max_retries(), 5);
     }
 }

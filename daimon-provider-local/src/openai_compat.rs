@@ -4,12 +4,13 @@
 //! each owns its own request-shaping and defaults, and calls into this module
 //! for the wire format, SSE parsing, retry, and error surfacing they share.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-use daimon_core::stream_util::LineBuffer;
+use daimon_core::stream_util::{LineBuffer, backoff_delay, parse_retry_after_secs};
 use daimon_core::{
     ChatResponse, DaimonError, Message, ResponseStream, Result, Role, StopReason, StreamEvent,
     ToolCall, ToolSpec, Usage,
@@ -21,12 +22,29 @@ use daimon_core::{
 /// unaffected.
 pub(crate) const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
-pub(crate) fn build_client(timeout: Option<Duration>) -> Client {
-    let mut builder = Client::builder().connect_timeout(DEFAULT_CONNECT_TIMEOUT);
-    if let Some(t) = timeout {
-        builder = builder.timeout(t);
-    }
-    builder.build().expect("failed to build HTTP client")
+/// Default whole-request timeout applied to non-streaming requests
+/// (`generate`, `embed`) when the caller hasn't set one explicitly.
+///
+/// Without this, a server that accepts the TCP connection but stalls
+/// mid-response hangs forever — `connect_timeout` only bounds connection
+/// establishment. Matches the facade's `model::openai` convention. Never
+/// applied to `generate_stream`: a whole-request deadline would abort a
+/// healthy, long-lived SSE stream.
+pub(crate) const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Default number of retries for transient (429 / 5xx) errors on the initial
+/// request. Matches [`crate::ollama_embed`]'s `DEFAULT_MAX_RETRIES`.
+pub(crate) const DEFAULT_MAX_RETRIES: u32 = 3;
+
+pub(crate) fn build_client() -> Client {
+    // No client-wide request timeout: the per-request timeout is applied at
+    // send time in `Http::post`/`Http::post_streaming` instead, so streaming
+    // and non-streaming requests can have independent policies from the same
+    // client.
+    Client::builder()
+        .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
+        .build()
+        .expect("failed to build HTTP client")
 }
 
 /// HTTP transport shared by every OpenAI-compatible local provider.
@@ -35,15 +53,21 @@ pub(crate) struct Http {
     base_url: String,
     api_key: Option<String>,
     timeout: Option<Duration>,
+    max_retries: u32,
+    /// Set once an `http://` + API key combination has been warned about, so
+    /// repeated requests don't spam logs.
+    warned_plaintext_key: AtomicBool,
 }
 
 impl Http {
     pub(crate) fn new(default_base_url: &str) -> Self {
         Self {
-            client: build_client(None),
+            client: build_client(),
             base_url: default_base_url.to_string(),
             api_key: None,
             timeout: None,
+            max_retries: DEFAULT_MAX_RETRIES,
+            warned_plaintext_key: AtomicBool::new(false),
         }
     }
 
@@ -55,9 +79,15 @@ impl Http {
         self.api_key = Some(key.into());
     }
 
+    /// Sets the whole-request timeout applied to non-streaming requests
+    /// (default: 120s if never called). Never applied to `generate_stream`.
     pub(crate) fn set_timeout(&mut self, timeout: Duration) {
         self.timeout = Some(timeout);
-        self.client = build_client(Some(timeout));
+    }
+
+    /// Sets the maximum number of retries for transient errors (default: 3).
+    pub(crate) fn set_max_retries(&mut self, retries: u32) {
+        self.max_retries = retries;
     }
 
     #[cfg(test)]
@@ -75,21 +105,101 @@ impl Http {
         self.timeout
     }
 
+    #[cfg(test)]
+    pub(crate) fn max_retries(&self) -> u32 {
+        self.max_retries
+    }
+
+    fn warn_if_plaintext_key(&self) {
+        if self.api_key.is_some()
+            && self.base_url.starts_with("http://")
+            && !self.warned_plaintext_key.swap(true, Ordering::Relaxed)
+        {
+            tracing::warn!(
+                base_url = %self.base_url,
+                "sending API key over plaintext HTTP to {} — use https:// or drop with_api_key for genuinely local unauthenticated servers",
+                self.base_url
+            );
+        }
+    }
+
+    /// Sends a non-streaming request, retrying transient (429 / 5xx) errors
+    /// with jittered backoff, and applying the default (or overridden)
+    /// whole-request timeout.
+    ///
+    /// Always resolves to `Ok` once a response (successful or not) is
+    /// obtained — callers inspect `response.status()` themselves to produce
+    /// provider-specific error messages, so this never surfaces an HTTP error
+    /// status as an `Err` on its own.
     pub(crate) async fn post(
         &self,
         path: &str,
         body: &impl Serialize,
     ) -> Result<reqwest::Response> {
-        let mut req = self
-            .client
-            .post(format!("{}{path}", self.base_url))
-            .json(body);
-        if let Some(key) = &self.api_key {
-            req = req.bearer_auth(key);
+        let timeout = self.timeout.unwrap_or(DEFAULT_REQUEST_TIMEOUT);
+        self.post_with_retry(path, body, Some(timeout)).await
+    }
+
+    /// Sends the initial request/response-status-check for a streaming call,
+    /// retrying transient errors exactly like [`Http::post`] but with no
+    /// whole-request timeout — once bytes start flowing, `generate_stream`
+    /// consumes the body itself and this function is never involved again.
+    pub(crate) async fn post_streaming(
+        &self,
+        path: &str,
+        body: &impl Serialize,
+    ) -> Result<reqwest::Response> {
+        self.post_with_retry(path, body, None).await
+    }
+
+    async fn post_with_retry(
+        &self,
+        path: &str,
+        body: &impl Serialize,
+        timeout: Option<Duration>,
+    ) -> Result<reqwest::Response> {
+        self.warn_if_plaintext_key();
+
+        for attempt in 0..=self.max_retries {
+            let mut req = self
+                .client
+                .post(format!("{}{path}", self.base_url))
+                .json(body);
+            if let Some(t) = timeout {
+                req = req.timeout(t);
+            }
+            if let Some(key) = &self.api_key {
+                req = req.bearer_auth(key);
+            }
+
+            let response = req
+                .send()
+                .await
+                .map_err(|e| DaimonError::Model(format!("HTTP error: {e}")))?;
+            let status = response.status();
+            let is_retryable = status.as_u16() == 429 || status.is_server_error();
+
+            if !is_retryable || attempt == self.max_retries {
+                return Ok(response);
+            }
+
+            let retry_after = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(parse_retry_after_secs)
+                .map(Duration::from_secs);
+            let delay = backoff_delay(attempt, retry_after);
+            tracing::debug!(
+                status = %status,
+                attempt,
+                delay_ms = delay.as_millis(),
+                "retryable HTTP error, backing off"
+            );
+            tokio::time::sleep(delay).await;
         }
-        req.send()
-            .await
-            .map_err(|e| DaimonError::Model(format!("HTTP error: {e}")))
+
+        unreachable!("loop always returns")
     }
 }
 
@@ -101,6 +211,7 @@ impl std::fmt::Debug for Http {
             .field("base_url", &self.base_url)
             .field("api_key", &self.api_key.as_ref().map(|_| "[redacted]"))
             .field("timeout", &self.timeout)
+            .field("max_retries", &self.max_retries)
             .finish_non_exhaustive()
     }
 }
@@ -305,12 +416,24 @@ pub(crate) fn parse_chat_response(body: &[u8], provider: &str) -> Result<ChatRes
         .tool_calls
         .unwrap_or_default()
         .into_iter()
-        .map(|tc| ToolCall {
-            id: tc.id,
-            name: tc.function.name,
-            arguments: serde_json::from_str(&tc.function.arguments).unwrap_or_default(),
+        .map(|tc| {
+            let arguments = if tc.function.arguments.trim().is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::from_str(&tc.function.arguments).map_err(|e| {
+                    DaimonError::Model(format!(
+                        "{provider} returned malformed tool-call arguments for {:?} (id {:?}): {e}; raw: {:?}",
+                        tc.function.name, tc.id, tc.function.arguments
+                    ))
+                })?
+            };
+            Ok(ToolCall {
+                id: tc.id,
+                name: tc.function.name,
+                arguments,
+            })
         })
-        .collect();
+        .collect::<Result<Vec<ToolCall>>>()?;
 
     let stop_reason = finish_reason_to_stop(choice.finish_reason.as_deref());
 
@@ -572,6 +695,88 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_chat_response_valid_tool_call_args() {
+        let body = br#"{
+            "choices": [{
+                "message": {
+                    "content": null,
+                    "tool_calls": [{"id": "call_1", "function": {"name": "calc", "arguments": "{\"x\": 1}"}}]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        }"#;
+        let resp = parse_chat_response(body, "test").unwrap();
+        assert_eq!(resp.message.tool_calls.len(), 1);
+        assert_eq!(
+            resp.message.tool_calls[0].arguments,
+            serde_json::json!({"x": 1})
+        );
+    }
+
+    #[test]
+    fn test_parse_chat_response_malformed_tool_call_args_errors() {
+        // A truncated/invalid arguments string must surface as an error, not
+        // silently become `null` args (a local model emitting broken JSON
+        // should not look identical to a legitimate empty-args call).
+        let body = br#"{
+            "choices": [{
+                "message": {
+                    "content": null,
+                    "tool_calls": [{"id": "call_1", "function": {"name": "calc", "arguments": "{\"x\": "}}]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        }"#;
+        let err = parse_chat_response(body, "test").unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("malformed tool-call arguments"));
+        assert!(text.contains("calc"));
+    }
+
+    #[test]
+    fn test_parse_chat_response_empty_tool_call_args_is_not_an_error() {
+        // A tool with zero parameters (e.g. `get_current_time()`) legitimately
+        // has an empty `arguments` string on the wire. That must not be
+        // treated as malformed JSON; it should parse to `Value::Null`.
+        let body = br#"{
+            "choices": [{
+                "message": {
+                    "content": null,
+                    "tool_calls": [{"id": "call_1", "function": {"name": "get_current_time", "arguments": ""}}]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        }"#;
+        let resp = parse_chat_response(body, "test").unwrap();
+        assert_eq!(resp.message.tool_calls.len(), 1);
+        assert_eq!(
+            resp.message.tool_calls[0].arguments,
+            serde_json::Value::Null
+        );
+    }
+
+    #[test]
+    fn test_parse_chat_response_whitespace_only_tool_call_args_is_not_an_error() {
+        // Some servers pad the empty-args case with whitespace instead of a
+        // true empty string; treat it the same way.
+        let body = br#"{
+            "choices": [{
+                "message": {
+                    "content": null,
+                    "tool_calls": [{"id": "call_1", "function": {"name": "get_current_time", "arguments": "   "}}]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        }"#;
+        let resp = parse_chat_response(body, "test").unwrap();
+        assert_eq!(resp.message.tool_calls.len(), 1);
+        assert_eq!(
+            resp.message.tool_calls[0].arguments,
+            serde_json::Value::Null
+        );
+    }
+
+    #[test]
     fn test_sse_text_delta() {
         let events =
             sse_line_events(r#"data: {"choices":[{"delta":{"content":"Hel"},"index":0}]}"#);
@@ -631,6 +836,27 @@ mod tests {
         let dbg = format!("{http:?}");
         assert!(!dbg.contains("sk-supersecret-key-value"));
         assert!(dbg.contains("[redacted]"));
+    }
+
+    #[test]
+    fn test_http_defaults() {
+        let http = Http::new("http://localhost:1234");
+        assert_eq!(http.max_retries(), DEFAULT_MAX_RETRIES);
+        assert_eq!(http.timeout(), None);
+    }
+
+    #[test]
+    fn test_http_set_max_retries() {
+        let mut http = Http::new("http://localhost:1234");
+        http.set_max_retries(7);
+        assert_eq!(http.max_retries(), 7);
+    }
+
+    #[test]
+    fn test_http_set_timeout() {
+        let mut http = Http::new("http://localhost:1234");
+        http.set_timeout(Duration::from_secs(5));
+        assert_eq!(http.timeout(), Some(Duration::from_secs(5)));
     }
 
     #[test]
