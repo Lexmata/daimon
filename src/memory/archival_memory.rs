@@ -209,6 +209,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn insert_and_search_is_case_insensitive() {
+        // The perf fix caches `text.to_lowercase()` at insert time instead of
+        // lowercasing on every query; every other test in this module
+        // inserts/searches already-lowercase text, so a regression that
+        // broke the case-insensitivity contract (e.g. comparing raw `text`
+        // against a lowercased query, or vice versa) wouldn't be caught.
+        // Insert mixed-case text and search with a differently-cased query.
+        let mem = InMemoryArchivalMemory::new();
+        let id = mem.insert("The Sky Is Blue", HashMap::new()).await.unwrap();
+
+        let results = mem.search("sky blue", 5).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, id);
+    }
+
+    #[tokio::test]
     async fn search_respects_top_k() {
         let mem = InMemoryArchivalMemory::new();
         for i in 0..5 {
