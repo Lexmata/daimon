@@ -784,7 +784,7 @@ Types used across the plugin boundary. All defined in `daimon-core` and re-expor
 | `ToolCall` | id, name, arguments (JSON) |
 | `Usage` | input_tokens, output_tokens, cached_tokens |
 | `Document` | content, metadata, score |
-| `ScoredDocument` | document, score |
+| `ScoredDocument` | id, document, score |
 | `StreamEvent` | TextDelta, ToolCallStart, ToolCallDelta, ToolCallEnd, ToolResult, Usage, Error, Done |
 | `AgentTask` | task_id, input, run_id, metadata |
 | `TaskResult` | task_id, output, iterations, cost, error |

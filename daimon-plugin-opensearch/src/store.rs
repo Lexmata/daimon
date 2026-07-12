@@ -210,6 +210,7 @@ impl VectorStore for OpenSearchVectorStore {
 
         let mut results = Vec::with_capacity(hits.len());
         for hit in &hits {
+            let id = hit["_id"].as_str().unwrap_or_default().to_string();
             let content = hit["_source"]["content"]
                 .as_str()
                 .unwrap_or_default()
@@ -235,7 +236,7 @@ impl VectorStore for OpenSearchVectorStore {
                 metadata,
                 score: Some(score),
             };
-            results.push(ScoredDocument::new(doc, score));
+            results.push(ScoredDocument::new(id, doc, score));
         }
 
         Ok(results)

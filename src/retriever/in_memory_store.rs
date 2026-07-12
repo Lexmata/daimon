@@ -75,8 +75,8 @@ impl VectorStore for InMemoryVectorStoreBackend {
         let query_norm = l2_norm(&embedding);
         let entries = self.entries.read().await;
         let mut scored: Vec<ScoredDocument> = entries
-            .values()
-            .map(|entry| {
+            .iter()
+            .map(|(id, entry)| {
                 // Entry norms are precomputed at upsert; only the dot product
                 // is paid per entry. Zero norms and dimension mismatches score
                 // 0.0, matching the previous full cosine computation.
@@ -86,7 +86,7 @@ impl VectorStore for InMemoryVectorStoreBackend {
                 } else {
                     f64::from(dot(&embedding, &entry.embedding) / denom)
                 };
-                ScoredDocument::new(entry.document.clone(), sim)
+                ScoredDocument::new(id.clone(), entry.document.clone(), sim)
             })
             .collect();
 
@@ -141,6 +141,7 @@ mod tests {
 
         let results = store.query(vec![1.0, 0.0, 0.0], 2).await.unwrap();
         assert_eq!(results.len(), 2);
+        assert_eq!(results[0].id, "a");
         assert_eq!(results[0].document.content, "doc a");
         assert!((results[0].score - 1.0).abs() < 1e-6);
     }

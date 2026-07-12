@@ -23,6 +23,10 @@ use crate::retriever::{Document, ScoredDocument};
 struct StoredFact {
     id: String,
     text: String,
+    /// Lowercased form of `text`, computed once at insert time so `search`
+    /// doesn't reallocate a fresh lowercase copy of every fact on every
+    /// query.
+    text_lower: String,
     metadata: HashMap<String, Value>,
 }
 
@@ -49,6 +53,7 @@ impl ArchivalMemory for InMemoryArchivalMemory {
         self.facts.write().await.push(StoredFact {
             id: id.clone(),
             text: text.to_string(),
+            text_lower: text.to_lowercase(),
             metadata,
         });
         Ok(id)
@@ -65,8 +70,10 @@ impl ArchivalMemory for InMemoryArchivalMemory {
         let mut scored: Vec<(f64, &StoredFact)> = facts
             .iter()
             .filter_map(|fact| {
-                let text_lower = fact.text.to_lowercase();
-                let hits = terms.iter().filter(|t| text_lower.contains(*t)).count();
+                let hits = terms
+                    .iter()
+                    .filter(|t| fact.text_lower.contains(*t))
+                    .count();
                 (hits > 0).then_some((hits as f64, fact))
             })
             .collect();
@@ -161,13 +168,12 @@ impl<V: VectorStore, E: EmbeddingModel> ArchivalMemory for VectorArchivalMemory<
         let results: Vec<ScoredDocument> = self.store.query(embedding, top_k).await?;
         Ok(results
             .into_iter()
-            .enumerate()
-            .map(|(i, scored)| ArchivalRecord {
-                // VectorStore has no notion of a stable id in its query
-                // results; expose the rank-derived placeholder plus the
-                // document's own metadata so callers can still recover a
-                // caller-assigned id if they stored one as metadata.
-                id: format!("result-{i}"),
+            .map(|scored| ArchivalRecord {
+                // `ScoredDocument::id` is the same stable id passed to
+                // `VectorStore::upsert` at insert time, so it round-trips
+                // directly into `delete` (see `VectorStore::query`'s
+                // contract in daimon-core).
+                id: scored.id,
                 text: scored.document.content,
                 metadata: scored.document.metadata,
                 score: Some(scored.score),
@@ -282,5 +288,26 @@ mod tests {
         assert_eq!(adapter.count().await.unwrap(), 2);
         let results = adapter.search("hello", 2).await.unwrap();
         assert_eq!(results.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn vector_archival_memory_search_ids_round_trip_to_delete() {
+        use crate::retriever::InMemoryVectorStoreBackend;
+
+        let adapter = VectorArchivalMemory::new(InMemoryVectorStoreBackend::new(), FakeEmbedder);
+        let inserted_id = adapter.insert("hello", HashMap::new()).await.unwrap();
+
+        let results = adapter.search("hello", 1).await.unwrap();
+        assert_eq!(results.len(), 1);
+        // The id returned by search must be the real, stable id assigned at
+        // insert time, not a rank-derived placeholder.
+        assert_eq!(results[0].id, inserted_id);
+
+        // And it must actually work with delete: the fact should be gone
+        // afterward.
+        assert!(adapter.delete(&results[0].id).await.unwrap());
+        assert_eq!(adapter.count().await.unwrap(), 0);
+        let remaining = adapter.search("hello", 2).await.unwrap();
+        assert!(remaining.is_empty());
     }
 }

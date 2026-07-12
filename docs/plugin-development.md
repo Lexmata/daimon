@@ -356,16 +356,19 @@ impl VectorStore for MyVectorStore {
         let client = self.pool.get().await
             .map_err(|e| DaimonError::Other(format!("pool error: {e}")))?;
 
-        // Run similarity search, return (content, metadata, score) rows
-        let rows = client.query("SELECT content, metadata, similarity(embedding, $1) AS score FROM vectors ORDER BY embedding <-> $1 LIMIT $2", &[&embedding, &(top_k as i64)])
+        // Run similarity search, return (id, content, metadata, score) rows
+        let rows = client.query("SELECT id, content, metadata, similarity(embedding, $1) AS score FROM vectors ORDER BY embedding <-> $1 LIMIT $2", &[&embedding, &(top_k as i64)])
             .await
             .map_err(|e| DaimonError::Other(format!("query error: {e}")))?;
 
         let results: Vec<ScoredDocument> = rows.into_iter().map(|row| {
+            let id: String = row.get("id");
             let content: String = row.get("content");
             let metadata: HashMap<String, serde_json::Value> = serde_json::from_value(row.get("metadata")).unwrap_or_default();
             let score: f64 = row.get("score");
-            ScoredDocument::new(Document { content, metadata, score: Some(score) }, score)
+            // `id` must be the same stable id the document was upserted
+            // with, so callers can pass a search result straight to `delete`.
+            ScoredDocument::new(id, Document { content, metadata, score: Some(score) }, score)
         }).collect();
 
         Ok(results)

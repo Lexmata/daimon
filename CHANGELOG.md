@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Memory tier hardening (DAIM-29):**
+  - **Breaking:** `ScoredDocument` (returned by `VectorStore::query`) gains a
+    required `id: String` field, and `ScoredDocument::new` gains a leading
+    `id: impl Into<String>` parameter. Every built-in `VectorStore` backend
+    (in-memory, pgvector, OpenSearch) already had the real record id in hand
+    at the point it constructed a `ScoredDocument` and simply never threaded
+    it through, so `VectorArchivalMemory::search()` results could never be
+    passed to `delete()` — the id had been fabricated as `format!("result-{i}")`.
+    External `VectorStore` implementors, and any caller constructing
+    `ScoredDocument` directly, must now pass the backend's real id as the
+    first argument (or populate the new `id` field).
+  - `CoreMemory::render()`'s header-injection escaping (`escape_headers`)
+    now recognizes Markdown ATX headers indented by up to 3 spaces, matching
+    CommonMark's own tolerance, instead of only an exact column-0 `#`. A
+    stored block `value` containing a line like `"  ## persona"` previously
+    slipped through unescaped and could still be read as a real header
+    boundary by a lenient-Markdown-parsing LLM; 4+ leading spaces (an
+    indented code block, not a header) remain untouched.
+
 ## [0.21.0] - 2026-07-11
 
 ### Added
