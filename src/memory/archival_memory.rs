@@ -242,6 +242,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn more_relevant_fact_ranks_first() {
+        // Fact A matches both query terms ("sky" and "blue"); fact B matches
+        // only one ("blue"). A regression that dropped the score-based sort
+        // (e.g. falling back to insertion order) would silently return B
+        // first here since it was inserted first.
+        let mem = InMemoryArchivalMemory::new();
+        let id_b = mem
+            .insert("the ocean is blue", HashMap::new())
+            .await
+            .unwrap();
+        let id_a = mem.insert("the sky is blue", HashMap::new()).await.unwrap();
+
+        let results = mem.search("sky blue", 5).await.unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].id, id_a, "the two-term match must rank first");
+        assert_eq!(results[1].id, id_b);
+        assert!(results[0].score.unwrap() > results[1].score.unwrap());
+    }
+
+    #[tokio::test]
     async fn metadata_round_trips() {
         let mem = InMemoryArchivalMemory::new();
         let mut metadata = HashMap::new();
@@ -288,6 +308,64 @@ mod tests {
         assert_eq!(adapter.count().await.unwrap(), 2);
         let results = adapter.search("hello", 2).await.unwrap();
         assert_eq!(results.len(), 2);
+    }
+
+    /// Embeds a small fixed vocabulary into 2D vectors with meaningfully
+    /// different directions, so cosine similarity (what
+    /// `InMemoryVectorStoreBackend` scores on) actually distinguishes
+    /// "more similar" from "less similar" rather than always returning 1.0
+    /// (which is what any pair of positive 1-dimensional vectors would do,
+    /// as `FakeEmbedder` above produces).
+    struct DirectionalEmbedder;
+
+    impl EmbeddingModel for DirectionalEmbedder {
+        async fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+            Ok(texts
+                .iter()
+                .map(|t| {
+                    if t.contains("cat") {
+                        vec![1.0, 0.0]
+                    } else if t.contains("dog") {
+                        vec![0.0, 1.0]
+                    } else {
+                        // A query that leans mostly towards "cat" but not
+                        // purely so.
+                        vec![0.9, 0.1]
+                    }
+                })
+                .collect())
+        }
+
+        fn dimensions(&self) -> usize {
+            2
+        }
+    }
+
+    #[tokio::test]
+    async fn vector_archival_memory_ranks_more_similar_document_first() {
+        use crate::retriever::InMemoryVectorStoreBackend;
+
+        let adapter =
+            VectorArchivalMemory::new(InMemoryVectorStoreBackend::new(), DirectionalEmbedder);
+        let cat_id = adapter
+            .insert("the cat sat on the mat", HashMap::new())
+            .await
+            .unwrap();
+        let dog_id = adapter
+            .insert("the dog barked loudly", HashMap::new())
+            .await
+            .unwrap();
+
+        // Query embedding [0.9, 0.1] is far closer (cosine) to the "cat"
+        // document [1.0, 0.0] than to the "dog" document [0.0, 1.0].
+        let results = adapter.search("a query about pets", 2).await.unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(
+            results[0].id, cat_id,
+            "the more-similar document must rank first"
+        );
+        assert_eq!(results[1].id, dog_id);
+        assert!(results[0].score.unwrap() > results[1].score.unwrap());
     }
 
     #[tokio::test]

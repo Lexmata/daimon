@@ -51,6 +51,8 @@
 //! | `pgvector` | pgvector-backed vector store (via `daimon-plugin-pgvector`) |
 //! | `opensearch` | OpenSearch k-NN vector store (via `daimon-plugin-opensearch`) |
 //! | `grpc` | gRPC transport for distributed execution |
+//! | `http-server` | HTTP agent server (`AgentServer`) |
+//! | `eval` | Agent evaluation/scoring harness |
 //! | `full` | All providers + macros + MCP + SQLite + Redis + NATS + AMQP + OTel + HTTP server + Qdrant + pgvector + OpenSearch + gRPC + eval + SQS + Pub/Sub + Service Bus |
 //!
 //! The core framework compiles with no features; enable providers as needed.

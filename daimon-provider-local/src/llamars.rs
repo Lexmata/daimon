@@ -8,9 +8,13 @@
 //! extras beyond that today.
 //!
 //! ```ignore
+//! use daimon_core::{ChatRequest, Message, Model};
 //! use daimon_provider_local::llamars::LlamaRs;
 //!
 //! let model = LlamaRs::new().with_base_url("http://localhost:8080");
+//! let response = model
+//!     .generate(&ChatRequest::new(vec![Message::user("hello")]))
+//!     .await?;
 //! ```
 
 use std::time::Duration;
