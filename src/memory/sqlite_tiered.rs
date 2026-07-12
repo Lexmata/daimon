@@ -239,30 +239,88 @@ impl SqliteArchivalMemory {
         let conn = self.conn.clone();
         spawn_blocking_err(move || {
             let conn = conn.blocking_lock();
+            // `id` is derived from `seq` — an `INTEGER PRIMARY KEY
+            // AUTOINCREMENT` column — at insert time (see `insert()`), not
+            // from an in-process counter. Plain SQLite rowids are just
+            // `max(existing rowid) + 1`, recomputed from current table
+            // contents; deleting the row holding the current max rowid
+            // makes the very next insert reuse that same rowid (and thus
+            // the same derived id string). `AUTOINCREMENT` instead tracks a
+            // persisted high-water mark in `sqlite_sequence` that never
+            // goes backwards, even across deletes, so ids can't collide
+            // after a delete+reinsert. It's still true that SQLite
+            // allocates rowids atomically per connection under its own
+            // locking, so two `SqliteArchivalMemory` instances writing to
+            // the same file concurrently can never mint the same id either.
+            // The UNIQUE index is defense in depth on top of both of those.
+            //
+            // NOTE: `CREATE TABLE IF NOT EXISTS` means this does *not*
+            // migrate a database file created before this fix (plain `id
+            // TEXT NOT NULL`, no `seq` column) — such files keep the old
+            // rowid-reuse exposure and may already contain duplicate ids
+            // from it. There is no migration path here; a pre-existing file
+            // in that state needs manual inspection/deduplication (see the
+            // diagnostic on the UNIQUE index creation below) before reuse.
             conn.execute_batch(
-                // `id` is derived from the table's own `rowid` at insert time
-                // (see `insert()`), not from an in-process counter. SQLite
-                // allocates rowids atomically per connection under its own
-                // locking, so two `SqliteArchivalMemory` instances writing
-                // to the same file concurrently can never mint the same id
-                // the way a per-instance `AtomicU64` seeded at open() could.
-                // The UNIQUE index is defense in depth on top of that.
                 "CREATE TABLE IF NOT EXISTS archival_facts (
+                    seq INTEGER PRIMARY KEY AUTOINCREMENT,
                     id TEXT NOT NULL,
                     session_id TEXT NOT NULL,
                     text TEXT NOT NULL,
                     metadata TEXT NOT NULL
                 );
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_archival_facts_id
-                    ON archival_facts(id);
                 CREATE VIRTUAL TABLE IF NOT EXISTS archival_facts_fts USING fts5(
                     id UNINDEXED, session_id UNINDEXED, text
                 );",
             )
-            .map_err(|e| DaimonError::Other(format!("sqlite create tables: {e}")))
+            .map_err(|e| DaimonError::Other(format!("sqlite create tables: {e}")))?;
+
+            // Split out from the batch above so a failure here (most likely:
+            // a pre-existing database file that already has duplicate `id`
+            // values from the old rowid-reuse bug) gets a clear diagnostic
+            // instead of an opaque SQLite constraint error.
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_archival_facts_id ON archival_facts(id)",
+                [],
+            )
+            .map_err(|e| {
+                DaimonError::Other(format!(
+                    "sqlite create unique index on archival_facts(id): {e}. This usually means \
+                     this database file predates the AUTOINCREMENT id fix (DAIM-32) and already \
+                     contains duplicate ids from the earlier rowid-reuse bug. Inspect with \
+                     `SELECT id, COUNT(*) FROM archival_facts GROUP BY id HAVING COUNT(*) > 1` \
+                     and deduplicate manually before reusing this file."
+                ))
+            })?;
+            Ok(())
         })
         .await
     }
+}
+
+/// Inserts a placeholder row, derives the real id from the table's
+/// `INTEGER PRIMARY KEY AUTOINCREMENT` sequence value (via
+/// `tx.last_insert_rowid()`, which aliases that column), and backfills the
+/// `id` column with it in the same transaction. Shared by
+/// `SqliteArchivalMemory::insert` and `SqliteEpisodicMemory::record`, which
+/// otherwise duplicated this exact sequence.
+fn insert_with_sequence_id(
+    tx: &rusqlite::Transaction<'_>,
+    table: &str,
+    id_prefix: &str,
+    insert_sql: &str,
+    insert_params: &[&dyn rusqlite::ToSql],
+) -> Result<String> {
+    tx.execute(insert_sql, insert_params)
+        .map_err(|e| DaimonError::Other(format!("sqlite insert: {e}")))?;
+    let seq = tx.last_insert_rowid();
+    let id = format!("{id_prefix}-{seq}");
+    tx.execute(
+        &format!("UPDATE {table} SET id = ?1 WHERE rowid = ?2"),
+        params![id, seq],
+    )
+    .map_err(|e| DaimonError::Other(format!("sqlite id backfill: {e}")))?;
+    Ok(id)
 }
 
 impl ArchivalMemory for SqliteArchivalMemory {
@@ -278,22 +336,16 @@ impl ArchivalMemory for SqliteArchivalMemory {
                 .transaction()
                 .map_err(|e| DaimonError::Other(format!("sqlite tx begin: {e}")))?;
             // Insert with a placeholder id, then derive the real id from the
-            // row's own `rowid` (SQLite allocates rowids atomically per
-            // connection, uniqueness enforced by the DB itself rather than
-            // coordinated in-process) and back-fill it in the same
-            // transaction before the FTS row is written.
-            tx.execute(
+            // table's AUTOINCREMENT sequence value (see `create_tables` for
+            // why that — not a plain rowid — is required) and back-fill it
+            // in the same transaction before the FTS row is written.
+            let id = insert_with_sequence_id(
+                &tx,
+                "archival_facts",
+                "archival",
                 "INSERT INTO archival_facts (id, session_id, text, metadata) VALUES ('', ?1, ?2, ?3)",
                 params![session_id, text, metadata_json],
-            )
-            .map_err(|e| DaimonError::Other(format!("sqlite insert: {e}")))?;
-            let rowid = tx.last_insert_rowid();
-            let id = format!("archival-{rowid}");
-            tx.execute(
-                "UPDATE archival_facts SET id = ?1 WHERE rowid = ?2",
-                params![id, rowid],
-            )
-            .map_err(|e| DaimonError::Other(format!("sqlite id backfill: {e}")))?;
+            )?;
             tx.execute(
                 "INSERT INTO archival_facts_fts (id, session_id, text) VALUES (?1, ?2, ?3)",
                 params![id, session_id, text],
@@ -455,23 +507,45 @@ impl SqliteEpisodicMemory {
         let conn = self.conn.clone();
         spawn_blocking_err(move || {
             let conn = conn.blocking_lock();
+            // Like `archival_facts`, `id` is derived from `seq` — an
+            // `INTEGER PRIMARY KEY AUTOINCREMENT` column — at insert time
+            // rather than an in-process counter or a plain rowid — see the
+            // comment on `SqliteArchivalMemory::create_tables` for why a
+            // plain rowid isn't enough (it gets reused after a delete of the
+            // current max-rowid row). The same "no migration for pre-existing
+            // files" caveat applies here too.
             conn.execute_batch(
-                // Like `archival_facts`, `id` is derived from the table's own
-                // `rowid` at insert time rather than an in-process counter —
-                // see the comment on `SqliteArchivalMemory::create_tables`.
                 "CREATE TABLE IF NOT EXISTS episodic_events (
+                    seq INTEGER PRIMARY KEY AUTOINCREMENT,
                     id TEXT NOT NULL,
                     session_id TEXT NOT NULL,
                     event_type TEXT NOT NULL,
                     payload TEXT NOT NULL,
                     timestamp_ms INTEGER NOT NULL
                 );
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_episodic_events_id
-                    ON episodic_events(id);
                 CREATE INDEX IF NOT EXISTS idx_episodic_session_ts
                     ON episodic_events(session_id, timestamp_ms);",
             )
-            .map_err(|e| DaimonError::Other(format!("sqlite create tables: {e}")))
+            .map_err(|e| DaimonError::Other(format!("sqlite create tables: {e}")))?;
+
+            // Split out so a failure (most likely a pre-existing database
+            // file that already has duplicate `id` values from the old
+            // rowid-reuse bug) gets a clear diagnostic instead of an opaque
+            // SQLite constraint error.
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_episodic_events_id ON episodic_events(id)",
+                [],
+            )
+            .map_err(|e| {
+                DaimonError::Other(format!(
+                    "sqlite create unique index on episodic_events(id): {e}. This usually means \
+                     this database file predates the AUTOINCREMENT id fix (DAIM-32) and already \
+                     contains duplicate ids from the earlier rowid-reuse bug. Inspect with \
+                     `SELECT id, COUNT(*) FROM episodic_events GROUP BY id HAVING COUNT(*) > 1` \
+                     and deduplicate manually before reusing this file."
+                ))
+            })?;
+            Ok(())
         })
         .await
     }
@@ -498,20 +572,15 @@ impl EpisodicMemory for SqliteEpisodicMemory {
             let tx = conn
                 .transaction()
                 .map_err(|e| DaimonError::Other(format!("sqlite tx begin: {e}")))?;
-            // Same rowid-derived id scheme as `SqliteArchivalMemory::insert`.
-            tx.execute(
+            // Same sequence-derived id scheme as `SqliteArchivalMemory::insert`.
+            let id = insert_with_sequence_id(
+                &tx,
+                "episodic_events",
+                "event",
                 "INSERT INTO episodic_events (id, session_id, event_type, payload, timestamp_ms)
                  VALUES ('', ?1, ?2, ?3, ?4)",
                 params![session_id, event_type, payload_json, ts],
-            )
-            .map_err(|e| DaimonError::Other(format!("sqlite insert: {e}")))?;
-            let rowid = tx.last_insert_rowid();
-            let id = format!("event-{rowid}");
-            tx.execute(
-                "UPDATE episodic_events SET id = ?1 WHERE rowid = ?2",
-                params![id, rowid],
-            )
-            .map_err(|e| DaimonError::Other(format!("sqlite id backfill: {e}")))?;
+            )?;
             tx.commit()
                 .map_err(|e| DaimonError::Other(format!("sqlite tx commit: {e}")))?;
             Ok(id)
@@ -844,21 +913,55 @@ mod tests {
             .unwrap()
             .with_session_id("shared-session");
 
-        // Interleave inserts across both instances the way two long-lived
-        // processes sharing a DB file would.
-        let id_a1 = a.insert("fact from a #1", HashMap::new()).await.unwrap();
-        let id_b1 = b.insert("fact from b #1", HashMap::new()).await.unwrap();
-        let id_a2 = a.insert("fact from a #2", HashMap::new()).await.unwrap();
-        let id_b2 = b.insert("fact from b #2", HashMap::new()).await.unwrap();
+        // Actually race the two handles' writes against each other — issuing
+        // them as sequential `.await`s on one task (as an earlier version of
+        // this test did) never lets them overlap, so it can't catch a real
+        // concurrency bug. `tokio::join!` drives both futures concurrently;
+        // repeat it a few rounds to raise the odds of genuine overlap.
+        let mut all_ids = Vec::new();
+        for round in 0..5 {
+            let text_a = format!("fact from a round {round} alpha-marker");
+            let text_b = format!("fact from b round {round} beta-marker");
+            let (res_a, res_b) = tokio::join!(
+                a.insert(&text_a, HashMap::new()),
+                b.insert(&text_b, HashMap::new()),
+            );
+            all_ids.push(
+                res_a.expect("concurrent insert from instance a must not error (e.g. SQLITE_BUSY)"),
+            );
+            all_ids.push(
+                res_b.expect("concurrent insert from instance b must not error (e.g. SQLITE_BUSY)"),
+            );
+        }
 
-        let ids = [&id_a1, &id_b1, &id_a2, &id_b2];
-        let unique: std::collections::HashSet<_> = ids.iter().collect();
-        assert_eq!(unique.len(), ids.len(), "all ids must be distinct: {ids:?}");
+        let unique: std::collections::HashSet<_> = all_ids.iter().collect();
+        assert_eq!(
+            unique.len(),
+            all_ids.len(),
+            "all ids must be distinct: {all_ids:?}"
+        );
 
-        // Both instances see all four facts (same session, same file) — no
+        // Both instances see all ten facts (same session, same file) — no
         // insert was rejected or silently lost to a PRIMARY KEY collision.
-        assert_eq!(a.count().await.unwrap(), 4);
-        assert_eq!(b.count().await.unwrap(), 4);
+        assert_eq!(a.count().await.unwrap(), 10);
+        assert_eq!(b.count().await.unwrap(), 10);
+
+        // The FTS mirror must stay correctly paired with the base table
+        // under concurrent writes too — `search()` joins through
+        // `archival_facts_fts`, so a mispaired row here would mean the FTS
+        // insert and the id backfill raced each other across instances.
+        let alpha_hits = a.search("alpha-marker", 10).await.unwrap();
+        assert_eq!(
+            alpha_hits.len(),
+            5,
+            "every concurrent insert from instance a must be findable via FTS search"
+        );
+        let beta_hits = b.search("beta-marker", 10).await.unwrap();
+        assert_eq!(
+            beta_hits.len(),
+            5,
+            "every concurrent insert from instance b must be findable via FTS search"
+        );
 
         let _ = std::fs::remove_file(&path_str);
     }
@@ -959,17 +1062,31 @@ mod tests {
             .unwrap()
             .with_session_id("shared-session");
 
-        let id_a1 = a.record("tick", Value::Null).await.unwrap();
-        let id_b1 = b.record("tick", Value::Null).await.unwrap();
-        let id_a2 = a.record("tick", Value::Null).await.unwrap();
-        let id_b2 = b.record("tick", Value::Null).await.unwrap();
+        // Actually race the two handles' writes against each other, the same
+        // way `archival_concurrent_instances_get_distinct_ids` does —
+        // sequential `.await`s on one task never let the two connections'
+        // writes genuinely overlap.
+        let mut all_ids = Vec::new();
+        for _ in 0..5 {
+            let (res_a, res_b) =
+                tokio::join!(a.record("tick", Value::Null), b.record("tick", Value::Null),);
+            all_ids.push(
+                res_a.expect("concurrent record from instance a must not error (e.g. SQLITE_BUSY)"),
+            );
+            all_ids.push(
+                res_b.expect("concurrent record from instance b must not error (e.g. SQLITE_BUSY)"),
+            );
+        }
 
-        let ids = [&id_a1, &id_b1, &id_a2, &id_b2];
-        let unique: std::collections::HashSet<_> = ids.iter().collect();
-        assert_eq!(unique.len(), ids.len(), "all ids must be distinct: {ids:?}");
+        let unique: std::collections::HashSet<_> = all_ids.iter().collect();
+        assert_eq!(
+            unique.len(),
+            all_ids.len(),
+            "all ids must be distinct: {all_ids:?}"
+        );
         assert_eq!(
             a.query(EpisodicQuery::all()).await.unwrap().len(),
-            4,
+            10,
             "no insert should have been rejected or lost to an id collision"
         );
 

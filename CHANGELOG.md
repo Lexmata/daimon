@@ -41,6 +41,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     boundary by a lenient-Markdown-parsing LLM; 4+ leading spaces (an
     indented code block, not a header) remain untouched.
 
+### Fixed
+
+- **`SqliteArchivalMemory`/`SqliteEpisodicMemory` id collisions (DAIM-32,
+  follow-up to DAIM-25):** ids are now derived from a real `INTEGER PRIMARY
+  KEY AUTOINCREMENT` sequence column (`seq`) instead of the table's plain
+  rowid. Plain SQLite rowids are recomputed as `max(existing rowid) + 1`
+  from current table contents, so deleting the row holding the current max
+  rowid made the very next insert reuse that exact rowid — and therefore
+  mint the exact same id string — even after DAIM-25's fix moved id
+  derivation out of an in-process counter. `AUTOINCREMENT` tracks a
+  persisted high-water mark (`sqlite_sequence`) that never goes backwards,
+  closing the collision on restart, across concurrent instances, *and*
+  after delete+reinsert. Databases created before this fix are not migrated
+  automatically (`CREATE TABLE IF NOT EXISTS` leaves their schema as-is);
+  such files may already contain duplicate ids from the earlier bug and
+  need manual deduplication — attempting to reuse one now fails loudly with
+  a diagnostic pointing at the fix, instead of an opaque SQLite constraint
+  error.
+- **`SqliteArchivalMemory::delete()`/`SqliteEpisodicMemory` deletes are now
+  session-scoped:** previously any session could delete any row by id
+  (`DELETE FROM archival_facts WHERE id = ?1`, no `session_id` filter); a
+  delete from a different session's handle no longer succeeds.
+
 ## [0.21.0] - 2026-07-11
 
 ### Added
