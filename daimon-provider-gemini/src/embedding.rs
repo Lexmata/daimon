@@ -47,6 +47,22 @@ pub struct GeminiEmbedding {
     use_bearer_token: bool,
 }
 
+impl std::fmt::Debug for GeminiEmbedding {
+    /// Hand-written to avoid leaking the plaintext API key in logs or panic
+    /// output; a derived `Debug` would print `api_key` verbatim.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GeminiEmbedding")
+            .field("client", &self.client)
+            .field("api_key", &"[redacted]")
+            .field("model_id", &self.model_id)
+            .field("base_url", &self.base_url)
+            .field("dimensions", &self.dimensions)
+            .field("max_retries", &self.max_retries)
+            .field("use_bearer_token", &self.use_bearer_token)
+            .finish()
+    }
+}
+
 impl GeminiEmbedding {
     /// Creates a new Gemini embedding client, reading `GOOGLE_API_KEY` from env.
     ///
@@ -259,5 +275,17 @@ mod tests {
             req.headers().get("x-goog-api-key").unwrap(),
             "AIza-embed-secret"
         );
+    }
+
+    #[test]
+    fn test_debug_redacts_api_key() {
+        let embed = GeminiEmbedding::new("text-embedding-004")
+            .with_api_key("AIza-gemini-embed-supersecret");
+        let dbg = format!("{embed:?}");
+        assert!(
+            !dbg.contains("AIza-gemini-embed-supersecret"),
+            "Debug output must not contain the plaintext API key: {dbg}"
+        );
+        assert!(dbg.contains("[redacted]"));
     }
 }
