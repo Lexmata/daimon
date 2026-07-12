@@ -8,11 +8,15 @@
 //! wide range of servers and ports.
 //!
 //! ```ignore
+//! use daimon_core::{ChatRequest, Message, Model};
 //! use daimon_provider_local::generic::OpenAiCompatible;
 //!
 //! let model = OpenAiCompatible::new("http://localhost:8000")
 //!     .with_model("my-model")
 //!     .with_extra_field("repetition_penalty", serde_json::json!(1.1));
+//! let response = model
+//!     .generate(&ChatRequest::new(vec![Message::user("hello")]))
+//!     .await?;
 //! ```
 
 use std::time::Duration;

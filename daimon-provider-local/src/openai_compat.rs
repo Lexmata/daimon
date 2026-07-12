@@ -865,4 +865,33 @@ mod tests {
         let vecs = parse_embed_response(body, "test").unwrap();
         assert_eq!(vecs, vec![vec![0.1, 0.2]]);
     }
+
+    // --- Property tests ---
+    //
+    // `parse_chat_response` and `sse_line_events_into` both parse bytes that
+    // came straight from a remote server's HTTP response body — untrusted
+    // input. These don't assert anything about the parsed content; they
+    // assert that no arbitrary input can panic the parser (only a
+    // `Result::Err`, or well-formed output, is acceptable).
+
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn parse_chat_response_never_panics(body in prop::collection::vec(any::<u8>(), 0..256)) {
+            let _ = parse_chat_response(&body, "test");
+        }
+
+        #[test]
+        fn parse_chat_response_never_panics_on_arbitrary_json(body in "\\PC{0,256}") {
+            let _ = parse_chat_response(body.as_bytes(), "test");
+        }
+
+        #[test]
+        fn sse_line_events_into_never_panics(line in "\\PC{0,256}") {
+            let mut events = Vec::new();
+            sse_line_events_into(&line, &mut events);
+            // No panic occurred: that is the property under test.
+        }
+    }
 }

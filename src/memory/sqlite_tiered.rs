@@ -714,6 +714,35 @@ mod tests {
         assert_eq!(mem.count().await.unwrap(), 1);
     }
 
+    /// bm25's raw score is lower-is-better; `search` negates it so
+    /// higher-is-more-relevant holds across every `ArchivalMemory`
+    /// implementation (see the comment at the negation site). A regression
+    /// that dropped or double-applied that negation would silently invert
+    /// the ranking below with nothing else catching it.
+    #[tokio::test]
+    async fn archival_more_relevant_fact_ranks_first() {
+        let mem = SqliteArchivalMemory::in_memory().await.unwrap();
+        // Insert the weaker match first so a regression to
+        // insertion-order-as-tiebreak wouldn't accidentally pass.
+        let id_weak = mem
+            .insert("the ocean is deep and blue", HashMap::new())
+            .await
+            .unwrap();
+        let id_strong = mem
+            .insert("sky blue sky blue sky blue", HashMap::new())
+            .await
+            .unwrap();
+
+        let results = mem.search("sky blue", 5).await.unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(
+            results[0].id, id_strong,
+            "the denser term match must rank first"
+        );
+        assert_eq!(results[1].id, id_weak);
+        assert!(results[0].score.unwrap() > results[1].score.unwrap());
+    }
+
     #[tokio::test]
     async fn archival_metadata_round_trips() {
         let mem = SqliteArchivalMemory::in_memory().await.unwrap();

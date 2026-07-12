@@ -26,3 +26,6 @@ tracing = { workspace = true }
 async-stream = { workspace = true }
 futures = { workspace = true }
 reqwest = { workspace = true }
+
+[dev-dependencies]
+proptest = "1"

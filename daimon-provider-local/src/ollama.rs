@@ -7,8 +7,12 @@
 //!
 //! ```ignore
 //! use daimon::model::ollama::Ollama;
+//! use daimon_core::{ChatRequest, Message, Model};
 //!
 //! let model = Ollama::new("llama3.1");
+//! let response = model
+//!     .generate(&ChatRequest::new(vec![Message::user("hello")]))
+//!     .await?;
 //! ```
 
 use std::sync::Arc;
