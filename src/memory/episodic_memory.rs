@@ -36,7 +36,21 @@ impl InMemoryEpisodicMemory {
     /// (FIFO) on `record` once the cap is exceeded. Unset by default
     /// (unbounded growth) to preserve existing behavior for callers that
     /// don't opt in.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `max_events` is `0`. A cap of zero would mean every
+    /// `record` call pushes an event and then immediately evicts it in the
+    /// same call, silently discarding every write while still returning
+    /// `Ok(id)` as if it succeeded — a programming error, not a runtime
+    /// condition callers should need to handle via `Result`. Use `None`
+    /// (the default, via [`new`](Self::new)) if the intent is genuinely to
+    /// retain nothing.
     pub fn with_max_events(mut self, max_events: usize) -> Self {
+        assert!(
+            max_events > 0,
+            "max_events must be at least 1; use None (the default) for unbounded, or to discard everything, don't call record"
+        );
         self.max_events = Some(max_events);
         self
     }
@@ -188,6 +202,16 @@ mod tests {
             .map(|e| e.payload["i"].as_i64().unwrap())
             .collect();
         assert_eq!(ids, vec![4, 3, 2]);
+    }
+
+    #[test]
+    #[should_panic(expected = "max_events must be at least 1")]
+    fn with_max_events_rejects_zero() {
+        // A cap of zero would silently discard every `record` write (push
+        // then immediately evict) while still returning `Ok(id)`, which is
+        // indistinguishable from success at the call site. Reject it at
+        // builder time instead.
+        let _ = InMemoryEpisodicMemory::new().with_max_events(0);
     }
 
     #[tokio::test]
