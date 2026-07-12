@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A2A feature gate (DAIM-27):**
+  - **Breaking:** `daimon::a2a` (the whole module — `client`, `server`, and
+    `types` submodules included) now requires its own `a2a` Cargo feature
+    (or `full`) to be enabled. Previously the module was only reachable
+    because it happened to be pulled in transitively by unrelated features
+    (`openai`, `anthropic`, `ollama`, `mcp`) via a shared `dep:reqwest`
+    gate, so a build enabling none of those four would silently drop
+    `a2a` entirely while still compiling everything else — a
+    silent-partial-compile bug, not a documented feature boundary.
+    Consumers using `A2aClient`/`A2aHandler` who were not already on one
+    of those four features must add `features = ["a2a"]` (or `"full"`)
+    to their `Cargo.toml` dependency on `daimon`.
 - **Provider crate extraction (DAIM-30):** `OpenAi`/`OpenAiEmbedding` and
   `Anthropic` moved out of the `daimon` facade into new standalone crates,
   `daimon-provider-openai` and `daimon-provider-anthropic`, matching the
