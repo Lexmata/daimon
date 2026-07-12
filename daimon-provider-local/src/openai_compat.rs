@@ -27,10 +27,22 @@ pub(crate) const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 ///
 /// Without this, a server that accepts the TCP connection but stalls
 /// mid-response hangs forever — `connect_timeout` only bounds connection
-/// establishment. Matches the facade's `model::openai` convention. Never
-/// applied to `generate_stream`: a whole-request deadline would abort a
+/// establishment. Matches the facade's `daimon-provider-openai` convention.
+/// Never applied to `generate_stream`: a whole-request deadline would abort a
 /// healthy, long-lived SSE stream.
 pub(crate) const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Upper bound on the streaming handshake — the `send()` call that completes
+/// once response headers arrive, before any body bytes are consumed.
+///
+/// `post_streaming` deliberately passes no whole-request timeout so a
+/// healthy long-lived SSE stream is never aborted mid-body. But that leaves
+/// nothing bounding the time between a successful TCP/TLS connect and the
+/// server actually sending headers — a server that accepts the connection
+/// and then never responds (e.g. still loading a model) would hang forever,
+/// before the retry loop ever got a chance to engage. This bounds only that
+/// handshake window; once bytes start flowing, consumption is unbounded.
+pub(crate) const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Default number of retries for transient (429 / 5xx) errors on the initial
 /// request. Matches [`crate::ollama_embed`]'s `DEFAULT_MAX_RETRIES`.
@@ -54,8 +66,13 @@ pub(crate) struct Http {
     api_key: Option<String>,
     timeout: Option<Duration>,
     max_retries: u32,
-    /// Set once an `http://` + API key combination has been warned about, so
-    /// repeated requests don't spam logs.
+    /// When `false` (the default), sending an API key over a plaintext
+    /// `http://` base URL is a hard configuration error. Set via
+    /// [`Http::set_allow_plaintext_api_key`] to opt back into warn-and-send
+    /// for genuinely local, unauthenticated-but-keyed servers.
+    allow_plaintext_api_key: bool,
+    /// Set once an `http://` + API key combination has been warned about (in
+    /// the opt-in-allowed case), so repeated requests don't spam logs.
     warned_plaintext_key: AtomicBool,
 }
 
@@ -67,6 +84,7 @@ impl Http {
             api_key: None,
             timeout: None,
             max_retries: DEFAULT_MAX_RETRIES,
+            allow_plaintext_api_key: false,
             warned_plaintext_key: AtomicBool::new(false),
         }
     }
@@ -90,6 +108,14 @@ impl Http {
         self.max_retries = retries;
     }
 
+    /// Opts back into warn-and-send-anyway for an API key over a plaintext
+    /// `http://` base URL (default: hard error). Intended only for genuinely
+    /// local, unauthenticated-but-keyed servers where the caller has made a
+    /// deliberate choice to accept the cleartext exposure.
+    pub(crate) fn set_allow_plaintext_api_key(&mut self, allow: bool) {
+        self.allow_plaintext_api_key = allow;
+    }
+
     #[cfg(test)]
     pub(crate) fn base_url(&self) -> &str {
         &self.base_url
@@ -110,17 +136,37 @@ impl Http {
         self.max_retries
     }
 
-    fn warn_if_plaintext_key(&self) {
-        if self.api_key.is_some()
-            && self.base_url.starts_with("http://")
-            && !self.warned_plaintext_key.swap(true, Ordering::Relaxed)
-        {
+    /// Refuses (by default) to send an API key over a plaintext `http://`
+    /// base URL — a bearer token sent in cleartext is trivially sniffable by
+    /// anything on the network path. When [`Http::set_allow_plaintext_api_key`]
+    /// has opted back in, this instead logs a one-time warning and allows the
+    /// request through, for genuinely local unauthenticated-but-keyed
+    /// servers.
+    ///
+    /// The scheme check is case-insensitive (`HTTP://` is just as plaintext
+    /// as `http://`).
+    fn check_plaintext_key(&self) -> Result<()> {
+        if self.api_key.is_none() || !self.base_url.to_ascii_lowercase().starts_with("http://") {
+            return Ok(());
+        }
+
+        if !self.allow_plaintext_api_key {
+            return Err(DaimonError::Builder(format!(
+                "refusing to send API key over plaintext HTTP to {} — use https://, or call \
+                 .allow_plaintext_api_key() to opt into cleartext for a genuinely local, \
+                 unauthenticated-but-keyed server",
+                self.base_url
+            )));
+        }
+
+        if !self.warned_plaintext_key.swap(true, Ordering::Relaxed) {
             tracing::warn!(
                 base_url = %self.base_url,
-                "sending API key over plaintext HTTP to {} — use https:// or drop with_api_key for genuinely local unauthenticated servers",
+                "sending API key over plaintext HTTP to {} (allowed via allow_plaintext_api_key)",
                 self.base_url
             );
         }
+        Ok(())
     }
 
     /// Sends a non-streaming request, retrying transient (429 / 5xx) errors
@@ -136,8 +182,8 @@ impl Http {
         path: &str,
         body: &impl Serialize,
     ) -> Result<reqwest::Response> {
-        let timeout = self.timeout.unwrap_or(DEFAULT_REQUEST_TIMEOUT);
-        self.post_with_retry(path, body, Some(timeout)).await
+        self.post_with_retry(path, body, self.effective_timeout(false))
+            .await
     }
 
     /// Sends the initial request/response-status-check for a streaming call,
@@ -149,7 +195,23 @@ impl Http {
         path: &str,
         body: &impl Serialize,
     ) -> Result<reqwest::Response> {
-        self.post_with_retry(path, body, None).await
+        self.post_with_retry(path, body, self.effective_timeout(true))
+            .await
+    }
+
+    /// Resolves the whole-request timeout to apply for a given call shape.
+    ///
+    /// Non-streaming calls get the default (or overridden) whole-request
+    /// timeout; streaming calls get `None` so a healthy long-lived SSE
+    /// stream is never aborted mid-body (see [`DEFAULT_HANDSHAKE_TIMEOUT`]
+    /// for the narrower bound that still applies to the streaming
+    /// handshake itself).
+    fn effective_timeout(&self, streaming: bool) -> Option<Duration> {
+        if streaming {
+            None
+        } else {
+            Some(self.timeout.unwrap_or(DEFAULT_REQUEST_TIMEOUT))
+        }
     }
 
     async fn post_with_retry(
@@ -158,7 +220,7 @@ impl Http {
         body: &impl Serialize,
         timeout: Option<Duration>,
     ) -> Result<reqwest::Response> {
-        self.warn_if_plaintext_key();
+        self.check_plaintext_key()?;
 
         for attempt in 0..=self.max_retries {
             let mut req = self
@@ -172,12 +234,26 @@ impl Http {
                 req = req.bearer_auth(key);
             }
 
-            let response = req
-                .send()
-                .await
-                .map_err(|e| DaimonError::Model(format!("HTTP error: {e}")))?;
+            let response = match send_with_handshake_bound(req, timeout).await {
+                Ok(response) => response,
+                Err(e) => {
+                    if e.is_retryable() && attempt < self.max_retries {
+                        let delay = backoff_delay(attempt, None);
+                        tracing::debug!(
+                            error = %e,
+                            attempt,
+                            delay_ms = delay.as_millis(),
+                            "retryable transport error, backing off"
+                        );
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    return Err(DaimonError::Model(format!("HTTP error: {e}")));
+                }
+            };
+
             let status = response.status();
-            let is_retryable = status.as_u16() == 429 || status.is_server_error();
+            let is_retryable = is_retryable_status(status);
 
             if !is_retryable || attempt == self.max_retries {
                 return Ok(response);
@@ -200,6 +276,78 @@ impl Http {
         }
 
         unreachable!("loop always returns")
+    }
+}
+
+/// Whether an HTTP response status should be retried: 429 (rate limited) or
+/// any 5xx (server error). Extracted as a pure function so the
+/// retry-decision logic is directly unit-testable without standing up a
+/// server.
+pub(crate) fn is_retryable_status(status: reqwest::StatusCode) -> bool {
+    status.as_u16() == 429 || status.is_server_error()
+}
+
+/// Whether a transport-level (pre-response) `reqwest::Error` should be
+/// retried: connection refused/reset, DNS/connect failure, or a client-side
+/// timeout. These are the dominant failure modes against local model
+/// servers (still loading, not yet listening, or slow to accept) and
+/// previously bypassed retry entirely because only HTTP-status failures
+/// were classified.
+pub(crate) fn is_retryable_transport_error(e: &reqwest::Error) -> bool {
+    e.is_timeout() || e.is_connect() || e.is_request()
+}
+
+/// A failure from [`send_with_handshake_bound`]: either a real
+/// `reqwest::Error` from `send()`, or the handshake exceeding
+/// [`DEFAULT_HANDSHAKE_TIMEOUT`] with no `reqwest::Error` to classify (the
+/// future was cancelled, not failed).
+enum TransportFailure {
+    Reqwest(reqwest::Error),
+    HandshakeTimedOut,
+}
+
+impl TransportFailure {
+    fn is_retryable(&self) -> bool {
+        match self {
+            Self::Reqwest(e) => is_retryable_transport_error(e),
+            // A handshake that never got headers is exactly the "server
+            // still loading" case retry exists for.
+            Self::HandshakeTimedOut => true,
+        }
+    }
+}
+
+impl std::fmt::Display for TransportFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Reqwest(e) => write!(f, "{e}"),
+            Self::HandshakeTimedOut => {
+                write!(
+                    f,
+                    "streaming handshake exceeded {DEFAULT_HANDSHAKE_TIMEOUT:?} without a response"
+                )
+            }
+        }
+    }
+}
+
+/// Sends `req`, applying [`DEFAULT_HANDSHAKE_TIMEOUT`] to the `send()` call
+/// itself when `timeout` is `None` (the streaming case) — nothing else
+/// bounds the time between a successful connect and the server actually
+/// sending headers. When `timeout` is `Some`, the whole-request timeout
+/// already covers this window, so `send()` is awaited directly.
+async fn send_with_handshake_bound(
+    req: reqwest::RequestBuilder,
+    timeout: Option<Duration>,
+) -> std::result::Result<reqwest::Response, TransportFailure> {
+    if timeout.is_none() {
+        match tokio::time::timeout(DEFAULT_HANDSHAKE_TIMEOUT, req.send()).await {
+            Ok(Ok(response)) => Ok(response),
+            Ok(Err(e)) => Err(TransportFailure::Reqwest(e)),
+            Err(_) => Err(TransportFailure::HandshakeTimedOut),
+        }
+    } else {
+        req.send().await.map_err(TransportFailure::Reqwest)
     }
 }
 
@@ -857,6 +1005,227 @@ mod tests {
         let mut http = Http::new("http://localhost:1234");
         http.set_timeout(Duration::from_secs(5));
         assert_eq!(http.timeout(), Some(Duration::from_secs(5)));
+    }
+
+    // --- is_retryable_status / is_retryable_transport_error (Finding 2) ---
+
+    #[test]
+    fn test_is_retryable_status_429() {
+        assert!(is_retryable_status(
+            reqwest::StatusCode::from_u16(429).unwrap()
+        ));
+    }
+
+    #[test]
+    fn test_is_retryable_status_5xx() {
+        for code in 500..600 {
+            assert!(
+                is_retryable_status(reqwest::StatusCode::from_u16(code).unwrap()),
+                "status {code} should be retryable"
+            );
+        }
+    }
+
+    #[test]
+    fn test_is_retryable_status_4xx_non_429_not_retryable() {
+        for code in [400, 401, 404] {
+            assert!(
+                !is_retryable_status(reqwest::StatusCode::from_u16(code).unwrap()),
+                "status {code} should not be retryable"
+            );
+        }
+    }
+
+    #[test]
+    fn test_is_retryable_status_2xx_not_retryable() {
+        for code in [200, 201] {
+            assert!(
+                !is_retryable_status(reqwest::StatusCode::from_u16(code).unwrap()),
+                "status {code} should not be retryable"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_is_retryable_transport_error_connect_refused() {
+        // Bind then immediately drop: the OS frees the port but guarantees
+        // nothing listens on it, so the connection attempt fails
+        // synchronously with ECONNREFUSED — a real transport-level error,
+        // not a mock.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        let client = reqwest::Client::new();
+        let err = client
+            .get(format!("http://{addr}"))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(err.is_connect());
+        assert!(is_retryable_transport_error(&err));
+    }
+
+    #[tokio::test]
+    async fn test_is_retryable_transport_error_timeout() {
+        // A listener that accepts the TCP connection but never writes a
+        // response forces a real client-side timeout, distinct from a
+        // connection refusal.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let _ = listener.accept();
+            std::thread::sleep(Duration::from_secs(5));
+        });
+
+        let client = reqwest::Client::new();
+        let err = client
+            .get(format!("http://{addr}"))
+            .timeout(Duration::from_millis(100))
+            .send()
+            .await
+            .unwrap_err();
+        // Older/newer reqwest versions classify a request-phase timeout
+        // under slightly different `Error::is_*` flags (`is_timeout` vs
+        // `is_request`); what matters for retry purposes is that our
+        // classifier treats it as retryable either way.
+        assert!(is_retryable_transport_error(&err), "err was: {err:?}");
+    }
+
+    // --- effective_timeout (Finding 3) ---
+
+    #[test]
+    fn test_effective_timeout_non_streaming_default() {
+        let http = Http::new("http://localhost:1234");
+        assert_eq!(http.effective_timeout(false), Some(DEFAULT_REQUEST_TIMEOUT));
+    }
+
+    #[test]
+    fn test_effective_timeout_non_streaming_overridden() {
+        let mut http = Http::new("http://localhost:1234");
+        http.set_timeout(Duration::from_secs(5));
+        assert_eq!(http.effective_timeout(false), Some(Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn test_effective_timeout_streaming_is_unbounded() {
+        let http = Http::new("http://localhost:1234");
+        assert_eq!(http.effective_timeout(true), None);
+    }
+
+    // --- connection-level retry, end-to-end (Finding 1) ---
+
+    #[tokio::test]
+    async fn test_post_retries_transport_errors_then_succeeds() {
+        use std::io::Write;
+        use std::net::TcpListener;
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicUsize;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accept_count = Arc::new(AtomicUsize::new(0));
+        let accept_count_thread = Arc::clone(&accept_count);
+
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let n = accept_count_thread.fetch_add(1, Ordering::SeqCst);
+                let Ok(mut stream) = stream else { continue };
+                if n < 2 {
+                    // First two connections: drop immediately without ever
+                    // writing a response, simulating a server that resets
+                    // the connection (still loading, out of worker slots).
+                    drop(stream);
+                } else {
+                    // Read (and discard) the client's request headers before
+                    // responding — writing a response before the client has
+                    // finished sending its request confuses hyper's
+                    // client-side parser (observed as a spurious
+                    // `Canceled`/`UnexpectedMessage` error unrelated to what
+                    // this test exercises).
+                    let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+                    loop {
+                        use std::io::BufRead;
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                            break;
+                        }
+                    }
+
+                    let body =
+                        r#"{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}"#;
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    break;
+                }
+            }
+        });
+
+        let mut http = Http::new(&format!("http://{addr}"));
+        http.set_max_retries(3);
+        let response = http
+            .post("/v1/chat/completions", &serde_json::json!({}))
+            .await
+            .expect("should succeed after retrying connection-level failures");
+        assert!(response.status().is_success());
+        assert!(accept_count.load(Ordering::SeqCst) >= 3);
+    }
+
+    #[tokio::test]
+    async fn test_post_gives_up_after_max_retries_on_persistent_connection_refused() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        let mut http = Http::new(&format!("http://{addr}"));
+        http.set_max_retries(1);
+        let err = http
+            .post("/v1/chat/completions", &serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("HTTP error"));
+    }
+
+    // --- plaintext API key hard-block (Finding 5) ---
+
+    #[test]
+    fn test_plaintext_api_key_blocked_by_default() {
+        let mut http = Http::new("http://localhost:1234");
+        http.set_api_key("secret");
+        let err = http.check_plaintext_key().unwrap_err();
+        assert!(matches!(err, DaimonError::Builder(_)));
+    }
+
+    #[test]
+    fn test_plaintext_api_key_blocked_case_insensitive_scheme() {
+        let mut http = Http::new("HTTP://localhost:1234");
+        http.set_api_key("secret");
+        assert!(http.check_plaintext_key().is_err());
+    }
+
+    #[test]
+    fn test_plaintext_api_key_allowed_when_opted_in() {
+        let mut http = Http::new("http://localhost:1234");
+        http.set_api_key("secret");
+        http.set_allow_plaintext_api_key(true);
+        assert!(http.check_plaintext_key().is_ok());
+    }
+
+    #[test]
+    fn test_plaintext_api_key_not_blocked_over_https() {
+        let mut http = Http::new("https://localhost:1234");
+        http.set_api_key("secret");
+        assert!(http.check_plaintext_key().is_ok());
+    }
+
+    #[test]
+    fn test_plaintext_key_not_blocked_without_api_key() {
+        let http = Http::new("http://localhost:1234");
+        assert!(http.check_plaintext_key().is_ok());
     }
 
     #[test]
