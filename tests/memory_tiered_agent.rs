@@ -9,6 +9,8 @@
 //! against (`add_message`/`get_messages`) behaves correctly when reached
 //! through the full `Agent::prompt` path rather than called directly.
 
+mod common;
+
 use daimon::agent::Agent;
 use daimon::error::Result;
 use daimon::memory::{
@@ -19,6 +21,8 @@ use daimon::model::Model;
 use daimon::model::types::*;
 use daimon::stream::ResponseStream;
 use daimon::tool::{Tool, ToolCall, ToolOutput};
+
+use common::MockModel;
 
 struct EchoModel;
 
@@ -92,38 +96,6 @@ async fn tiered_memory_drives_a_real_agent_loop() {
     assert_eq!(messages.len(), 4);
 }
 
-struct ToolCallThenAnswer {
-    call_count: std::sync::atomic::AtomicUsize,
-}
-
-impl Model for ToolCallThenAnswer {
-    async fn generate(&self, _request: &ChatRequest) -> Result<ChatResponse> {
-        use std::sync::atomic::Ordering;
-        let idx = self.call_count.fetch_add(1, Ordering::SeqCst);
-        if idx == 0 {
-            Ok(ChatResponse {
-                message: Message::assistant_with_tool_calls(vec![ToolCall {
-                    id: "tc_1".into(),
-                    name: "doubler".into(),
-                    arguments: serde_json::json!({"n": 21}),
-                }]),
-                stop_reason: StopReason::ToolUse,
-                usage: None,
-            })
-        } else {
-            Ok(ChatResponse {
-                message: Message::assistant("done"),
-                stop_reason: StopReason::EndTurn,
-                usage: None,
-            })
-        }
-    }
-
-    async fn generate_stream(&self, _request: &ChatRequest) -> Result<ResponseStream> {
-        Ok(Box::pin(futures::stream::empty()))
-    }
-}
-
 /// Builds a `TieredMemory` with all three optional tiers attached (core,
 /// archival, episodic) and drives a full tool-calling ReAct loop through it,
 /// confirming the composed memory works end-to-end as the agent's `Memory`
@@ -148,9 +120,22 @@ async fn tiered_memory_with_all_tiers_supports_tool_calls_in_the_react_loop() {
         .with_archival(archival)
         .with_episodic(episodic);
 
-    let model = ToolCallThenAnswer {
-        call_count: std::sync::atomic::AtomicUsize::new(0),
-    };
+    let model = MockModel::new(vec![
+        ChatResponse {
+            message: Message::assistant_with_tool_calls(vec![ToolCall {
+                id: "tc_1".into(),
+                name: "doubler".into(),
+                arguments: serde_json::json!({"n": 21}),
+            }]),
+            stop_reason: StopReason::ToolUse,
+            usage: None,
+        },
+        ChatResponse {
+            message: Message::assistant("done"),
+            stop_reason: StopReason::EndTurn,
+            usage: None,
+        },
+    ]);
 
     let agent = Agent::builder()
         .model(model)
