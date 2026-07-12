@@ -1,27 +1,9 @@
 //! A2A HTTP client for calling remote A2A agents.
 
-#[cfg(any(
-    feature = "openai",
-    feature = "anthropic",
-    feature = "ollama",
-    feature = "mcp",
-))]
 use std::time::Duration;
 
-#[cfg(any(
-    feature = "openai",
-    feature = "anthropic",
-    feature = "ollama",
-    feature = "mcp",
-))]
 use crate::error::{DaimonError, Result};
 
-#[cfg(any(
-    feature = "openai",
-    feature = "anthropic",
-    feature = "ollama",
-    feature = "mcp",
-))]
 use super::types::*;
 
 /// HTTP client for interacting with remote A2A agents.
@@ -29,12 +11,6 @@ use super::types::*;
 /// Implements the client side of the A2A protocol: discovery, task
 /// creation, status polling, and cancellation.
 pub struct A2aClient {
-    #[cfg(any(
-        feature = "openai",
-        feature = "anthropic",
-        feature = "ollama",
-        feature = "mcp",
-    ))]
     http: reqwest::Client,
     base_url: String,
     api_key: Option<String>,
@@ -44,12 +20,6 @@ impl A2aClient {
     /// Creates a new A2A client pointing at the given base URL.
     pub fn new(base_url: impl Into<String>) -> Self {
         Self {
-            #[cfg(any(
-                feature = "openai",
-                feature = "anthropic",
-                feature = "ollama",
-                feature = "mcp",
-            ))]
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(120))
                 .build()
@@ -66,12 +36,6 @@ impl A2aClient {
     }
 
     /// Discovers the remote agent by fetching its Agent Card.
-    #[cfg(any(
-        feature = "openai",
-        feature = "anthropic",
-        feature = "ollama",
-        feature = "mcp",
-    ))]
     pub async fn discover(&self) -> Result<AgentCard> {
         let resp = self
             .rpc_call("agent/discover", serde_json::json!({}))
@@ -81,12 +45,6 @@ impl A2aClient {
     }
 
     /// Sends a task to the remote agent.
-    #[cfg(any(
-        feature = "openai",
-        feature = "anthropic",
-        feature = "ollama",
-        feature = "mcp",
-    ))]
     pub async fn send_task(&self, params: TaskSendParams) -> Result<A2aTask> {
         let resp = self
             .rpc_call("tasks/send", serde_json::to_value(&params)?)
@@ -96,12 +54,6 @@ impl A2aClient {
     }
 
     /// Gets the status of a task.
-    #[cfg(any(
-        feature = "openai",
-        feature = "anthropic",
-        feature = "ollama",
-        feature = "mcp",
-    ))]
     pub async fn get_task(&self, task_id: &str) -> Result<A2aTask> {
         let params = TaskGetParams {
             id: task_id.to_string(),
@@ -114,12 +66,6 @@ impl A2aClient {
     }
 
     /// Cancels a task.
-    #[cfg(any(
-        feature = "openai",
-        feature = "anthropic",
-        feature = "ollama",
-        feature = "mcp",
-    ))]
     pub async fn cancel_task(&self, task_id: &str) -> Result<A2aTask> {
         let params = TaskCancelParams {
             id: task_id.to_string(),
@@ -132,12 +78,6 @@ impl A2aClient {
     }
 
     /// Sends a simple text message as a task and returns the completed task.
-    #[cfg(any(
-        feature = "openai",
-        feature = "anthropic",
-        feature = "ollama",
-        feature = "mcp",
-    ))]
     pub async fn send_text(&self, text: &str) -> Result<A2aTask> {
         self.send_task(TaskSendParams {
             id: None,
@@ -155,12 +95,6 @@ impl A2aClient {
         .await
     }
 
-    #[cfg(any(
-        feature = "openai",
-        feature = "anthropic",
-        feature = "ollama",
-        feature = "mcp",
-    ))]
     async fn rpc_call(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
