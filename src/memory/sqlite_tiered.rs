@@ -201,7 +201,6 @@ impl CoreMemory for SqliteCoreMemory {
 pub struct SqliteArchivalMemory {
     conn: Arc<Mutex<Connection>>,
     session_id: String,
-    next_id: std::sync::atomic::AtomicU64,
 }
 
 impl SqliteArchivalMemory {
@@ -231,11 +230,7 @@ impl SqliteArchivalMemory {
 
     async fn from_connection(conn: Connection, session_id: String) -> Result<Self> {
         let conn = Arc::new(Mutex::new(conn));
-        let mem = Self {
-            conn,
-            session_id,
-            next_id: std::sync::atomic::AtomicU64::new(0),
-        };
+        let mem = Self { conn, session_id };
         mem.create_tables().await?;
         Ok(mem)
     }
@@ -245,12 +240,21 @@ impl SqliteArchivalMemory {
         spawn_blocking_err(move || {
             let conn = conn.blocking_lock();
             conn.execute_batch(
+                // `id` is derived from the table's own `rowid` at insert time
+                // (see `insert()`), not from an in-process counter. SQLite
+                // allocates rowids atomically per connection under its own
+                // locking, so two `SqliteArchivalMemory` instances writing
+                // to the same file concurrently can never mint the same id
+                // the way a per-instance `AtomicU64` seeded at open() could.
+                // The UNIQUE index is defense in depth on top of that.
                 "CREATE TABLE IF NOT EXISTS archival_facts (
-                    id TEXT PRIMARY KEY,
+                    id TEXT NOT NULL,
                     session_id TEXT NOT NULL,
                     text TEXT NOT NULL,
                     metadata TEXT NOT NULL
                 );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_archival_facts_id
+                    ON archival_facts(id);
                 CREATE VIRTUAL TABLE IF NOT EXISTS archival_facts_fts USING fts5(
                     id UNINDEXED, session_id UNINDEXED, text
                 );",
@@ -263,33 +267,43 @@ impl SqliteArchivalMemory {
 
 impl ArchivalMemory for SqliteArchivalMemory {
     async fn insert(&self, text: &str, metadata: HashMap<String, Value>) -> Result<String> {
-        let id = format!(
-            "archival-{}",
-            self.next_id
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        );
         let conn = self.conn.clone();
         let session_id = self.session_id.clone();
         let text = text.to_string();
         let metadata_json = serde_json::to_string(&metadata)
             .map_err(|e| DaimonError::Other(format!("serialize metadata: {e}")))?;
-        let id_clone = id.clone();
         spawn_blocking_err(move || {
-            let conn = conn.blocking_lock();
-            conn.execute(
-                "INSERT INTO archival_facts (id, session_id, text, metadata) VALUES (?1, ?2, ?3, ?4)",
-                params![id_clone, session_id, text, metadata_json],
+            let mut conn = conn.blocking_lock();
+            let tx = conn
+                .transaction()
+                .map_err(|e| DaimonError::Other(format!("sqlite tx begin: {e}")))?;
+            // Insert with a placeholder id, then derive the real id from the
+            // row's own `rowid` (SQLite allocates rowids atomically per
+            // connection, uniqueness enforced by the DB itself rather than
+            // coordinated in-process) and back-fill it in the same
+            // transaction before the FTS row is written.
+            tx.execute(
+                "INSERT INTO archival_facts (id, session_id, text, metadata) VALUES ('', ?1, ?2, ?3)",
+                params![session_id, text, metadata_json],
             )
             .map_err(|e| DaimonError::Other(format!("sqlite insert: {e}")))?;
-            conn.execute(
+            let rowid = tx.last_insert_rowid();
+            let id = format!("archival-{rowid}");
+            tx.execute(
+                "UPDATE archival_facts SET id = ?1 WHERE rowid = ?2",
+                params![id, rowid],
+            )
+            .map_err(|e| DaimonError::Other(format!("sqlite id backfill: {e}")))?;
+            tx.execute(
                 "INSERT INTO archival_facts_fts (id, session_id, text) VALUES (?1, ?2, ?3)",
-                params![id_clone, session_id, text],
+                params![id, session_id, text],
             )
             .map_err(|e| DaimonError::Other(format!("sqlite fts insert: {e}")))?;
-            Ok(())
+            tx.commit()
+                .map_err(|e| DaimonError::Other(format!("sqlite tx commit: {e}")))?;
+            Ok(id)
         })
-        .await?;
-        Ok(id)
+        .await
     }
 
     async fn search(&self, query: &str, top_k: usize) -> Result<Vec<ArchivalRecord>> {
@@ -353,13 +367,25 @@ impl ArchivalMemory for SqliteArchivalMemory {
     async fn delete(&self, id: &str) -> Result<bool> {
         let conn = self.conn.clone();
         let id = id.to_string();
+        let session_id = self.session_id.clone();
         spawn_blocking_err(move || {
-            let conn = conn.blocking_lock();
-            let changed = conn
-                .execute("DELETE FROM archival_facts WHERE id = ?1", params![id])
+            let mut conn = conn.blocking_lock();
+            let tx = conn
+                .transaction()
+                .map_err(|e| DaimonError::Other(format!("sqlite tx begin: {e}")))?;
+            let changed = tx
+                .execute(
+                    "DELETE FROM archival_facts WHERE id = ?1 AND session_id = ?2",
+                    params![id, session_id],
+                )
                 .map_err(|e| DaimonError::Other(format!("sqlite delete: {e}")))?;
-            conn.execute("DELETE FROM archival_facts_fts WHERE id = ?1", params![id])
-                .map_err(|e| DaimonError::Other(format!("sqlite fts delete: {e}")))?;
+            tx.execute(
+                "DELETE FROM archival_facts_fts WHERE id = ?1 AND session_id = ?2",
+                params![id, session_id],
+            )
+            .map_err(|e| DaimonError::Other(format!("sqlite fts delete: {e}")))?;
+            tx.commit()
+                .map_err(|e| DaimonError::Other(format!("sqlite tx commit: {e}")))?;
             Ok(changed > 0)
         })
         .await
@@ -391,7 +417,6 @@ impl ArchivalMemory for SqliteArchivalMemory {
 pub struct SqliteEpisodicMemory {
     conn: Arc<Mutex<Connection>>,
     session_id: String,
-    next_id: std::sync::atomic::AtomicU64,
 }
 
 impl SqliteEpisodicMemory {
@@ -421,11 +446,7 @@ impl SqliteEpisodicMemory {
 
     async fn from_connection(conn: Connection, session_id: String) -> Result<Self> {
         let conn = Arc::new(Mutex::new(conn));
-        let mem = Self {
-            conn,
-            session_id,
-            next_id: std::sync::atomic::AtomicU64::new(0),
-        };
+        let mem = Self { conn, session_id };
         mem.create_tables().await?;
         Ok(mem)
     }
@@ -435,13 +456,18 @@ impl SqliteEpisodicMemory {
         spawn_blocking_err(move || {
             let conn = conn.blocking_lock();
             conn.execute_batch(
+                // Like `archival_facts`, `id` is derived from the table's own
+                // `rowid` at insert time rather than an in-process counter —
+                // see the comment on `SqliteArchivalMemory::create_tables`.
                 "CREATE TABLE IF NOT EXISTS episodic_events (
-                    id TEXT PRIMARY KEY,
+                    id TEXT NOT NULL,
                     session_id TEXT NOT NULL,
                     event_type TEXT NOT NULL,
                     payload TEXT NOT NULL,
                     timestamp_ms INTEGER NOT NULL
                 );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_episodic_events_id
+                    ON episodic_events(id);
                 CREATE INDEX IF NOT EXISTS idx_episodic_session_ts
                     ON episodic_events(session_id, timestamp_ms);",
             )
@@ -461,30 +487,36 @@ fn now_ms() -> i64 {
 
 impl EpisodicMemory for SqliteEpisodicMemory {
     async fn record(&self, event_type: &str, payload: Value) -> Result<String> {
-        let id = format!(
-            "event-{}",
-            self.next_id
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        );
         let conn = self.conn.clone();
         let session_id = self.session_id.clone();
         let event_type = event_type.to_string();
         let payload_json = serde_json::to_string(&payload)
             .map_err(|e| DaimonError::Other(format!("serialize payload: {e}")))?;
-        let id_clone = id.clone();
         let ts = now_ms();
         spawn_blocking_err(move || {
-            let conn = conn.blocking_lock();
-            conn.execute(
+            let mut conn = conn.blocking_lock();
+            let tx = conn
+                .transaction()
+                .map_err(|e| DaimonError::Other(format!("sqlite tx begin: {e}")))?;
+            // Same rowid-derived id scheme as `SqliteArchivalMemory::insert`.
+            tx.execute(
                 "INSERT INTO episodic_events (id, session_id, event_type, payload, timestamp_ms)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![id_clone, session_id, event_type, payload_json, ts],
+                 VALUES ('', ?1, ?2, ?3, ?4)",
+                params![session_id, event_type, payload_json, ts],
             )
             .map_err(|e| DaimonError::Other(format!("sqlite insert: {e}")))?;
-            Ok(())
+            let rowid = tx.last_insert_rowid();
+            let id = format!("event-{rowid}");
+            tx.execute(
+                "UPDATE episodic_events SET id = ?1 WHERE rowid = ?2",
+                params![id, rowid],
+            )
+            .map_err(|e| DaimonError::Other(format!("sqlite id backfill: {e}")))?;
+            tx.commit()
+                .map_err(|e| DaimonError::Other(format!("sqlite tx commit: {e}")))?;
+            Ok(id)
         })
-        .await?;
-        Ok(id)
+        .await
     }
 
     async fn query(&self, query: EpisodicQuery) -> Result<Vec<EpisodicEvent>> {
@@ -702,6 +734,106 @@ mod tests {
         assert!(!results.is_empty());
     }
 
+    #[tokio::test]
+    async fn archival_session_isolation() {
+        let mem1 = SqliteArchivalMemory::in_memory().await.unwrap();
+        let mem2 = SqliteArchivalMemory {
+            conn: mem1.conn.clone(),
+            session_id: "other".into(),
+        };
+        let id1 = mem1
+            .insert("session one fact", HashMap::new())
+            .await
+            .unwrap();
+
+        // Session 2 cannot delete session 1's fact by guessing its id.
+        assert!(!mem2.delete(&id1).await.unwrap());
+        assert_eq!(mem1.count().await.unwrap(), 1);
+        let results = mem1.search("session one fact", 5).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, id1);
+    }
+
+    #[tokio::test]
+    async fn archival_restart_produces_distinct_ids() {
+        let path = std::env::temp_dir().join(format!(
+            "daimon-archival-restart-{}-{}.sqlite",
+            std::process::id(),
+            now_ms()
+        ));
+        let path_str = path.to_str().unwrap().to_string();
+        let _ = std::fs::remove_file(&path);
+
+        let id1 = {
+            let mem = SqliteArchivalMemory::open(path_str.clone())
+                .await
+                .unwrap()
+                .with_session_id("fixed-session");
+            mem.insert("first fact", HashMap::new()).await.unwrap()
+        };
+
+        // Reopen against the same file-backed DB, simulating a restart.
+        let mem = SqliteArchivalMemory::open(path_str.clone())
+            .await
+            .unwrap()
+            .with_session_id("fixed-session");
+        let id2 = mem.insert("second fact", HashMap::new()).await.unwrap();
+        assert_ne!(id1, id2, "restart must not reuse an id already persisted");
+        assert_eq!(mem.count().await.unwrap(), 2);
+
+        let _ = std::fs::remove_file(&path_str);
+    }
+
+    /// Regression test for the finding in the DAIM-25 review: seeding an
+    /// in-process `AtomicU64` from persisted state at construction only
+    /// fixed the restart-after-close case. Two `SqliteArchivalMemory`
+    /// instances can be legitimately live at once against the same file
+    /// (that's what the `session_id` partitioning exists for), and a
+    /// per-instance counter has no way to observe inserts the *other* live
+    /// instance makes after both have already seeded. Ids must instead come
+    /// from the database itself (here: the table's own `rowid`, allocated
+    /// atomically by SQLite per-connection), so two concurrently-live
+    /// instances can never collide regardless of in-process state.
+    #[tokio::test]
+    async fn archival_concurrent_instances_get_distinct_ids() {
+        let path = std::env::temp_dir().join(format!(
+            "daimon-archival-concurrent-{}-{}.sqlite",
+            std::process::id(),
+            now_ms()
+        ));
+        let path_str = path.to_str().unwrap().to_string();
+        let _ = std::fs::remove_file(&path);
+
+        // Two independently-opened instances (separate `Connection`s), both
+        // live at once, pointed at the same file and the same session.
+        let a = SqliteArchivalMemory::open(path_str.clone())
+            .await
+            .unwrap()
+            .with_session_id("shared-session");
+        let b = SqliteArchivalMemory::open(path_str.clone())
+            .await
+            .unwrap()
+            .with_session_id("shared-session");
+
+        // Interleave inserts across both instances the way two long-lived
+        // processes sharing a DB file would.
+        let id_a1 = a.insert("fact from a #1", HashMap::new()).await.unwrap();
+        let id_b1 = b.insert("fact from b #1", HashMap::new()).await.unwrap();
+        let id_a2 = a.insert("fact from a #2", HashMap::new()).await.unwrap();
+        let id_b2 = b.insert("fact from b #2", HashMap::new()).await.unwrap();
+
+        let ids = [&id_a1, &id_b1, &id_a2, &id_b2];
+        let unique: std::collections::HashSet<_> = ids.iter().collect();
+        assert_eq!(unique.len(), ids.len(), "all ids must be distinct: {ids:?}");
+
+        // Both instances see all four facts (same session, same file) — no
+        // insert was rejected or silently lost to a PRIMARY KEY collision.
+        assert_eq!(a.count().await.unwrap(), 4);
+        assert_eq!(b.count().await.unwrap(), 4);
+
+        let _ = std::fs::remove_file(&path_str);
+    }
+
     // --- EpisodicMemory ---
 
     #[tokio::test]
@@ -747,12 +879,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn episodic_restart_produces_distinct_ids() {
+        let path = std::env::temp_dir().join(format!(
+            "daimon-episodic-restart-{}-{}.sqlite",
+            std::process::id(),
+            now_ms()
+        ));
+        let path_str = path.to_str().unwrap().to_string();
+        let _ = std::fs::remove_file(&path);
+
+        let id1 = {
+            let mem = SqliteEpisodicMemory::open(path_str.clone())
+                .await
+                .unwrap()
+                .with_session_id("fixed-session");
+            mem.record("tick", Value::Null).await.unwrap()
+        };
+
+        // Reopen against the same file-backed DB, simulating a restart.
+        let mem = SqliteEpisodicMemory::open(path_str.clone())
+            .await
+            .unwrap()
+            .with_session_id("fixed-session");
+        let id2 = mem.record("tick", Value::Null).await.unwrap();
+        assert_ne!(id1, id2, "restart must not reuse an id already persisted");
+        assert_eq!(mem.query(EpisodicQuery::all()).await.unwrap().len(), 2);
+
+        let _ = std::fs::remove_file(&path_str);
+    }
+
+    /// Regression test for the finding in the DAIM-25 review — see
+    /// `archival_concurrent_instances_get_distinct_ids` for the full
+    /// rationale. Same root cause, same fix, applied to episodic events.
+    #[tokio::test]
+    async fn episodic_concurrent_instances_get_distinct_ids() {
+        let path = std::env::temp_dir().join(format!(
+            "daimon-episodic-concurrent-{}-{}.sqlite",
+            std::process::id(),
+            now_ms()
+        ));
+        let path_str = path.to_str().unwrap().to_string();
+        let _ = std::fs::remove_file(&path);
+
+        let a = SqliteEpisodicMemory::open(path_str.clone())
+            .await
+            .unwrap()
+            .with_session_id("shared-session");
+        let b = SqliteEpisodicMemory::open(path_str.clone())
+            .await
+            .unwrap()
+            .with_session_id("shared-session");
+
+        let id_a1 = a.record("tick", Value::Null).await.unwrap();
+        let id_b1 = b.record("tick", Value::Null).await.unwrap();
+        let id_a2 = a.record("tick", Value::Null).await.unwrap();
+        let id_b2 = b.record("tick", Value::Null).await.unwrap();
+
+        let ids = [&id_a1, &id_b1, &id_a2, &id_b2];
+        let unique: std::collections::HashSet<_> = ids.iter().collect();
+        assert_eq!(unique.len(), ids.len(), "all ids must be distinct: {ids:?}");
+        assert_eq!(
+            a.query(EpisodicQuery::all()).await.unwrap().len(),
+            4,
+            "no insert should have been rejected or lost to an id collision"
+        );
+
+        let _ = std::fs::remove_file(&path_str);
+    }
+
+    #[tokio::test]
     async fn episodic_session_isolation() {
         let mem1 = SqliteEpisodicMemory::in_memory().await.unwrap();
         let mem2 = SqliteEpisodicMemory {
             conn: mem1.conn.clone(),
             session_id: "other".into(),
-            next_id: std::sync::atomic::AtomicU64::new(0),
         };
         mem1.record("tick", Value::Null).await.unwrap();
         assert!(mem2.query(EpisodicQuery::all()).await.unwrap().is_empty());
