@@ -18,10 +18,15 @@ use std::time::Duration;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
+use daimon_core::stream_util::{backoff_delay, parse_retry_after_secs};
 use daimon_core::{
     ChatRequest, ChatResponse, DaimonError, Message, Model, ResponseStream, Result, Role,
     StopReason, StreamEvent, ToolCall, ToolSpec, Usage,
 };
+
+/// Default number of retries for transient (429 / 5xx) errors on the initial
+/// request. Matches [`crate::ollama_embed`]'s `DEFAULT_MAX_RETRIES`.
+const DEFAULT_MAX_RETRIES: u32 = 3;
 
 /// Ollama model provider.
 ///
@@ -33,6 +38,7 @@ pub struct Ollama {
     client: Client,
     timeout: Duration,
     keep_alive: Option<String>,
+    max_retries: u32,
     /// Client-wide monotonic counter for synthesized tool-call ids.
     ///
     /// Ollama does not assign tool-call ids, so this provider synthesizes
@@ -80,6 +86,7 @@ impl Ollama {
                 .expect("failed to build HTTP client"),
             timeout: Duration::from_secs(300),
             keep_alive: None,
+            max_retries: DEFAULT_MAX_RETRIES,
             tool_call_seq: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -93,6 +100,13 @@ impl Ollama {
     /// Sets the request timeout (default: 300 seconds).
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// Set the maximum number of retries for transient (429 / 5xx) errors
+    /// on the initial request (default: 3).
+    pub fn with_max_retries(mut self, retries: u32) -> Self {
+        self.max_retries = retries;
         self
     }
 
@@ -151,27 +165,39 @@ impl Model for Ollama {
         let body = self.build_request_body(request, false);
         let url = format!("{}/api/chat", self.base_url);
 
-        let resp = self
-            .client
-            .post(&url)
-            .timeout(self.timeout)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| DaimonError::Model(e.to_string()))?;
+        for attempt in 0..=self.max_retries {
+            let resp = self
+                .client
+                .post(&url)
+                .timeout(self.timeout)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| DaimonError::Model(e.to_string()))?;
 
-        if !resp.status().is_success() {
             let status = resp.status();
+            if status.is_success() {
+                let response: OllamaResponse = resp
+                    .json()
+                    .await
+                    .map_err(|e| DaimonError::Model(e.to_string()))?;
+                return parse_response(response, &self.tool_call_seq);
+            }
+
+            let retry_after = parse_retry_after(&resp);
             let text = resp.text().await.unwrap_or_default();
-            return Err(DaimonError::Model(format!("Ollama {status}: {text}")));
+            let is_retryable = status.as_u16() == 429 || status.is_server_error();
+
+            if is_retryable && attempt < self.max_retries {
+                let delay = backoff_delay(attempt, retry_after);
+                tracing::debug!(status = %status, attempt, delay_ms = delay.as_millis(), "retryable Ollama error, backing off");
+                tokio::time::sleep(delay).await;
+            } else {
+                return Err(DaimonError::Model(format!("Ollama {status}: {text}")));
+            }
         }
 
-        let response: OllamaResponse = resp
-            .json()
-            .await
-            .map_err(|e| DaimonError::Model(e.to_string()))?;
-
-        parse_response(response, &self.tool_call_seq)
+        unreachable!("loop always returns or retries")
     }
 
     #[tracing::instrument(skip_all, fields(model = %self.model))]
@@ -179,20 +205,39 @@ impl Model for Ollama {
         let body = self.build_request_body(request, true);
         let url = format!("{}/api/chat", self.base_url);
 
-        let resp = self
-            .client
-            .post(&url)
-            .timeout(self.timeout)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| DaimonError::Model(e.to_string()))?;
+        // Retry only the initial POST/handshake — once the stream is
+        // established, mid-stream failures must never be retried (the
+        // consumer has already observed a partial response).
+        let mut response = None;
+        for attempt in 0..=self.max_retries {
+            let resp = self
+                .client
+                .post(&url)
+                .timeout(self.timeout)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| DaimonError::Model(e.to_string()))?;
 
-        if !resp.status().is_success() {
             let status = resp.status();
+            if status.is_success() {
+                response = Some(resp);
+                break;
+            }
+
+            let retry_after = parse_retry_after(&resp);
             let text = resp.text().await.unwrap_or_default();
-            return Err(DaimonError::Model(format!("Ollama {status}: {text}")));
+            let is_retryable = status.as_u16() == 429 || status.is_server_error();
+
+            if is_retryable && attempt < self.max_retries {
+                let delay = backoff_delay(attempt, retry_after);
+                tracing::debug!(status = %status, attempt, delay_ms = delay.as_millis(), "retryable Ollama stream-handshake error, backing off");
+                tokio::time::sleep(delay).await;
+            } else {
+                return Err(DaimonError::Model(format!("Ollama {status}: {text}")));
+            }
         }
+        let resp = response.expect("loop breaks with a response or returns an error");
 
         let tool_call_seq = Arc::clone(&self.tool_call_seq);
         let stream = async_stream::try_stream! {
@@ -207,42 +252,8 @@ impl Model for Ollama {
                 buffer.push(&chunk);
 
                 while let Some(line) = buffer.next_line() {
-                    let line = line.trim();
-
-                    if line.is_empty() {
-                        continue;
-                    }
-
-                    let parsed: OllamaResponse = serde_json::from_str(line)
-                        .map_err(|e| DaimonError::Model(format!("invalid JSON: {e}")))?;
-
-                    if let Some(ref msg) = parsed.message {
-                        if !msg.tool_calls.is_empty() {
-                            for tc in &msg.tool_calls {
-                                let seq = tool_call_seq.fetch_add(1, Ordering::Relaxed);
-                                let id = make_tool_call_id(seq, &tc.function.name);
-                                yield StreamEvent::ToolCallStart {
-                                    id: id.clone(),
-                                    name: tc.function.name.clone(),
-                                };
-                                let args_str = serde_json::to_string(&tc.function.arguments)
-                                    .unwrap_or_default();
-                                yield StreamEvent::ToolCallDelta {
-                                    id: id.clone(),
-                                    arguments_delta: args_str,
-                                };
-                                yield StreamEvent::ToolCallEnd { id };
-                            }
-                        }
-
-                        if let Some(ref content) = msg.content
-                            && !content.is_empty() {
-                                yield StreamEvent::TextDelta(content.clone());
-                            }
-                    }
-
-                    if parsed.done {
-                        yield StreamEvent::Done;
+                    for event in ndjson_line_events(&line, &tool_call_seq)? {
+                        yield event;
                     }
                 }
             }
@@ -250,45 +261,74 @@ impl Model for Ollama {
             // Recover a final NDJSON record the server sent without a trailing
             // newline through the identical parse path used for normal lines.
             if let Some(line) = buffer.take_remaining() {
-                let line = line.trim();
-                if !line.is_empty() {
-                    let parsed: OllamaResponse = serde_json::from_str(line)
-                        .map_err(|e| DaimonError::Model(format!("invalid JSON: {e}")))?;
-
-                    if let Some(ref msg) = parsed.message {
-                        if !msg.tool_calls.is_empty() {
-                            for tc in &msg.tool_calls {
-                                let seq = tool_call_seq.fetch_add(1, Ordering::Relaxed);
-                                let id = make_tool_call_id(seq, &tc.function.name);
-                                yield StreamEvent::ToolCallStart {
-                                    id: id.clone(),
-                                    name: tc.function.name.clone(),
-                                };
-                                let args_str = serde_json::to_string(&tc.function.arguments)
-                                    .unwrap_or_default();
-                                yield StreamEvent::ToolCallDelta {
-                                    id: id.clone(),
-                                    arguments_delta: args_str,
-                                };
-                                yield StreamEvent::ToolCallEnd { id };
-                            }
-                        }
-
-                        if let Some(ref content) = msg.content
-                            && !content.is_empty() {
-                                yield StreamEvent::TextDelta(content.clone());
-                            }
-                    }
-
-                    if parsed.done {
-                        yield StreamEvent::Done;
-                    }
+                for event in ndjson_line_events(&line, &tool_call_seq)? {
+                    yield event;
                 }
             }
         };
 
         Ok(Box::pin(stream))
     }
+}
+
+/// Extracts the `Retry-After` header (integer seconds) from an Ollama
+/// response, if present.
+fn parse_retry_after(resp: &reqwest::Response) -> Option<Duration> {
+    resp.headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(parse_retry_after_secs)
+        .map(Duration::from_secs)
+}
+
+/// Parses one NDJSON line from Ollama's `/api/chat` stream into the
+/// [`StreamEvent`]s it carries.
+///
+/// Pure and independent of the stream so it's unit-testable; shared by both
+/// the main loop and the no-trailing-newline recovery path in
+/// [`Ollama::generate_stream`], which previously hand-copied this logic
+/// twice.
+fn ndjson_line_events(line: &str, tool_call_seq: &AtomicU64) -> Result<Vec<StreamEvent>> {
+    let line = line.trim();
+    let mut events = Vec::new();
+
+    if line.is_empty() {
+        return Ok(events);
+    }
+
+    let parsed: OllamaResponse =
+        serde_json::from_str(line).map_err(|e| DaimonError::Model(format!("invalid JSON: {e}")))?;
+
+    if let Some(ref msg) = parsed.message {
+        if !msg.tool_calls.is_empty() {
+            for tc in &msg.tool_calls {
+                let seq = tool_call_seq.fetch_add(1, Ordering::Relaxed);
+                let id = make_tool_call_id(seq, &tc.function.name);
+                events.push(StreamEvent::ToolCallStart {
+                    id: id.clone(),
+                    name: tc.function.name.clone(),
+                });
+                let args_str = serde_json::to_string(&tc.function.arguments).unwrap_or_default();
+                events.push(StreamEvent::ToolCallDelta {
+                    id: id.clone(),
+                    arguments_delta: args_str,
+                });
+                events.push(StreamEvent::ToolCallEnd { id });
+            }
+        }
+
+        if let Some(ref content) = msg.content
+            && !content.is_empty()
+        {
+            events.push(StreamEvent::TextDelta(content.clone()));
+        }
+    }
+
+    if parsed.done {
+        events.push(StreamEvent::Done);
+    }
+
+    Ok(events)
 }
 
 fn convert_message(msg: &Message) -> serde_json::Value {
@@ -447,12 +487,94 @@ mod tests {
         let model = Ollama::new("llama3.1");
         assert_eq!(model.model, "llama3.1");
         assert_eq!(model.base_url, "http://localhost:11434");
+        assert_eq!(model.max_retries, DEFAULT_MAX_RETRIES);
     }
 
     #[test]
     fn test_with_base_url() {
         let model = Ollama::new("llama3.1").with_base_url("http://remote:11434/");
         assert_eq!(model.base_url, "http://remote:11434");
+    }
+
+    #[test]
+    fn test_with_max_retries() {
+        let model = Ollama::new("llama3.1").with_max_retries(5);
+        assert_eq!(model.max_retries, 5);
+    }
+
+    #[test]
+    fn test_ndjson_line_events_text_delta() {
+        let seq = AtomicU64::new(0);
+        let events = ndjson_line_events(
+            r#"{"message":{"role":"assistant","content":"Hel"},"done":false}"#,
+            &seq,
+        )
+        .unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], StreamEvent::TextDelta(t) if t == "Hel"));
+    }
+
+    #[test]
+    fn test_ndjson_line_events_tool_call() {
+        let seq = AtomicU64::new(0);
+        let events = ndjson_line_events(
+            r#"{"message":{"role":"assistant","tool_calls":[{"function":{"name":"calc","arguments":{"x":1}}}]},"done":false}"#,
+            &seq,
+        )
+        .unwrap();
+        assert_eq!(events.len(), 3);
+        assert!(matches!(
+            &events[0],
+            StreamEvent::ToolCallStart { id, name } if id == "ollama_tc_0_calc" && name == "calc"
+        ));
+        assert!(matches!(&events[1], StreamEvent::ToolCallDelta { .. }));
+        assert!(matches!(
+            &events[2],
+            StreamEvent::ToolCallEnd { id } if id == "ollama_tc_0_calc"
+        ));
+        assert_eq!(seq.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn test_ndjson_line_events_done() {
+        let seq = AtomicU64::new(0);
+        let events = ndjson_line_events(r#"{"done":true}"#, &seq).unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], StreamEvent::Done));
+    }
+
+    #[test]
+    fn test_ndjson_line_events_empty_line_ignored() {
+        let seq = AtomicU64::new(0);
+        assert!(ndjson_line_events("", &seq).unwrap().is_empty());
+        assert!(ndjson_line_events("   ", &seq).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_ndjson_line_events_invalid_json_errors() {
+        let seq = AtomicU64::new(0);
+        assert!(ndjson_line_events("not json", &seq).is_err());
+    }
+
+    #[test]
+    fn test_ndjson_line_events_ids_do_not_collide_across_calls() {
+        // The counter is shared across the whole stream (and with the
+        // non-streaming path): two sequential lines through the same
+        // counter must not reuse tool-call ids.
+        let seq = AtomicU64::new(0);
+        let line = r#"{"message":{"role":"assistant","tool_calls":[{"function":{"name":"calc","arguments":{}}}]},"done":false}"#;
+        let first = ndjson_line_events(line, &seq).unwrap();
+        let second = ndjson_line_events(line, &seq).unwrap();
+        let StreamEvent::ToolCallStart { id: first_id, .. } = &first[0] else {
+            panic!("expected ToolCallStart");
+        };
+        let StreamEvent::ToolCallStart { id: second_id, .. } = &second[0] else {
+            panic!("expected ToolCallStart");
+        };
+        assert_ne!(
+            first_id, second_id,
+            "tool-call ids must be unique across calls"
+        );
     }
 
     #[test]

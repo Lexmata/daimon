@@ -70,6 +70,13 @@ impl OpenAiCompatible {
         self
     }
 
+    /// Set the maximum number of retries for transient (429 / 5xx) errors
+    /// on the initial request (default: 3).
+    pub fn with_max_retries(mut self, retries: u32) -> Self {
+        self.http.set_max_retries(retries);
+        self
+    }
+
     /// Add an arbitrary top-level field to every chat request body, for
     /// server-specific sampling parameters this generic client doesn't know
     /// about by name (e.g. vLLM's `repetition_penalty`).
@@ -117,7 +124,10 @@ impl Model for OpenAiCompatible {
             self.extra.clone(),
         );
 
-        let response = self.http.post("/v1/chat/completions", &body).await?;
+        let response = self
+            .http
+            .post_streaming("/v1/chat/completions", &body)
+            .await?;
         let status = response.status();
         if !status.is_success() {
             let text = response.text().await.unwrap_or_default();
@@ -169,6 +179,13 @@ impl OpenAiCompatibleEmbedding {
     /// Set a custom timeout for HTTP requests.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.http.set_timeout(timeout);
+        self
+    }
+
+    /// Set the maximum number of retries for transient (429 / 5xx) errors
+    /// on the initial request (default: 3).
+    pub fn with_max_retries(mut self, retries: u32) -> Self {
+        self.http.set_max_retries(retries);
         self
     }
 
@@ -226,9 +243,11 @@ mod tests {
         let model = OpenAiCompatible::new("http://localhost:8000")
             .with_model("my-model")
             .with_api_key("secret")
-            .with_timeout(Duration::from_secs(15));
+            .with_timeout(Duration::from_secs(15))
+            .with_max_retries(5);
         assert_eq!(model.model.as_deref(), Some("my-model"));
         assert_eq!(model.http.api_key(), Some("secret"));
+        assert_eq!(model.http.max_retries(), 5);
     }
 
     #[test]

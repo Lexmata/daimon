@@ -74,6 +74,13 @@ impl LlamaRs {
         self.http.set_timeout(timeout);
         self
     }
+
+    /// Set the maximum number of retries for transient (429 / 5xx) errors
+    /// on the initial request (default: 3).
+    pub fn with_max_retries(mut self, retries: u32) -> Self {
+        self.http.set_max_retries(retries);
+        self
+    }
 }
 
 impl Model for LlamaRs {
@@ -115,7 +122,10 @@ impl Model for LlamaRs {
             Default::default(),
         );
 
-        let response = self.http.post("/v1/chat/completions", &body).await?;
+        let response = self
+            .http
+            .post_streaming("/v1/chat/completions", &body)
+            .await?;
         let status = response.status();
         if !status.is_success() {
             let text = response.text().await.unwrap_or_default();
@@ -175,6 +185,13 @@ impl LlamaRsEmbedding {
         self
     }
 
+    /// Set the maximum number of retries for transient (429 / 5xx) errors
+    /// on the initial request (default: 3).
+    pub fn with_max_retries(mut self, retries: u32) -> Self {
+        self.http.set_max_retries(retries);
+        self
+    }
+
     /// Declare the dimensionality of the loaded model's embeddings.
     pub fn with_dimensions(mut self, dims: usize) -> Self {
         self.dimensions = dims;
@@ -223,9 +240,11 @@ mod tests {
             .with_base_url("http://gpu-box:8080")
             .with_model("my-model")
             .with_api_key("secret")
-            .with_timeout(Duration::from_secs(20));
+            .with_timeout(Duration::from_secs(20))
+            .with_max_retries(5);
         assert_eq!(model.model.as_deref(), Some("my-model"));
         assert_eq!(model.http.api_key(), Some("secret"));
+        assert_eq!(model.http.max_retries(), 5);
     }
 
     #[test]
