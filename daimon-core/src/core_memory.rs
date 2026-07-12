@@ -115,7 +115,7 @@ pub trait CoreMemory: Send + Sync {
 /// [`CoreMemoryBlock::label`] is a plain, unvalidated `String` reachable
 /// through the same tool-editable [`CoreMemory::put_block`]/[`CoreMemory::append_block`]
 /// path as `value` — nothing stops a caller from putting `\n` (and a forged
-/// `## ` header) into it. Running `label` through the same [`escape_headers`]
+/// `## ` header) into it. Running `label` through the same `escape_headers`
 /// treatment as `value` closes that off without assuming `label` is
 /// single-line: any embedded newline in `label` just becomes another escaped
 /// line in the rendered output instead of a fake block boundary.
