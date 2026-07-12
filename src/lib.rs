@@ -27,8 +27,8 @@
 //!
 //! | Feature | Description |
 //! |---------|-------------|
-//! | `openai` | OpenAI API provider (default) |
-//! | `anthropic` | Anthropic Claude API provider (default) |
+//! | `openai` | OpenAI API provider (default, via `daimon-provider-openai`) |
+//! | `anthropic` | Anthropic Claude API provider (default, via `daimon-provider-anthropic`) |
 //! | `macros` | `#[tool_fn]` proc macro (default) |
 //! | `gemini` | Google Gemini / Vertex AI provider (via `daimon-provider-gemini`) |
 //! | `azure` | Azure OpenAI Service provider (via `daimon-provider-azure`) |

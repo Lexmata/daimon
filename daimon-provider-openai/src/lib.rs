@@ -1,9 +1,18 @@
-//! OpenAI model provider for the Daimon agent framework.
+//! OpenAI model provider for the [Daimon](https://docs.rs/daimon) agent framework.
 //!
-//! This module provides an implementation of the [`Model`] trait that connects
+//! This crate provides an implementation of the [`Model`] trait that connects
 //! to the OpenAI Chat Completions API. It supports configurable timeouts,
 //! retries with exponential backoff, response format constraints, and
 //! parallel tool calls.
+//!
+//! # Example
+//!
+//! ```ignore
+//! use daimon_provider_openai::OpenAi;
+//! use daimon_core::Model;
+//!
+//! let model = OpenAi::new("gpt-4o");
+//! ```
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -11,11 +20,13 @@ use std::time::Duration;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-use crate::error::{DaimonError, Result};
-use crate::model::Model;
-use crate::model::types::{ChatRequest, ChatResponse, Message, Role, StopReason, ToolSpec, Usage};
-use crate::stream::{ResponseStream, StreamEvent};
-use crate::tool::ToolCall;
+pub mod embedding;
+mod retry;
+
+use daimon_core::{
+    ChatRequest, ChatResponse, DaimonError, Message, Model, ResponseStream, Result, Role,
+    StopReason, StreamEvent, ToolCall, ToolSpec, Usage,
+};
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 
@@ -201,12 +212,12 @@ impl Model for OpenAi {
                 return parse_response(oai_response);
             }
 
-            let retry_after = crate::model::retry::parse_retry_after(response.headers());
+            let retry_after = retry::parse_retry_after(response.headers());
             let text = response.text().await.unwrap_or_default();
             let is_retryable = status.as_u16() == 429 || status.is_server_error();
 
             if is_retryable && attempt < self.max_retries {
-                let delay = crate::model::retry::backoff_delay(attempt, retry_after);
+                let delay = retry::backoff_delay(attempt, retry_after);
                 tracing::debug!(
                     status = %status,
                     attempt = attempt + 1,
@@ -252,12 +263,12 @@ impl Model for OpenAi {
                 break;
             }
 
-            let retry_after = crate::model::retry::parse_retry_after(resp.headers());
+            let retry_after = retry::parse_retry_after(resp.headers());
             let text = resp.text().await.unwrap_or_default();
             let is_retryable = status.as_u16() == 429 || status.is_server_error();
 
             if is_retryable && attempt < self.max_retries {
-                let delay = crate::model::retry::backoff_delay(attempt, retry_after);
+                let delay = retry::backoff_delay(attempt, retry_after);
                 tracing::debug!(status = %status, attempt, delay_ms = delay.as_millis(), "retryable error on stream handshake, backing off");
                 tokio::time::sleep(delay).await;
             } else {

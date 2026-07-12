@@ -8,18 +8,21 @@
 mod traits;
 pub mod types;
 
-#[cfg(any(feature = "openai", feature = "anthropic"))]
-pub(crate) mod retry;
-
 pub use traits::{
     EmbeddingModel, ErasedEmbeddingModel, ErasedModel, Model, SharedEmbeddingModel, SharedModel,
 };
 
 #[cfg(feature = "openai")]
-pub mod openai;
+pub mod openai {
+    //! OpenAI model provider (via [`daimon_provider_openai`]).
+    pub use daimon_provider_openai::*;
+}
 
 #[cfg(feature = "anthropic")]
-pub mod anthropic;
+pub mod anthropic {
+    //! Anthropic model provider (via [`daimon_provider_anthropic`]).
+    pub use daimon_provider_anthropic::*;
+}
 
 #[cfg(feature = "gemini")]
 pub mod gemini {
@@ -69,7 +72,10 @@ pub mod llamars {
 }
 
 #[cfg(feature = "openai")]
-pub mod openai_embed;
+pub mod openai_embed {
+    //! OpenAI embeddings provider (via [`daimon_provider_openai`]).
+    pub use daimon_provider_openai::embedding::*;
+}
 
 #[cfg(feature = "ollama")]
 pub mod ollama_embed {

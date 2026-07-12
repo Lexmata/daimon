@@ -138,8 +138,8 @@ async fn main() -> daimon::Result<()> {
 
 | Feature | Default | Description |
 |---------|---------|-------------|
-| `openai` | Yes | OpenAI Chat Completions API |
-| `anthropic` | Yes | Anthropic Messages API |
+| `openai` | Yes | OpenAI Chat Completions API (via `daimon-provider-openai`) |
+| `anthropic` | Yes | Anthropic Messages API (via `daimon-provider-anthropic`) |
 | `macros` | Yes | `#[tool_fn]` proc macro for defining tools |
 | `bedrock` | No | AWS Bedrock Converse API |
 | `gemini` | No | Google Gemini / Vertex AI provider |

@@ -7,6 +7,8 @@ members = [
     "daimon-provider-gemini",
     "daimon-provider-azure",
     "daimon-provider-llamacpp",
+    "daimon-provider-openai",
+    "daimon-provider-anthropic",
     "daimon-plugin-pgvector",
     "daimon-plugin-opensearch",
 ]
@@ -28,6 +30,8 @@ daimon-provider-bedrock = { path = "daimon-provider-bedrock", version = "0.21.0"
 daimon-provider-gemini = { path = "daimon-provider-gemini", version = "0.21.0" }
 daimon-provider-azure = { path = "daimon-provider-azure", version = "0.21.0" }
 daimon-provider-llamacpp = { path = "daimon-provider-llamacpp", version = "0.21.0" }
+daimon-provider-openai = { path = "daimon-provider-openai", version = "0.21.0" }
+daimon-provider-anthropic = { path = "daimon-provider-anthropic", version = "0.21.0" }
 daimon-plugin-pgvector = { path = "daimon-plugin-pgvector", version = "0.21.0" }
 daimon-plugin-opensearch = { path = "daimon-plugin-opensearch", version = "0.21.0" }
 tokio = { version = "1" }
@@ -60,8 +64,8 @@ all-features = true
 [features]
 default = ["openai", "anthropic", "macros", "ollama"]
 macros = ["dep:daimon-macros"]
-openai = ["dep:reqwest"]
-anthropic = ["dep:reqwest"]
+openai = ["dep:daimon-provider-openai"]
+anthropic = ["dep:daimon-provider-anthropic"]
 a2a = ["dep:reqwest"]
 gemini = ["dep:daimon-provider-gemini"]
 azure = ["dep:daimon-provider-azure"]
@@ -108,6 +112,8 @@ daimon-provider-bedrock = { workspace = true, optional = true }
 daimon-provider-gemini = { workspace = true, optional = true }
 daimon-provider-azure = { workspace = true, optional = true }
 daimon-provider-local = { workspace = true, optional = true }
+daimon-provider-openai = { workspace = true, optional = true }
+daimon-provider-anthropic = { workspace = true, optional = true }
 daimon-plugin-pgvector = { workspace = true, optional = true }
 daimon-plugin-opensearch = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }

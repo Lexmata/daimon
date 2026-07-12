@@ -1435,10 +1435,12 @@ dependencies = [
  "daimon-macros",
  "daimon-plugin-opensearch",
  "daimon-plugin-pgvector",
+ "daimon-provider-anthropic",
  "daimon-provider-azure",
  "daimon-provider-bedrock",
  "daimon-provider-gemini",
  "daimon-provider-local",
+ "daimon-provider-openai",
  "futures",
  "itoa",
  "jsonschema",
@@ -1520,6 +1522,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "daimon-provider-anthropic"
+version = "0.21.0"
+dependencies = [
+ "async-stream",
+ "daimon-core",
+ "futures",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "daimon-provider-azure"
 version = "0.21.0"
 dependencies = [
@@ -1574,6 +1590,20 @@ dependencies = [
 
 [[package]]
 name = "daimon-provider-local"
+version = "0.21.0"
+dependencies = [
+ "async-stream",
+ "daimon-core",
+ "futures",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "daimon-provider-openai"
 version = "0.21.0"
 dependencies = [
  "async-stream",

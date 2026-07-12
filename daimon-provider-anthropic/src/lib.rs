@@ -1,8 +1,17 @@
-//! Anthropic Claude model provider.
+//! Anthropic Claude model provider for the [Daimon](https://docs.rs/daimon) agent framework.
 //!
-//! This module provides integration with the Anthropic API for chat completions,
+//! This crate provides integration with the Anthropic API for chat completions,
 //! streaming, and tool use. Configure via builder methods for timeout, retries,
 //! and prompt caching.
+//!
+//! # Example
+//!
+//! ```ignore
+//! use daimon_provider_anthropic::Anthropic;
+//! use daimon_core::Model;
+//!
+//! let model = Anthropic::new("claude-sonnet-4-20250514");
+//! ```
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -10,11 +19,12 @@ use std::time::Duration;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-use crate::error::{DaimonError, Result};
-use crate::model::Model;
-use crate::model::types::{ChatRequest, ChatResponse, Message, Role, StopReason, ToolSpec, Usage};
-use crate::stream::{ResponseStream, StreamEvent};
-use crate::tool::ToolCall;
+mod retry;
+
+use daimon_core::{
+    ChatRequest, ChatResponse, DaimonError, Message, Model, ResponseStream, Result, Role,
+    StopReason, StreamEvent, ToolCall, ToolSpec, Usage,
+};
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const API_VERSION: &str = "2023-06-01";
@@ -261,7 +271,7 @@ impl Model for Anthropic {
                 .await
                 .map_err(|e| DaimonError::Model(format!("Anthropic HTTP error: {e}")))?;
             let status = response.status();
-            let retry_after = crate::model::retry::parse_retry_after(response.headers());
+            let retry_after = retry::parse_retry_after(response.headers());
             let text = response.text().await.unwrap_or_default();
 
             if status.is_success() {
@@ -275,7 +285,7 @@ impl Model for Anthropic {
             let is_retriable = code == 429 || code == 529 || (500..600).contains(&code);
 
             if is_retriable && attempt < self.max_retries {
-                let delay = crate::model::retry::backoff_delay(attempt, retry_after);
+                let delay = retry::backoff_delay(attempt, retry_after);
                 tracing::debug!(
                     status = %status,
                     attempt = attempt,
@@ -324,13 +334,13 @@ impl Model for Anthropic {
                 break;
             }
 
-            let retry_after = crate::model::retry::parse_retry_after(resp.headers());
+            let retry_after = retry::parse_retry_after(resp.headers());
             let text = resp.text().await.unwrap_or_default();
             let code = status.as_u16();
             let is_retriable = code == 429 || code == 529 || (500..600).contains(&code);
 
             if is_retriable && attempt < self.max_retries {
-                let delay = crate::model::retry::backoff_delay(attempt, retry_after);
+                let delay = retry::backoff_delay(attempt, retry_after);
                 tracing::debug!(status = %status, attempt, delay_ms = delay.as_millis(), "retriable error on stream handshake, backing off");
                 tokio::time::sleep(delay).await;
             } else {
