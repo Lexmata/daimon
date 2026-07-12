@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Provider crate extraction (DAIM-30):** `OpenAi`/`OpenAiEmbedding` and
+  `Anthropic` moved out of the `daimon` facade into new standalone crates,
+  `daimon-provider-openai` and `daimon-provider-anthropic`, matching the
+  structure already used by `daimon-provider-gemini`, `daimon-provider-azure`,
+  `daimon-provider-bedrock`, and `daimon-provider-local`. This closes the gap
+  where `openai.rs`/`anthropic.rs` were the last two providers implemented
+  directly in-facade (gated by `dep:reqwest`) instead of as their own crates,
+  which had already caused real duplication — `daimon-provider-local`'s
+  `openai_compat.rs` independently reimplements the OpenAI Chat Completions
+  wire format with drifted timeout constants. All existing
+  `daimon::model::openai::*`, `daimon::model::openai_embed::*`, and
+  `daimon::model::anthropic::*` re-export paths are preserved — no consumer
+  changes required.
 - **Memory tier hardening (DAIM-29):**
   - **Breaking:** `ScoredDocument` (returned by `VectorStore::query`) gains a
     required `id: String` field, and `ScoredDocument::new` gains a leading
