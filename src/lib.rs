@@ -44,6 +44,7 @@
 //! | `sqs` | AWS SQS task broker (via `daimon-provider-bedrock`) |
 //! | `pubsub` | Google Cloud Pub/Sub task broker (via `daimon-provider-gemini`) |
 //! | `servicebus` | Azure Service Bus task broker (via `daimon-provider-azure`) |
+//! | `a2a` | Agent-to-Agent (A2A) protocol client (`A2aClient`) |
 //! | `mcp` | Model Context Protocol client & server |
 //! | `otel` | OpenTelemetry OTLP span export |
 //! | `qdrant` | Qdrant vector store retriever |
@@ -72,13 +73,14 @@
 //! - [`orchestration`] — Chain, graph, DAG, and workflow orchestration
 //! - [`retriever`] — RAG retriever trait and tool adapter
 //! - [`checkpoint`] — Checkpointing and state persistence
-//! - [`a2a`] — Google Agent-to-Agent protocol support
+//! - [`a2a`] — Google Agent-to-Agent protocol support (feature = "a2a")
 //! - [`distributed`] — Distributed agent execution across processes
 //! - [`mcp`] — Model Context Protocol client and server (stdio, HTTP)
 //! - [`telemetry`] — OpenTelemetry OTLP export (feature = "otel")
 //! - [`server`] — HTTP agent server (feature = "http-server")
 //! - [`eval`] — evaluation harness for agent behavior (feature = "eval")
 
+#[cfg(feature = "a2a")]
 pub mod a2a;
 pub mod agent;
 pub mod checkpoint;

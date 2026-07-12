@@ -148,6 +148,7 @@ async fn main() -> daimon::Result<()> {
 | `llamacpp` | No | llama.cpp (llama-server) provider |
 | `llamars` | No | llama-rs provider |
 | `local` | No | All local providers at once (Ollama, llama.cpp, llama-rs, generic OpenAI-compatible) |
+| `a2a` | No | Agent-to-Agent (A2A) protocol client (`A2aClient`) |
 | `mcp` | No | Model Context Protocol client & server |
 | `sqlite` | No | SQLite memory backend |
 | `redis` | No | Redis memory backend + task broker + checkpoint |
