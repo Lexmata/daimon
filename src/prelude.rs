@@ -3,7 +3,6 @@
 //! Use `use daimon::prelude::*` to bring in [`Agent`], [`AgentResponse`], [`Model`],
 //! [`Tool`], [`Memory`], [`StreamEvent`], and related types without qualifying paths.
 
-pub use crate::a2a::{A2aClient, A2aHandler, A2aMessage, A2aTask, AgentCard};
 pub use crate::agent::as_tool::AgentTool;
 pub use crate::agent::fork::ForkBuilder;
 pub use crate::agent::handoff::HandoffNetwork;
@@ -49,6 +48,9 @@ pub use tokio_util::sync::CancellationToken;
 
 #[cfg(feature = "macros")]
 pub use crate::tool_fn;
+
+#[cfg(feature = "a2a")]
+pub use crate::a2a::{A2aClient, A2aHandler, A2aMessage, A2aTask, AgentCard};
 
 #[cfg(feature = "sqlite")]
 pub use crate::memory::SqliteMemory;

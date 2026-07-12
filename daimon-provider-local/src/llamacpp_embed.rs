@@ -66,6 +66,21 @@ impl LlamaCppEmbedding {
         self
     }
 
+    /// Set the maximum number of retries for transient (429 / 5xx) errors
+    /// on the initial request (default: 3).
+    pub fn with_max_retries(mut self, retries: u32) -> Self {
+        self.http.set_max_retries(retries);
+        self
+    }
+
+    /// Opts back into warn-and-send for an API key sent over a plaintext
+    /// `http://` base URL (default: hard error). Only use this for a
+    /// genuinely local, unauthenticated-but-keyed server.
+    pub fn allow_plaintext_api_key(mut self) -> Self {
+        self.http.set_allow_plaintext_api_key(true);
+        self
+    }
+
     /// Declare the dimensionality of the loaded model's embeddings.
     ///
     /// llama-server does not truncate or expand vectors; this must match the
@@ -118,8 +133,28 @@ mod tests {
         let embed = LlamaCppEmbedding::new()
             .with_base_url("http://gpu-box:8080")
             .with_model("nomic-embed")
-            .with_dimensions(1024);
+            .with_dimensions(1024)
+            .with_max_retries(5);
         assert_eq!(embed.model.as_deref(), Some("nomic-embed"));
         assert_eq!(embed.dimensions, 1024);
+        assert_eq!(embed.http.max_retries(), 5);
+    }
+
+    #[tokio::test]
+    async fn test_plaintext_api_key_over_http_is_blocked_by_default() {
+        let embed = LlamaCppEmbedding::new().with_api_key("secret");
+        let err = embed.embed(&["hello"]).await.unwrap_err();
+        assert!(matches!(err, daimon_core::DaimonError::Builder(_)));
+    }
+
+    #[tokio::test]
+    async fn test_plaintext_api_key_allowed_when_opted_in() {
+        let embed = LlamaCppEmbedding::new()
+            .with_base_url("http://localhost:1")
+            .with_api_key("secret")
+            .with_max_retries(0)
+            .allow_plaintext_api_key();
+        let err = embed.embed(&["hello"]).await.unwrap_err();
+        assert!(!matches!(err, daimon_core::DaimonError::Builder(_)));
     }
 }

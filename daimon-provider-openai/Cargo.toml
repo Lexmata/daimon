@@ -1,14 +1,14 @@
 [package]
-name = "daimon-provider-local"
+name = "daimon-provider-openai"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "Locally-hosted model providers (Ollama, llama.cpp, llama-rs, OpenAI-compatible) for the Daimon AI agent framework"
+description = "OpenAI provider for the Daimon AI agent framework"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-documentation = "https://docs.rs/daimon-provider-local"
-keywords = ["ai", "agent", "llm", "local", "ollama"]
+documentation = "https://docs.rs/daimon-provider-openai"
+keywords = ["ai", "agent", "llm", "openai"]
 categories = ["asynchronous", "api-bindings"]
 
 [package.metadata.docs.rs]
@@ -26,7 +26,3 @@ tracing = { workspace = true }
 async-stream = { workspace = true }
 futures = { workspace = true }
 reqwest = { workspace = true }
-
-[dev-dependencies]
-proptest = "1"
-tokio = { workspace = true, features = ["macros", "rt"] }

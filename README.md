@@ -10,7 +10,7 @@ Daimon implements the **ReAct** (Reason-Act-Observe) pattern: the agent calls a 
 - **Multiple LLM providers** behind feature flags — OpenAI, Anthropic, AWS Bedrock
 - **Tool system** with async execution, parallel tool calls, and a typed registry
 - **Streaming** with full ReAct loop support (tool calls accumulate and re-invoke within a single stream)
-- **Conversation memory** with pluggable backends (sliding window included)
+- **Conversation memory** with pluggable backends (sliding window included), plus an optional tiered memory subsystem (core/archival/episodic) for longer-lived agents
 - **Lifecycle hooks** for observability and control
 - **Cancellation** via `tokio_util::CancellationToken`
 - **Tracing** instrumentation on all agent and provider operations
@@ -138,8 +138,8 @@ async fn main() -> daimon::Result<()> {
 
 | Feature | Default | Description |
 |---------|---------|-------------|
-| `openai` | Yes | OpenAI Chat Completions API |
-| `anthropic` | Yes | Anthropic Messages API |
+| `openai` | Yes | OpenAI Chat Completions API (via `daimon-provider-openai`) |
+| `anthropic` | Yes | Anthropic Messages API (via `daimon-provider-anthropic`) |
 | `macros` | Yes | `#[tool_fn]` proc macro for defining tools |
 | `bedrock` | No | AWS Bedrock Converse API |
 | `gemini` | No | Google Gemini / Vertex AI provider |
@@ -148,6 +148,7 @@ async fn main() -> daimon::Result<()> {
 | `llamacpp` | No | llama.cpp (llama-server) provider |
 | `llamars` | No | llama-rs provider |
 | `local` | No | All local providers at once (Ollama, llama.cpp, llama-rs, generic OpenAI-compatible) |
+| `a2a` | No | Agent-to-Agent (A2A) protocol client (`A2aClient`) |
 | `mcp` | No | Model Context Protocol client & server |
 | `sqlite` | No | SQLite memory backend |
 | `redis` | No | Redis memory backend + task broker + checkpoint |
@@ -228,6 +229,16 @@ let response = agent.prompt_with_cancellation("Hello", &cancel).await?;
 let messages = vec![Message::user("Hello")];
 let response = agent.prompt_with_messages(messages).await?;
 ```
+
+`SlidingWindowMemory` above only covers short-term conversation history. For
+longer-lived agents, `TieredMemory` composes it with three optional
+sub-memories — `CoreMemory` (small, always-in-context blocks, e.g. persona
+or user preferences), `ArchivalMemory` (explicit write/search over a large
+fact store, lexical or vector-backed), and `EpisodicMemory` (a queryable
+structured event log) — and still drops straight into `.memory()` since it
+implements the same `Memory` trait. See `daimon-core`'s `core_memory` /
+`archival_memory` / `episodic_memory` modules or the CHANGELOG's DAIM-23
+entry for details.
 
 ## Architecture
 

@@ -95,6 +95,21 @@ impl LlamaCpp {
         self
     }
 
+    /// Set the maximum number of retries for transient (429 / 5xx) errors
+    /// on the initial request (default: 3).
+    pub fn with_max_retries(mut self, retries: u32) -> Self {
+        self.http.set_max_retries(retries);
+        self
+    }
+
+    /// Opts back into warn-and-send for an API key sent over a plaintext
+    /// `http://` base URL (default: hard error). Only use this for a
+    /// genuinely local, unauthenticated-but-keyed server.
+    pub fn allow_plaintext_api_key(mut self) -> Self {
+        self.http.set_allow_plaintext_api_key(true);
+        self
+    }
+
     /// Constrain sampling with a [GBNF grammar](https://github.com/ggml-org/llama.cpp/tree/master/grammars).
     pub fn with_grammar(mut self, gbnf: impl Into<String>) -> Self {
         self.grammar = Some(gbnf.into());
@@ -197,7 +212,10 @@ impl Model for LlamaCpp {
         );
 
         tracing::debug!("sending streaming chat completion request");
-        let response = self.http.post("/v1/chat/completions", &body).await?;
+        let response = self
+            .http
+            .post_streaming("/v1/chat/completions", &body)
+            .await?;
 
         let status = response.status();
         if !status.is_success() {
@@ -232,6 +250,7 @@ mod tests {
             .with_model("qwen3")
             .with_api_key("secret")
             .with_timeout(Duration::from_secs(30))
+            .with_max_retries(5)
             .with_grammar("root ::= \"yes\"")
             .with_min_p(0.05)
             .with_top_k(40)
@@ -241,6 +260,7 @@ mod tests {
         assert_eq!(model.model.as_deref(), Some("qwen3"));
         assert_eq!(model.http.api_key(), Some("secret"));
         assert_eq!(model.http.timeout(), Some(Duration::from_secs(30)));
+        assert_eq!(model.http.max_retries(), 5);
     }
 
     #[test]
@@ -294,6 +314,26 @@ mod tests {
         let dbg = format!("{model:?}");
         assert!(!dbg.contains("sk-supersecret-key-value"));
         assert!(dbg.contains("[redacted]"));
+    }
+
+    #[tokio::test]
+    async fn test_plaintext_api_key_over_http_is_blocked_by_default() {
+        let model = LlamaCpp::new().with_api_key("secret");
+        let request = ChatRequest::new(vec![Message::user("hi")]);
+        let err = model.generate(&request).await.unwrap_err();
+        assert!(matches!(err, DaimonError::Builder(_)));
+    }
+
+    #[tokio::test]
+    async fn test_plaintext_api_key_allowed_when_opted_in() {
+        let model = LlamaCpp::new()
+            .with_base_url("http://localhost:1")
+            .with_api_key("secret")
+            .with_max_retries(0)
+            .allow_plaintext_api_key();
+        let request = ChatRequest::new(vec![Message::user("hi")]);
+        let err = model.generate(&request).await.unwrap_err();
+        assert!(!matches!(err, DaimonError::Builder(_)));
     }
 
     #[test]

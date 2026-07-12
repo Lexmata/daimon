@@ -23,6 +23,10 @@ use crate::retriever::{Document, ScoredDocument};
 struct StoredFact {
     id: String,
     text: String,
+    /// Lowercased form of `text`, computed once at insert time so `search`
+    /// doesn't reallocate a fresh lowercase copy of every fact on every
+    /// query.
+    text_lower: String,
     metadata: HashMap<String, Value>,
 }
 
@@ -49,6 +53,7 @@ impl ArchivalMemory for InMemoryArchivalMemory {
         self.facts.write().await.push(StoredFact {
             id: id.clone(),
             text: text.to_string(),
+            text_lower: text.to_lowercase(),
             metadata,
         });
         Ok(id)
@@ -65,8 +70,10 @@ impl ArchivalMemory for InMemoryArchivalMemory {
         let mut scored: Vec<(f64, &StoredFact)> = facts
             .iter()
             .filter_map(|fact| {
-                let text_lower = fact.text.to_lowercase();
-                let hits = terms.iter().filter(|t| text_lower.contains(*t)).count();
+                let hits = terms
+                    .iter()
+                    .filter(|t| fact.text_lower.contains(*t))
+                    .count();
                 (hits > 0).then_some((hits as f64, fact))
             })
             .collect();
@@ -161,13 +168,12 @@ impl<V: VectorStore, E: EmbeddingModel> ArchivalMemory for VectorArchivalMemory<
         let results: Vec<ScoredDocument> = self.store.query(embedding, top_k).await?;
         Ok(results
             .into_iter()
-            .enumerate()
-            .map(|(i, scored)| ArchivalRecord {
-                // VectorStore has no notion of a stable id in its query
-                // results; expose the rank-derived placeholder plus the
-                // document's own metadata so callers can still recover a
-                // caller-assigned id if they stored one as metadata.
-                id: format!("result-{i}"),
+            .map(|scored| ArchivalRecord {
+                // `ScoredDocument::id` is the same stable id passed to
+                // `VectorStore::upsert` at insert time, so it round-trips
+                // directly into `delete` (see `VectorStore::query`'s
+                // contract in daimon-core).
+                id: scored.id,
                 text: scored.document.content,
                 metadata: scored.document.metadata,
                 score: Some(scored.score),
@@ -203,6 +209,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn insert_and_search_is_case_insensitive() {
+        // The perf fix caches `text.to_lowercase()` at insert time instead of
+        // lowercasing on every query; every other test in this module
+        // inserts/searches already-lowercase text, so a regression that
+        // broke the case-insensitivity contract (e.g. comparing raw `text`
+        // against a lowercased query, or vice versa) wouldn't be caught.
+        // Insert mixed-case text and search with a differently-cased query.
+        let mem = InMemoryArchivalMemory::new();
+        let id = mem.insert("The Sky Is Blue", HashMap::new()).await.unwrap();
+
+        let results = mem.search("sky blue", 5).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, id);
+    }
+
+    #[tokio::test]
     async fn search_respects_top_k() {
         let mem = InMemoryArchivalMemory::new();
         for i in 0..5 {
@@ -233,6 +255,26 @@ mod tests {
         assert!(mem.delete(&id).await.unwrap());
         assert!(!mem.delete(&id).await.unwrap());
         assert_eq!(mem.count().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn more_relevant_fact_ranks_first() {
+        // Fact A matches both query terms ("sky" and "blue"); fact B matches
+        // only one ("blue"). A regression that dropped the score-based sort
+        // (e.g. falling back to insertion order) would silently return B
+        // first here since it was inserted first.
+        let mem = InMemoryArchivalMemory::new();
+        let id_b = mem
+            .insert("the ocean is blue", HashMap::new())
+            .await
+            .unwrap();
+        let id_a = mem.insert("the sky is blue", HashMap::new()).await.unwrap();
+
+        let results = mem.search("sky blue", 5).await.unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].id, id_a, "the two-term match must rank first");
+        assert_eq!(results[1].id, id_b);
+        assert!(results[0].score.unwrap() > results[1].score.unwrap());
     }
 
     #[tokio::test]
@@ -282,5 +324,84 @@ mod tests {
         assert_eq!(adapter.count().await.unwrap(), 2);
         let results = adapter.search("hello", 2).await.unwrap();
         assert_eq!(results.len(), 2);
+    }
+
+    /// Embeds a small fixed vocabulary into 2D vectors with meaningfully
+    /// different directions, so cosine similarity (what
+    /// `InMemoryVectorStoreBackend` scores on) actually distinguishes
+    /// "more similar" from "less similar" rather than always returning 1.0
+    /// (which is what any pair of positive 1-dimensional vectors would do,
+    /// as `FakeEmbedder` above produces).
+    struct DirectionalEmbedder;
+
+    impl EmbeddingModel for DirectionalEmbedder {
+        async fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+            Ok(texts
+                .iter()
+                .map(|t| {
+                    if t.contains("cat") {
+                        vec![1.0, 0.0]
+                    } else if t.contains("dog") {
+                        vec![0.0, 1.0]
+                    } else {
+                        // A query that leans mostly towards "cat" but not
+                        // purely so.
+                        vec![0.9, 0.1]
+                    }
+                })
+                .collect())
+        }
+
+        fn dimensions(&self) -> usize {
+            2
+        }
+    }
+
+    #[tokio::test]
+    async fn vector_archival_memory_ranks_more_similar_document_first() {
+        use crate::retriever::InMemoryVectorStoreBackend;
+
+        let adapter =
+            VectorArchivalMemory::new(InMemoryVectorStoreBackend::new(), DirectionalEmbedder);
+        let cat_id = adapter
+            .insert("the cat sat on the mat", HashMap::new())
+            .await
+            .unwrap();
+        let dog_id = adapter
+            .insert("the dog barked loudly", HashMap::new())
+            .await
+            .unwrap();
+
+        // Query embedding [0.9, 0.1] is far closer (cosine) to the "cat"
+        // document [1.0, 0.0] than to the "dog" document [0.0, 1.0].
+        let results = adapter.search("a query about pets", 2).await.unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(
+            results[0].id, cat_id,
+            "the more-similar document must rank first"
+        );
+        assert_eq!(results[1].id, dog_id);
+        assert!(results[0].score.unwrap() > results[1].score.unwrap());
+    }
+
+    #[tokio::test]
+    async fn vector_archival_memory_search_ids_round_trip_to_delete() {
+        use crate::retriever::InMemoryVectorStoreBackend;
+
+        let adapter = VectorArchivalMemory::new(InMemoryVectorStoreBackend::new(), FakeEmbedder);
+        let inserted_id = adapter.insert("hello", HashMap::new()).await.unwrap();
+
+        let results = adapter.search("hello", 1).await.unwrap();
+        assert_eq!(results.len(), 1);
+        // The id returned by search must be the real, stable id assigned at
+        // insert time, not a rank-derived placeholder.
+        assert_eq!(results[0].id, inserted_id);
+
+        // And it must actually work with delete: the fact should be gone
+        // afterward.
+        assert!(adapter.delete(&results[0].id).await.unwrap());
+        assert_eq!(adapter.count().await.unwrap(), 0);
+        let remaining = adapter.search("hello", 2).await.unwrap();
+        assert!(remaining.is_empty());
     }
 }

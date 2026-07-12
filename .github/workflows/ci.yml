@@ -129,6 +129,7 @@ jobs:
       matrix:
         features:
           - "--no-default-features"
+          - "--features a2a"
           - "--features full"
     steps:
       - uses: actions/checkout@v7

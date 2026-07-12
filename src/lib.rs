@@ -27,8 +27,8 @@
 //!
 //! | Feature | Description |
 //! |---------|-------------|
-//! | `openai` | OpenAI API provider (default) |
-//! | `anthropic` | Anthropic Claude API provider (default) |
+//! | `openai` | OpenAI API provider (default, via `daimon-provider-openai`) |
+//! | `anthropic` | Anthropic Claude API provider (default, via `daimon-provider-anthropic`) |
 //! | `macros` | `#[tool_fn]` proc macro (default) |
 //! | `gemini` | Google Gemini / Vertex AI provider (via `daimon-provider-gemini`) |
 //! | `azure` | Azure OpenAI Service provider (via `daimon-provider-azure`) |
@@ -44,12 +44,15 @@
 //! | `sqs` | AWS SQS task broker (via `daimon-provider-bedrock`) |
 //! | `pubsub` | Google Cloud Pub/Sub task broker (via `daimon-provider-gemini`) |
 //! | `servicebus` | Azure Service Bus task broker (via `daimon-provider-azure`) |
+//! | `a2a` | Agent-to-Agent (A2A) protocol client (`A2aClient`) |
 //! | `mcp` | Model Context Protocol client & server |
 //! | `otel` | OpenTelemetry OTLP span export |
 //! | `qdrant` | Qdrant vector store retriever |
 //! | `pgvector` | pgvector-backed vector store (via `daimon-plugin-pgvector`) |
 //! | `opensearch` | OpenSearch k-NN vector store (via `daimon-plugin-opensearch`) |
 //! | `grpc` | gRPC transport for distributed execution |
+//! | `http-server` | HTTP agent server (`AgentServer`) |
+//! | `eval` | Agent evaluation/scoring harness |
 //! | `full` | All providers + macros + MCP + SQLite + Redis + NATS + AMQP + OTel + HTTP server + Qdrant + pgvector + OpenSearch + gRPC + eval + SQS + Pub/Sub + Service Bus |
 //!
 //! The core framework compiles with no features; enable providers as needed.
@@ -72,13 +75,14 @@
 //! - [`orchestration`] — Chain, graph, DAG, and workflow orchestration
 //! - [`retriever`] — RAG retriever trait and tool adapter
 //! - [`checkpoint`] — Checkpointing and state persistence
-//! - [`a2a`] — Google Agent-to-Agent protocol support
+//! - [`a2a`] — Google Agent-to-Agent protocol support (feature = "a2a")
 //! - [`distributed`] — Distributed agent execution across processes
 //! - [`mcp`] — Model Context Protocol client and server (stdio, HTTP)
 //! - [`telemetry`] — OpenTelemetry OTLP export (feature = "otel")
 //! - [`server`] — HTTP agent server (feature = "http-server")
 //! - [`eval`] — evaluation harness for agent behavior (feature = "eval")
 
+#[cfg(feature = "a2a")]
 pub mod a2a;
 pub mod agent;
 pub mod checkpoint;

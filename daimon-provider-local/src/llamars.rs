@@ -8,9 +8,13 @@
 //! extras beyond that today.
 //!
 //! ```ignore
+//! use daimon_core::{ChatRequest, Message, Model};
 //! use daimon_provider_local::llamars::LlamaRs;
 //!
 //! let model = LlamaRs::new().with_base_url("http://localhost:8080");
+//! let response = model
+//!     .generate(&ChatRequest::new(vec![Message::user("hello")]))
+//!     .await?;
 //! ```
 
 use std::time::Duration;
@@ -74,6 +78,21 @@ impl LlamaRs {
         self.http.set_timeout(timeout);
         self
     }
+
+    /// Set the maximum number of retries for transient (429 / 5xx) errors
+    /// on the initial request (default: 3).
+    pub fn with_max_retries(mut self, retries: u32) -> Self {
+        self.http.set_max_retries(retries);
+        self
+    }
+
+    /// Opts back into warn-and-send for an API key sent over a plaintext
+    /// `http://` base URL (default: hard error). Only use this for a
+    /// genuinely local, unauthenticated-but-keyed server.
+    pub fn allow_plaintext_api_key(mut self) -> Self {
+        self.http.set_allow_plaintext_api_key(true);
+        self
+    }
 }
 
 impl Model for LlamaRs {
@@ -115,7 +134,10 @@ impl Model for LlamaRs {
             Default::default(),
         );
 
-        let response = self.http.post("/v1/chat/completions", &body).await?;
+        let response = self
+            .http
+            .post_streaming("/v1/chat/completions", &body)
+            .await?;
         let status = response.status();
         if !status.is_success() {
             let text = response.text().await.unwrap_or_default();
@@ -175,6 +197,21 @@ impl LlamaRsEmbedding {
         self
     }
 
+    /// Set the maximum number of retries for transient (429 / 5xx) errors
+    /// on the initial request (default: 3).
+    pub fn with_max_retries(mut self, retries: u32) -> Self {
+        self.http.set_max_retries(retries);
+        self
+    }
+
+    /// Opts back into warn-and-send for an API key sent over a plaintext
+    /// `http://` base URL (default: hard error). Only use this for a
+    /// genuinely local, unauthenticated-but-keyed server.
+    pub fn allow_plaintext_api_key(mut self) -> Self {
+        self.http.set_allow_plaintext_api_key(true);
+        self
+    }
+
     /// Declare the dimensionality of the loaded model's embeddings.
     pub fn with_dimensions(mut self, dims: usize) -> Self {
         self.dimensions = dims;
@@ -223,9 +260,11 @@ mod tests {
             .with_base_url("http://gpu-box:8080")
             .with_model("my-model")
             .with_api_key("secret")
-            .with_timeout(Duration::from_secs(20));
+            .with_timeout(Duration::from_secs(20))
+            .with_max_retries(5);
         assert_eq!(model.model.as_deref(), Some("my-model"));
         assert_eq!(model.http.api_key(), Some("secret"));
+        assert_eq!(model.http.max_retries(), 5);
     }
 
     #[test]
@@ -263,5 +302,25 @@ mod tests {
             "Debug output must not contain the plaintext API key: {dbg}"
         );
         assert!(dbg.contains("[redacted]"));
+    }
+
+    #[tokio::test]
+    async fn test_plaintext_api_key_over_http_is_blocked_by_default() {
+        let model = LlamaRs::new().with_api_key("secret");
+        let request = ChatRequest::new(vec![daimon_core::Message::user("hi")]);
+        let err = model.generate(&request).await.unwrap_err();
+        assert!(matches!(err, DaimonError::Builder(_)));
+    }
+
+    #[tokio::test]
+    async fn test_plaintext_api_key_allowed_when_opted_in() {
+        let model = LlamaRs::new()
+            .with_base_url("http://localhost:1")
+            .with_api_key("secret")
+            .with_max_retries(0)
+            .allow_plaintext_api_key();
+        let request = ChatRequest::new(vec![daimon_core::Message::user("hi")]);
+        let err = model.generate(&request).await.unwrap_err();
+        assert!(!matches!(err, DaimonError::Builder(_)));
     }
 }

@@ -7,6 +7,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-07-12
+
+### Changed
+
+- **A2A feature gate (DAIM-27):**
+  - **Breaking:** `daimon::a2a` (the whole module — `client`, `server`, and
+    `types` submodules included) now requires its own `a2a` Cargo feature
+    (or `full`) to be enabled. Previously the module was only reachable
+    because it happened to be pulled in transitively by unrelated features
+    (`openai`, `anthropic`, `ollama`, `mcp`) via a shared `dep:reqwest`
+    gate, so a build enabling none of those four would silently drop
+    `a2a` entirely while still compiling everything else — a
+    silent-partial-compile bug, not a documented feature boundary.
+    Consumers using `A2aClient`/`A2aHandler` who were not already on one
+    of those four features must add `features = ["a2a"]` (or `"full"`)
+    to their `Cargo.toml` dependency on `daimon`.
+- **Local provider retry/timeout hardening (DAIM-33), following on from
+  DAIM-26:**
+  - **Behavior change (from DAIM-26, previously undocumented):** malformed
+    tool-call argument JSON returned by a local model now surfaces as an
+    `Err(DaimonError::Model(...))` from `daimon-provider-local`'s chat
+    providers instead of silently becoming `null` arguments.
+  - **Behavior change (from DAIM-26, previously undocumented):** non-streaming
+    requests get a default 120s whole-request timeout and up to 3 retries
+    with jittered backoff on 429/5xx responses; streaming requests are
+    exempt from the whole-request timeout (a healthy SSE stream must not be
+    aborted mid-body). Both are configurable via `with_timeout`/
+    `with_max_retries` on every local provider.
+  - Retry now also covers connection-level failures — connection
+    refused/reset, DNS failure, client-side timeout — not just HTTP-status
+    failures. Previously `reqwest::Error` from `send()` bypassed retry
+    entirely via `?`, so the dominant local-server failure modes (server
+    still loading, connection refused) got zero retries.
+  - The streaming handshake (the `send()` call up to response headers) now
+    has its own 30s bound, distinct from the intentionally-unbounded body
+    stream — previously nothing but the 10s TCP connect timeout guarded
+    against a server that accepts the connection and then never responds.
+  - Sending an API key over a plaintext `http://` base URL is now a hard
+    `DaimonError::Builder` error by default instead of a warn-and-send;
+    opt back in per-provider with the new `.allow_plaintext_api_key()`
+    builder method for genuinely local, unauthenticated-but-keyed servers.
+- **Provider crate extraction (DAIM-30):** `OpenAi`/`OpenAiEmbedding` and
+  `Anthropic` moved out of the `daimon` facade into new standalone crates,
+  `daimon-provider-openai` and `daimon-provider-anthropic`, matching the
+  structure already used by `daimon-provider-gemini`, `daimon-provider-azure`,
+  `daimon-provider-bedrock`, and `daimon-provider-local`. This closes the gap
+  where `openai.rs`/`anthropic.rs` were the last two providers implemented
+  directly in-facade (gated by `dep:reqwest`) instead of as their own crates,
+  which had already caused real duplication — `daimon-provider-local`'s
+  `openai_compat.rs` independently reimplements the OpenAI Chat Completions
+  wire format with drifted timeout constants. All existing
+  `daimon::model::openai::*`, `daimon::model::openai_embed::*`, and
+  `daimon::model::anthropic::*` re-export paths are preserved — no consumer
+  changes required.
+- **Memory tier hardening (DAIM-29):**
+  - **Breaking:** `ScoredDocument` (returned by `VectorStore::query`) gains a
+    required `id: String` field, and `ScoredDocument::new` gains a leading
+    `id: impl Into<String>` parameter. Every built-in `VectorStore` backend
+    (in-memory, pgvector, OpenSearch) already had the real record id in hand
+    at the point it constructed a `ScoredDocument` and simply never threaded
+    it through, so `VectorArchivalMemory::search()` results could never be
+    passed to `delete()` — the id had been fabricated as `format!("result-{i}")`.
+    External `VectorStore` implementors, and any caller constructing
+    `ScoredDocument` directly, must now pass the backend's real id as the
+    first argument (or populate the new `id` field).
+  - `CoreMemory::render()`'s header-injection escaping (`escape_headers`)
+    now recognizes Markdown ATX headers indented by up to 3 spaces, matching
+    CommonMark's own tolerance, instead of only an exact column-0 `#`. A
+    stored block `value` containing a line like `"  ## persona"` previously
+    slipped through unescaped and could still be read as a real header
+    boundary by a lenient-Markdown-parsing LLM; 4+ leading spaces (an
+    indented code block, not a header) remain untouched.
+
+### Fixed
+
+- **`SqliteArchivalMemory`/`SqliteEpisodicMemory` id collisions (DAIM-32,
+  follow-up to DAIM-25):** ids are now derived from a real `INTEGER PRIMARY
+  KEY AUTOINCREMENT` sequence column (`seq`) instead of the table's plain
+  rowid. Plain SQLite rowids are recomputed as `max(existing rowid) + 1`
+  from current table contents, so deleting the row holding the current max
+  rowid made the very next insert reuse that exact rowid — and therefore
+  mint the exact same id string — even after DAIM-25's fix moved id
+  derivation out of an in-process counter. `AUTOINCREMENT` tracks a
+  persisted high-water mark (`sqlite_sequence`) that never goes backwards,
+  closing the collision on restart, across concurrent instances, *and*
+  after delete+reinsert. Databases created before this fix are not migrated
+  automatically (`CREATE TABLE IF NOT EXISTS` leaves their schema as-is);
+  such files may already contain duplicate ids from the earlier bug and
+  need manual deduplication — attempting to reuse one now fails loudly with
+  a diagnostic pointing at the fix, instead of an opaque SQLite constraint
+  error.
+- **`SqliteArchivalMemory::delete()`/`SqliteEpisodicMemory` deletes are now
+  session-scoped:** previously any session could delete any row by id
+  (`DELETE FROM archival_facts WHERE id = ?1`, no `session_id` filter); a
+  delete from a different session's handle no longer succeeds.
+
 ## [0.21.0] - 2026-07-11
 
 ### Added
@@ -793,7 +889,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `commitlint.toml` for Conventional Commits enforcement.
 - `rustfmt.toml` and `clippy.toml` for consistent code style.
 
-[Unreleased]: https://github.com/Lexmata/daimon/compare/v0.21.0...HEAD
+[Unreleased]: https://github.com/Lexmata/daimon/compare/v0.22.0...HEAD
+[0.22.0]: https://github.com/Lexmata/daimon/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/Lexmata/daimon/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/Lexmata/daimon/compare/v0.18.1...v0.20.0
 [0.18.1]: https://github.com/Lexmata/daimon/compare/v0.18.0...v0.18.1
