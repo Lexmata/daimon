@@ -228,6 +228,7 @@ impl VectorStore for PgVectorStore {
 
         let mut results = Vec::with_capacity(rows.len());
         for row in rows {
+            let id: String = row.get("id");
             let content: String = row.get("content");
             let metadata_val: serde_json::Value = row.get("metadata");
             let score: f64 = row.get("score");
@@ -240,7 +241,7 @@ impl VectorStore for PgVectorStore {
                 metadata,
                 score: Some(score),
             };
-            results.push(ScoredDocument::new(doc, score));
+            results.push(ScoredDocument::new(id, doc, score));
         }
 
         Ok(results)

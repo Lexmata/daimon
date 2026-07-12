@@ -38,15 +38,27 @@ impl Document {
 }
 
 /// A document paired with a similarity score from a vector query.
+///
+/// `id` is the backend's stable identifier for this document — the same id
+/// passed to [`VectorStore::upsert`](crate::vector_store::VectorStore::upsert)
+/// when the document was stored. Callers that need to act on a search
+/// result (e.g. delete it) must be able to round-trip through this `id`;
+/// implementations of `VectorStore::query` must therefore always populate it
+/// with the real, stable id rather than a synthetic/rank-derived value.
 #[derive(Debug, Clone)]
 pub struct ScoredDocument {
+    pub id: String,
     pub document: Document,
     pub score: f64,
 }
 
 impl ScoredDocument {
-    pub fn new(document: Document, score: f64) -> Self {
-        Self { document, score }
+    pub fn new(id: impl Into<String>, document: Document, score: f64) -> Self {
+        Self {
+            id: id.into(),
+            document,
+            score,
+        }
     }
 }
 
@@ -74,7 +86,8 @@ mod tests {
     #[test]
     fn test_scored_document() {
         let doc = Document::new("content");
-        let scored = ScoredDocument::new(doc, 0.87);
+        let scored = ScoredDocument::new("doc-1", doc, 0.87);
+        assert_eq!(scored.id, "doc-1");
         assert_eq!(scored.document.content, "content");
         assert_eq!(scored.score, 0.87);
     }

@@ -389,7 +389,7 @@ let doc = doc.with_score(0.92);
 | `metadata` | `HashMap<String, serde_json::Value>` | Arbitrary key-value metadata (source, page, etc.) |
 | `score` | `Option<f64>` | Relevance score from retrieval. `None` if backend does not provide scores |
 
-`ScoredDocument` is an internal type: `{ document: Document, score: f64 }`. Vector stores return `Vec<ScoredDocument>`; `SimpleKnowledgeBase` converts to `Document` with `with_score` applied.
+`ScoredDocument` is an internal type: `{ id: String, document: Document, score: f64 }`. `id` is the same stable id passed to `VectorStore::upsert` when the document was stored — implementations must populate it with the real id, not a synthetic/rank-derived value, so callers can round-trip a search result into `delete`. Vector stores return `Vec<ScoredDocument>`; `SimpleKnowledgeBase` converts to `Document` with `with_score` applied.
 
 ---
 
@@ -417,7 +417,8 @@ impl VectorStore for MyVectorStore {
     }
 
     async fn query(&self, embedding: Vec<f32>, top_k: usize) -> Result<Vec<ScoredDocument>> {
-        // Search and return scored documents
+        // Search and return scored documents, each carrying the stable id
+        // it was upserted with (required for delete to round-trip).
         Ok(vec![])
     }
 
