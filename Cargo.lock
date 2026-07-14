@@ -3327,9 +3327,9 @@ checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 
 [[package]]
 name = "opensearch"
-version = "2.3.0"
+version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a62b025c3503d3d53eaba3b6f14adb955af9f69fc71141b4d030a4e5331f5d42"
+checksum = "2af6815a23449a0860c8fe049a828c3589d3ad56d3b5875d0d1f340d1291871e"
 dependencies = [
  "aws-credential-types",
  "aws-sigv4",
@@ -3340,7 +3340,7 @@ dependencies = [
  "dyn-clone",
  "lazy_static",
  "percent-encoding",
- "reqwest 0.12.28",
+ "reqwest 0.13.2",
  "rustc_version",
  "serde",
  "serde_json",
