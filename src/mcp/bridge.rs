@@ -25,6 +25,29 @@ impl McpToolBridge {
     pub fn new(transport: Arc<dyn McpTransport>, info: McpToolInfo) -> Self {
         Self { transport, info }
     }
+
+    /// The transport this bridge calls through.
+    ///
+    /// Every bridge produced by one
+    /// [`McpClient::tools()`](super::client::McpClient::tools) call shares a
+    /// single transport, so a caller holding many bridges can deduplicate by
+    /// [`Arc::ptr_eq`] and close each server connection exactly once.
+    pub fn transport(&self) -> &Arc<dyn McpTransport> {
+        &self.transport
+    }
+
+    /// Closes the underlying transport, letting an embedding application
+    /// shut MCP servers down in an orderly way (e.g. reaping stdio child
+    /// processes at exit) instead of relying on process teardown.
+    ///
+    /// The transport is shared by every bridge from the same server, so
+    /// closing one bridge closes the connection for all of them. The
+    /// built-in transports tolerate repeated calls (`StdioTransport` takes
+    /// its handles out of `Option`s), so calling this once per bridge
+    /// rather than once per server is safe, just redundant.
+    pub async fn close(&self) -> Result<()> {
+        self.transport.close().await
+    }
 }
 
 impl Tool for McpToolBridge {
@@ -133,6 +156,75 @@ mod tests {
         };
         let bridge = McpToolBridge::new(Arc::new(NullTransport), info);
         assert_eq!(bridge.description(), "");
+    }
+
+    #[tokio::test]
+    async fn test_bridge_close_delegates_to_the_transport() {
+        let transport = Arc::new(CountingTransport::default());
+        let info = McpToolInfo {
+            name: "test".into(),
+            description: None,
+            input_schema: serde_json::json!({}),
+        };
+        let bridge = McpToolBridge::new(transport.clone(), info);
+        bridge.close().await.unwrap();
+        bridge.close().await.unwrap(); // repeated close is allowed
+        assert_eq!(
+            transport.closes.load(std::sync::atomic::Ordering::Relaxed),
+            2
+        );
+    }
+
+    #[test]
+    fn test_bridges_sharing_a_transport_expose_the_same_arc() {
+        let transport: Arc<dyn McpTransport> = Arc::new(NullTransport);
+        let info = |name: &str| McpToolInfo {
+            name: name.into(),
+            description: None,
+            input_schema: serde_json::json!({}),
+        };
+        let a = McpToolBridge::new(transport.clone(), info("a"));
+        let b = McpToolBridge::new(transport.clone(), info("b"));
+        // The documented dedupe contract: bridges from one server compare
+        // pointer-equal, so callers can close each connection exactly once.
+        assert!(Arc::ptr_eq(a.transport(), b.transport()));
+    }
+
+    /// A transport that counts `close()` calls (everything else errors).
+    #[derive(Default)]
+    struct CountingTransport {
+        closes: std::sync::atomic::AtomicU64,
+    }
+
+    impl McpTransport for CountingTransport {
+        fn request<'a>(
+            &'a self,
+            _method: &'a str,
+            _params: Option<serde_json::Value>,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<crate::mcp::protocol::JsonRpcResponse>>
+                    + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async { Err(DaimonError::Mcp("counting transport".into())) })
+        }
+
+        fn notify<'a>(
+            &'a self,
+            _notification: &'a crate::mcp::protocol::JsonRpcNotification,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn close<'a>(
+            &'a self,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+            self.closes
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Box::pin(async { Ok(()) })
+        }
     }
 
     struct NullTransport;
