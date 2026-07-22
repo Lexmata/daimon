@@ -209,6 +209,9 @@ impl Memory for SummaryMemory {
         Ok(())
     }
 
+    // `with_messages` deliberately keeps the trait default: get_messages
+    // composes a synthetic summary message with the stored tail, so there is
+    // no stored `&[Message]` matching that view to borrow.
     async fn get_messages(&self) -> Result<Vec<Message>> {
         let messages = self.messages.lock().await;
         let summary = self.summary.lock().await;

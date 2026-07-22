@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Borrowing history access:** `Memory::with_messages` runs a visitor
+  closure over the stored messages without handing out an owned copy. It is
+  default-implemented in terms of `get_messages` (one full clone), so
+  existing `Memory` implementors keep compiling unchanged;
+  `SlidingWindowMemory` and `TokenWindowMemory` override it to borrow their
+  storage under the lock, and `TieredMemory` forwards to its conversation
+  sub-memory, so read-only consumers (serializing history to disk, measuring
+  it, rendering it) no longer pay an O(history) deep copy per call.
+  `ErasedMemory::with_messages_erased` is the object-safe counterpart
+  (callers return values by writing into captured locals), also
+  default-implemented, and routed through `Memory::with_messages` by the
+  blanket impl so overriding backends keep their no-clone path through
+  `SharedMemory`. `SummaryMemory`, `SqliteMemory`, and `RedisMemory`
+  deliberately stay on the default: their `get_messages` composes or
+  performs IO rather than returning a copy of borrowed storage. Additive
+  only — no existing API changes.
+
 ## [0.22.1] - 2026-07-21
 
 ### Added

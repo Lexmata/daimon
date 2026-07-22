@@ -182,6 +182,18 @@ impl Memory for TokenWindowMemory {
         Ok(inner.messages.make_contiguous().to_vec())
     }
 
+    /// Borrows the storage under the lock — no per-call clone of the
+    /// history. The closure is sync and non-blocking, so holding the async
+    /// lock across it is fine.
+    async fn with_messages<R, F>(&self, f: F) -> Result<R>
+    where
+        F: FnOnce(&[Message]) -> R + Send,
+        R: Send,
+    {
+        let mut inner = self.inner.lock().await;
+        Ok(f(inner.messages.make_contiguous()))
+    }
+
     async fn clear(&self) -> Result<()> {
         let mut inner = self.inner.lock().await;
         inner.messages.clear();
@@ -392,6 +404,33 @@ mod tests {
             msgs[0].content.as_deref(),
             Some("this is a very long message")
         );
+    }
+
+    #[tokio::test]
+    async fn test_with_messages_matches_get_messages_after_eviction() {
+        // 1 token per message: window of 3 forces eviction on the 5th add.
+        let memory = TokenWindowMemory::new(3).with_token_counter(|_| 1);
+        for i in 0..5 {
+            memory
+                .add_message(&Message::user(format!("msg{i}")))
+                .await
+                .unwrap();
+        }
+
+        let owned = memory.get_messages().await.unwrap();
+        let borrowed = memory
+            .with_messages(|messages| messages.to_vec())
+            .await
+            .unwrap();
+
+        assert_eq!(borrowed.len(), owned.len());
+        for (b, o) in borrowed.iter().zip(&owned) {
+            assert_eq!(b.role, o.role);
+            assert_eq!(b.content, o.content);
+        }
+        // Eviction happened, and the borrowed view reflects it.
+        assert_eq!(borrowed.len(), 3);
+        assert_eq!(borrowed[0].content.as_deref(), Some("msg2"));
     }
 
     #[tokio::test]

@@ -13,7 +13,7 @@
 
 use std::sync::Arc;
 
-use crate::error::Result;
+use crate::error::{DaimonError, Result};
 use crate::memory::{
     ArchivalMemory, CoreMemory, EpisodicMemory, ErasedArchivalMemory, ErasedCoreMemory,
     ErasedEpisodicMemory, Memory, SharedArchivalMemory, SharedCoreMemory, SharedEpisodicMemory,
@@ -115,6 +115,25 @@ impl Memory for TieredMemory {
         self.conversation.get_messages_erased().await
     }
 
+    /// Forwards to the conversation sub-memory's erased visitor, so a
+    /// conversation backend that overrides [`Memory::with_messages`] keeps
+    /// its no-clone path when wrapped in `TieredMemory`.
+    async fn with_messages<R, F>(&self, f: F) -> Result<R>
+    where
+        F: FnOnce(&[Message]) -> R + Send,
+        R: Send,
+    {
+        let mut out = None;
+        self.conversation
+            .with_messages_erased(Box::new(|messages| out = Some(f(messages))))
+            .await?;
+        out.ok_or_else(|| {
+            DaimonError::Other(
+                "ErasedMemory::with_messages_erased completed without invoking the visitor".into(),
+            )
+        })
+    }
+
     async fn clear(&self) -> Result<()> {
         self.conversation.clear_erased().await
     }
@@ -201,6 +220,25 @@ mod tests {
 
         let block = mem.system_prompt_block().await.unwrap().unwrap();
         assert_eq!(block, "## persona\nconcise assistant");
+    }
+
+    #[tokio::test]
+    async fn with_messages_forwards_to_conversation() {
+        let mem = TieredMemory::new(SlidingWindowMemory::new(10));
+        mem.add_message(&Message::user("hi")).await.unwrap();
+        mem.add_message(&Message::assistant("hello")).await.unwrap();
+
+        let owned = mem.get_messages().await.unwrap();
+        let borrowed = mem
+            .with_messages(|messages| messages.to_vec())
+            .await
+            .unwrap();
+
+        assert_eq!(borrowed.len(), owned.len());
+        for (b, o) in borrowed.iter().zip(&owned) {
+            assert_eq!(b.role, o.role);
+            assert_eq!(b.content, o.content);
+        }
     }
 
     #[tokio::test]
