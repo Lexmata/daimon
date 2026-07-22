@@ -1418,7 +1418,7 @@ dependencies = [
 
 [[package]]
 name = "daimon"
-version = "0.22.1"
+version = "0.22.2"
 dependencies = [
  "async-nats",
  "async-stream",
@@ -1468,7 +1468,7 @@ dependencies = [
 
 [[package]]
 name = "daimon-core"
-version = "0.22.1"
+version = "0.22.2"
 dependencies = [
  "async-stream",
  "futures",
@@ -1482,7 +1482,7 @@ dependencies = [
 
 [[package]]
 name = "daimon-macros"
-version = "0.22.1"
+version = "0.22.2"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1491,7 +1491,7 @@ dependencies = [
 
 [[package]]
 name = "daimon-plugin-opensearch"
-version = "0.22.1"
+version = "0.22.2"
 dependencies = [
  "daimon-core",
  "opensearch",
@@ -1503,7 +1503,7 @@ dependencies = [
 
 [[package]]
 name = "daimon-plugin-pgvector"
-version = "0.22.1"
+version = "0.22.2"
 dependencies = [
  "daimon-core",
  "deadpool-postgres",
@@ -1517,7 +1517,7 @@ dependencies = [
 
 [[package]]
 name = "daimon-provider-anthropic"
-version = "0.22.1"
+version = "0.22.2"
 dependencies = [
  "async-stream",
  "daimon-core",
@@ -1531,7 +1531,7 @@ dependencies = [
 
 [[package]]
 name = "daimon-provider-azure"
-version = "0.22.1"
+version = "0.22.2"
 dependencies = [
  "async-stream",
  "daimon-core",
@@ -1545,7 +1545,7 @@ dependencies = [
 
 [[package]]
 name = "daimon-provider-bedrock"
-version = "0.22.1"
+version = "0.22.2"
 dependencies = [
  "async-stream",
  "aws-config",
@@ -1562,7 +1562,7 @@ dependencies = [
 
 [[package]]
 name = "daimon-provider-gemini"
-version = "0.22.1"
+version = "0.22.2"
 dependencies = [
  "async-stream",
  "base64",
@@ -1577,14 +1577,14 @@ dependencies = [
 
 [[package]]
 name = "daimon-provider-llamacpp"
-version = "0.22.1"
+version = "0.22.2"
 dependencies = [
  "daimon-provider-local",
 ]
 
 [[package]]
 name = "daimon-provider-local"
-version = "0.22.1"
+version = "0.22.2"
 dependencies = [
  "async-stream",
  "daimon-core",
@@ -1599,7 +1599,7 @@ dependencies = [
 
 [[package]]
 name = "daimon-provider-openai"
-version = "0.22.1"
+version = "0.22.2"
 dependencies = [
  "async-stream",
  "daimon-core",
