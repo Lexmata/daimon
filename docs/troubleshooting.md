@@ -8,7 +8,7 @@ If you see errors about missing types or unresolved imports, you likely need to 
 
 ```toml
 # Enable only what you need
-daimon = { version = "0.22", features = ["anthropic", "bedrock", "pgvector"] }
+daimon = { version = "0.23", features = ["anthropic", "bedrock", "pgvector"] }
 ```
 
 To check which features are available:

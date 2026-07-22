@@ -243,7 +243,7 @@ let store = OpenSearchVectorStoreBuilder::new("http://localhost:9200", 1536)
 
 ```toml
 # Cargo.toml
-daimon-plugin-opensearch = { version = "0.22", features = ["aws-auth"] }
+daimon-plugin-opensearch = { version = "0.23", features = ["aws-auth"] }
 ```
 
 ```rust

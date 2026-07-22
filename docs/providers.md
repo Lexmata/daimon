@@ -497,19 +497,19 @@ let model = OpenAi::with_api_key("gpt-4o", api_key);
 ```toml
 [dependencies]
 # Default: openai, anthropic, ollama, macros
-daimon = "0.22"
+daimon = "0.23"
 
 # Minimal: only OpenAI
-daimon = { version = "0.22", default-features = false, features = ["openai"] }
+daimon = { version = "0.23", default-features = false, features = ["openai"] }
 
 # Add Gemini and Azure
-daimon = { version = "0.22", features = ["gemini", "azure"] }
+daimon = { version = "0.23", features = ["gemini", "azure"] }
 
 # Add OpenRouter
-daimon = { version = "0.22", features = ["openrouter"] }
+daimon = { version = "0.23", features = ["openrouter"] }
 
 # Full: all providers + MCP, SQLite, Redis, etc.
-daimon = { version = "0.22", features = ["full"] }
+daimon = { version = "0.23", features = ["full"] }
 ```
 
 | Feature | Enables |

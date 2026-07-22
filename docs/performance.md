@@ -10,7 +10,7 @@ This guide helps experienced developers squeeze maximum performance from the Dai
 
 ```toml
 [dependencies]
-daimon = { version = "0.22", default-features = false, features = ["bedrock", "macros"] }
+daimon = { version = "0.23", default-features = false, features = ["bedrock", "macros"] }
 ```
 
 ### Default vs Minimal

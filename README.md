@@ -22,7 +22,7 @@ Add Daimon to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-daimon = "0.22"
+daimon = "0.23"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -167,13 +167,13 @@ The core framework compiles with no features enabled. Enable only the providers 
 
 ```toml
 # Only Anthropic
-daimon = { version = "0.22", default-features = false, features = ["anthropic"] }
+daimon = { version = "0.23", default-features = false, features = ["anthropic"] }
 
 # All providers
-daimon = { version = "0.22", features = ["full"] }
+daimon = { version = "0.23", features = ["full"] }
 
 # Core only (bring your own Model impl)
-daimon = { version = "0.22", default-features = false }
+daimon = { version = "0.23", default-features = false }
 ```
 
 ## Provider Configuration
