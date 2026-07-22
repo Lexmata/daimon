@@ -545,15 +545,19 @@ A `HandoffNetwork` routes between agents. Wrap it in a `FnNode` to use it inside
 
 ```rust
 use daimon::agent::handoff::HandoffNetwork;
+use std::sync::Arc;
 
-let handoff = HandoffNetwork::builder()
-    .agent("a", agent_a)
-    .agent("b", agent_b)
-    .default_agent("a")
-    .build()?;
+// HandoffNetwork is not Clone, so share it via Arc.
+let handoff = Arc::new(
+    HandoffNetwork::builder()
+        .agent("a", agent_a)
+        .agent("b", agent_b)
+        .entry("a")
+        .build()?,
+);
 
 let handoff_node = FnNode::new(move |ctx| {
-    let h = handoff.clone();
+    let h = Arc::clone(&handoff);
     Box::pin(async move {
         let input = ctx.get_str("input").unwrap_or("").to_string();
         let response = h.run(&input).await?;

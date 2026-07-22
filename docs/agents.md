@@ -253,9 +253,11 @@ User Input
 
 ## Memory Deep-Dive
 
+All memory backends implement the `Memory` trait: `add_message(&Message)`, `get_messages()`, `clear()`, plus `with_messages(f)` — a borrowing read over the stored messages (`FnOnce(&[Message]) -> R`). In-process backends override `with_messages` to borrow their storage under the lock, so read-only consumers (serializing history, measuring it, rendering it) avoid an O(history) deep copy per call; the default implementation falls back to `get_messages`. Implement the same trait for a custom backend.
+
 ### SlidingWindowMemory
 
-Keeps only the most recent N messages in a `VecDeque`. When the window is exceeded, the oldest message is evicted. Default window: 50.
+Keeps only the most recent N messages in a `VecDeque`. When the window is exceeded, the oldest message is evicted — with one nuance: an assistant message carrying tool calls plus its contiguous following tool-result messages are evicted atomically (so tool results are never orphaned), and if such a group spans the whole window it is kept whole, temporarily exceeding N. Default window: 50.
 
 ```rust
 use daimon::memory::SlidingWindowMemory;
@@ -367,6 +369,57 @@ let agent = Agent::builder()
 
 ---
 
+### TieredMemory (core / archival / episodic)
+
+The backends above cover short-term conversation history. For longer-lived agents, `TieredMemory` composes a conversation backend with three optional sub-memories (a MemGPT/Letta-style model):
+
+- **CoreMemory** — a small set of bounded, always-in-context text blocks (persona, user preferences), rendered into the system prompt. A `CoreMemoryBlock` is `{ label, value, limit }` with `limit` in characters (optional). Built-ins: `InMemoryCoreMemory`, `SqliteCoreMemory` (feature `sqlite`).
+- **ArchivalMemory** — explicit write/search over a large fact store, decoupled from the turn-by-turn log: `insert(text, metadata) -> id`, `search(query, top_k) -> Vec<ArchivalRecord>`, `delete(id)`, `count()`. Built-ins: `InMemoryArchivalMemory` (lexical), `VectorArchivalMemory` (semantic — adapts any `VectorStore` + `EmbeddingModel`), `SqliteArchivalMemory` (FTS5, feature `sqlite`).
+- **EpisodicMemory** — a structured, timestamped event log (event type + JSON payload), distinct from chat messages: `record(event_type, payload) -> id`, `query(EpisodicQuery) -> Vec<EpisodicEvent>`, `clear()`. Built-ins: `InMemoryEpisodicMemory`, `SqliteEpisodicMemory` (feature `sqlite`).
+
+`TieredMemory` implements the same `Memory` trait by delegating to its conversation sub-memory, so it drops straight into `.memory()`:
+
+```rust
+use daimon::memory::{
+    InMemoryArchivalMemory, InMemoryCoreMemory, InMemoryEpisodicMemory,
+    SlidingWindowMemory, TieredMemory,
+};
+
+let memory = TieredMemory::new(SlidingWindowMemory::new(50))
+    .with_core(InMemoryCoreMemory::new())
+    .with_archival(InMemoryArchivalMemory::new())
+    .with_episodic(InMemoryEpisodicMemory::new());
+
+let agent = Agent::builder()
+    .model(model)
+    .memory(memory)  // conversation tier behaves like any Memory
+    .build()?;
+```
+
+Key points:
+
+- Only the conversation tier participates in the `Memory` trait, and `Memory::clear()` clears **only** the conversation log — archival facts and episodic events are long-term by design.
+- The agent runner does **not** read or write the sub-tiers automatically; your application wires them up. `TieredMemory::system_prompt_block().await?` renders the core blocks into a string you can splice into the system prompt (via `PromptTemplate` or `DynamicContext`), and archival/episodic search is typically exposed to the model as tools.
+- Core blocks are managed via `put_block` / `append_block` / `get_block` / `remove_block` / `blocks`.
+- The tier accessors (`.conversation()`, `.core()`, `.archival()`, `.episodic()`) return `Arc`s you can clone **before** handing the `TieredMemory` to the builder (`.memory()` consumes it). This is how you give a search tool or a prompt renderer ongoing access to a tier:
+
+```rust
+let memory = TieredMemory::new(SlidingWindowMemory::new(50))
+    .with_archival(InMemoryArchivalMemory::new());
+
+// Clone the erased handle before moving `memory` into the builder:
+let archival = memory.archival().unwrap().clone(); // Arc<dyn ErasedArchivalMemory>
+
+let agent = Agent::builder().model(model).memory(memory).build()?;
+
+// The clone shares the same store — usable for the agent's lifetime:
+let facts = archival.search_erased("user preferences", 5).await?;
+```
+
+**When to use:** Agents that run for days or weeks, assistants with persistent user preferences, or anything that needs to recall facts far beyond the conversation window.
+
+---
+
 ## Hooks
 
 The `AgentHook` trait provides lifecycle callbacks. All methods have default no-op implementations; override only what you need.
@@ -395,6 +448,8 @@ pub struct AgentState {
 
 ```rust
 use daimon::hooks::{AgentHook, AgentState};
+use daimon::tool::ToolCall;
+// (ChatResponse, Message, Result, etc. come from daimon::prelude)
 
 struct LoggingHook;
 
@@ -502,6 +557,8 @@ impl Middleware for LoggingMiddleware {
 ### Example: Rate Limiting (Short-Circuit)
 
 ```rust
+use daimon::model::types::StopReason;
+
 impl Middleware for RateLimitMiddleware {
     async fn on_request(&self, request: &mut ChatRequest) -> Result<MiddlewareAction> {
         if !self.limiter.try_acquire().await {
@@ -562,8 +619,11 @@ Rejects input whose estimated token count exceeds a limit. Uses ~4 chars per tok
 ```rust
 use daimon::guardrails::MaxTokenGuardrail;
 
-let guard = MaxTokenGuardrail::new(4096);
-agent.input_guardrail(guard);
+// Guardrails are registered on the builder:
+let agent = Agent::builder()
+    .model(model)
+    .input_guardrail(MaxTokenGuardrail::new(4096))
+    .build()?;
 ```
 
 #### RegexFilterGuardrail
@@ -591,13 +651,15 @@ Uses an LLM to evaluate content against a policy. The model must respond with `P
 ```rust
 use daimon::guardrails::ContentPolicyGuardrail;
 
-let guard = ContentPolicyGuardrail::new(
-    model.clone(),
-    "No hate speech, threats, or illegal content.",
-);
+let policy = "No hate speech, threats, or illegal content.";
 
-agent.input_guardrail(guard.clone());
-agent.output_guardrail(guard);
+// Guardrails are registered on the builder. ContentPolicyGuardrail is not
+// Clone, so construct one per direction:
+let agent = Agent::builder()
+    .model(model)
+    .input_guardrail(ContentPolicyGuardrail::new(model.clone(), policy))
+    .output_guardrail(ContentPolicyGuardrail::new(model.clone(), policy))
+    .build()?;
 ```
 
 ---
@@ -626,7 +688,7 @@ pub enum TokenDirection {
 
 ### CostTracker
 
-Created automatically when you set `cost_model`. Tracks cumulative cost across iterations. `record(model_id, usage)` adds to the total; `cumulative_cost()` returns USD spent. Reset at the start of each `prompt` call.
+Created automatically when you set `cost_model`. Tracks cumulative cost across iterations. `record(model_id, usage)` adds to the total; `cumulative_cost()` returns USD spent. A fresh tracker is created at the start of each `prompt` call, so reported cost is per-prompt and concurrent runs account spend independently.
 
 ### Example
 

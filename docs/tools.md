@@ -119,7 +119,7 @@ Ok(ToolOutput::json(&serde_json::json!({
 Ok(ToolOutput::error("Division by zero"))
 ```
 
-Errors returned as `ToolOutput::error(...)` are passed back to the model as tool results, so the agent can recover. Use `Err(...)` for unrecoverable failures that abort the loop.
+Errors returned as `ToolOutput::error(...)` are passed back to the model as tool results, so the agent can recover. Returning `Err(...)` from `execute` behaves the same way — the agent converts it into an error tool result that is fed back to the model; it does **not** abort the loop. Prefer `ToolOutput::error(...)` for model-correctable failures and reserve `Err(...)` for internal errors (it is also what a retry policy matches against).
 
 ---
 
@@ -178,13 +178,13 @@ let agent = Agent::builder()
 ### Attributes
 
 ```rust
-#[tool_fn(name = "custom_name")]
-#[tool_fn(description = "Override the description")]
-#[tool_fn(crate_path = "::my_crate::daimon")]
+#[tool_fn(name = "custom_name", description = "Override the description", crate_path = "::my_crate::daimon")]
 async fn my_tool(query: String) -> daimon::Result<ToolOutput> {
     Ok(ToolOutput::text(query))
 }
 ```
+
+All options go in a **single** `#[tool_fn(...)]` attribute, comma-separated. Stacking multiple `#[tool_fn(...)]` attributes does not work: the first macro invocation consumes the item and the rest are silently discarded.
 
 | Attribute | Purpose |
 |-----------|---------|
@@ -275,7 +275,7 @@ registry.warm_cache();  // Pre-compiles validators and tool specs
 
 ### Generation-based cache invalidation
 
-`tool_specs()` returns cached specs when the registry is unchanged. When tools are registered or unregistered, the generation counter increments and the cache is invalidated. Use `tool_specs_mut()` when you have `&mut self` to persist the computed specs into the cache.
+`tool_specs()` returns cached specs when the registry is unchanged, and populates the cache lazily on first call (even through `&self`, via interior mutability). When tools are registered or unregistered, the generation counter increments and the cache is invalidated. `tool_specs_mut()` is a legacy alias for `tool_specs()` kept for backward compatibility.
 
 ### Unregistering
 
@@ -293,8 +293,8 @@ When `validate_tool_inputs` is enabled (default), the agent validates each tool 
 
 `ToolRegistry::validate_input(tool_name, input)` returns:
 
-- `None` — Input is valid (or tool not found; validation is skipped).
-- `Some(errors)` — Validation failed. `errors` is a string describing the issues.
+- `None` — Input is valid.
+- `Some(errors)` — Validation failed, the tool is unknown (`tool '<name>' not found in registry`), or its schema failed to compile. `errors` is a string describing the issues.
 
 Validation uses the `jsonschema` crate. Validators are compiled once and cached when you call `warm_cache()` or `compile_validators()`.
 
@@ -468,6 +468,14 @@ let agent = builder.build()?;
 
 `McpClient::tools()` returns `Vec<McpToolBridge>`. Each bridge implements `Tool` and forwards calls to the MCP server. Name, description, and input schema come from the server's `tools/list` response.
 
+### Managing the connection
+
+Bridges also expose the underlying transport, which is useful for lifecycle management and diagnostics:
+
+- `bridge.transport()` — the shared `Arc<dyn McpTransport>` behind the bridge.
+- `bridge.close().await?` — orderly shutdown of the connection (e.g. reaping a stdio child process instead of relying on process teardown). The transport is shared by every bridge from the same server, so closing one bridge closes the connection for all of them; the built-in transports tolerate repeated calls, so closing once per bridge is safe (just redundant).
+- `client.close().await?` — shut the whole client down at once.
+
 ---
 
 ## AgentTool
@@ -555,7 +563,7 @@ Or implement `retry_policy()` on the tool for service-specific behavior.
 
 ### 5. Use `ToolOutput::error` for recoverable failures
 
-When the model can correct (e.g., bad arguments, validation), return `Ok(ToolOutput::error(...))`. Reserve `Err(...)` for unrecoverable failures that should abort the loop.
+When the model can correct (e.g., bad arguments, validation), return `Ok(ToolOutput::error(...))`. Returning `Err(...)` does not abort the loop either — the agent converts it into an error tool result for the model — so reserve it for internal/unexpected failures (and note that retry policies match on the error string).
 
 ### 6. Document parameters in schemas
 

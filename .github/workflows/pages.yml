@@ -33,17 +33,15 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
         with:
-          version: 10
+          # Honors packageManager (pnpm@10.29.2) in web/package.json
+          package_json_file: web/package.json
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
         working-directory: web
 
-      - name: Sync docs to public assets
-        run: cp docs/*.md web/public/docs/
-
-      - name: Build Angular SSG
-        run: pnpm ng build --configuration production
+      - name: Build Astro site
+        run: pnpm build
         working-directory: web
 
       - name: Setup Pages
@@ -52,7 +50,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v5
         with:
-          path: web/dist/web/browser
+          path: web/dist
 
   deploy:
     environment:

@@ -265,7 +265,7 @@ let model = AzureOpenAi::with_api_key(
 
 **Endpoint format:** `{resource_url}/openai/deployments/{deployment}/chat/completions?api-version=...`
 
-**Capabilities:** Same as OpenAI — tool calls, streaming, JSON mode. Caching: system message caching (same as OpenAI).
+**Capabilities:** Tool calls and streaming, like OpenAI — but note there is no `.with_response_format()` / JSON-mode knob and no `.with_parallel_tool_calls()` on this provider (unlike OpenAI). Caching: system message caching (same as OpenAI).
 
 ### Embedding
 
@@ -372,6 +372,7 @@ use daimon::prelude::*;
 use daimon::agent::hot_swap::HotSwapAgent;
 use daimon::model::openai::OpenAi;
 use daimon::model::anthropic::Anthropic;
+use std::sync::Arc;
 
 let agent = Agent::builder()
     .model(OpenAi::new("gpt-4o"))
@@ -407,14 +408,14 @@ let base = Agent::builder()
 // Variant A: different model
 let variant_a = base.fork_builder()
     .model(Anthropic::new("claude-sonnet-5"))
-    .build();
+    .build()?;
 
 // Variant B: different system prompt
 let variant_b = base.fork_builder()
     .system_prompt("You are a code reviewer. Be strict.")
     .remove_tool("search")
     .tool(ReviewTool)
-    .build();
+    .build()?;
 
 // Run both and compare
 let resp_a = variant_a.prompt("Review this code").await?;
@@ -444,7 +445,7 @@ All providers support reading API keys from the environment. Set these before ru
 |----------|----------|
 | OpenAI | `OPENAI_API_KEY` |
 | Anthropic | `ANTHROPIC_API_KEY` |
-| Ollama | `OLLAMA_HOST` (optional; default `http://localhost:11434`) |
+| Ollama | `OLLAMA_HOST` (embedding provider only; default `http://localhost:11434` — chat uses `.with_base_url()`) |
 | Gemini | `GOOGLE_API_KEY` |
 | Azure OpenAI | `AZURE_OPENAI_API_KEY` |
 | Bedrock | AWS credentials (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`) or IAM role |
@@ -466,16 +467,16 @@ let model = OpenAi::with_api_key("gpt-4o", api_key);
 ```toml
 [dependencies]
 # Default: openai, anthropic, ollama, macros
-daimon = "0.16"
+daimon = "0.22"
 
 # Minimal: only OpenAI
-daimon = { version = "0.16", default-features = false, features = ["openai"] }
+daimon = { version = "0.22", default-features = false, features = ["openai"] }
 
 # Add Gemini and Azure
-daimon = { version = "0.16", features = ["gemini", "azure"] }
+daimon = { version = "0.22", features = ["gemini", "azure"] }
 
 # Full: all providers + MCP, SQLite, Redis, etc.
-daimon = { version = "0.16", features = ["full"] }
+daimon = { version = "0.22", features = ["full"] }
 ```
 
 | Feature | Enables |

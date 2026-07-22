@@ -1,0 +1,90 @@
+---
+import { getCollection } from 'astro:content';
+import Icon from './Icon.astro';
+import { withBase } from '../lib/base';
+import { buildNav } from '../lib/docs';
+
+interface Props {
+  activeSlug: string;
+}
+
+const { activeSlug } = Astro.props;
+const navSections = buildNav(await getCollection('docs'));
+---
+
+<aside
+  id="doc-sidebar"
+  class="fixed inset-y-0 left-0 z-40 w-64 flex flex-col bg-surface-light border-r border-border transition-transform duration-300 ease-in-out -translate-x-full lg:translate-x-0 lg:static lg:z-auto"
+>
+  <div
+    class="flex h-16 items-center justify-between px-6 border-b border-border lg:justify-center"
+  >
+    <a
+      href={withBase('/')}
+      class="text-xl font-bold text-text hover:text-primary transition-colors"
+    >
+      Daimon
+    </a>
+    <button
+      type="button"
+      id="sidebar-close"
+      class="lg:hidden p-2 rounded-md text-text-muted hover:text-text hover:bg-surface-lighter transition-colors"
+      aria-label="Close sidebar"
+    >
+      <Icon name="xmark" />
+    </button>
+  </div>
+
+  <nav class="flex-1 overflow-y-auto py-4 px-3">
+    {
+      navSections.map((section) => (
+        <div class="mb-6">
+          <h3 class="px-3 mb-2 text-xs font-semibold uppercase tracking-wider text-text-muted">
+            {section.title}
+          </h3>
+          <ul class="space-y-1">
+            {section.links.map((link) => (
+              <li>
+                <a
+                  href={withBase(`/docs/${link.slug}/`)}
+                  aria-current={link.slug === activeSlug ? 'page' : undefined}
+                  class:list={[
+                    'flex items-center gap-3 px-3 py-2 rounded-md border-l-2 transition-colors',
+                    link.slug === activeSlug
+                      ? 'bg-surface-lighter text-primary border-primary'
+                      : 'text-text hover:bg-surface-lighter hover:text-primary border-transparent',
+                  ]}
+                >
+                  <Icon name={link.icon} class="w-4 h-4 shrink-0" />
+                  <span>{link.label}</span>
+                </a>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))
+    }
+  </nav>
+</aside>
+
+<div id="sidebar-overlay" class="fixed inset-0 z-30 bg-black/50 lg:hidden hidden" aria-hidden="true">
+</div>
+
+<script>
+  const sidebar = document.getElementById('doc-sidebar');
+  const overlay = document.getElementById('sidebar-overlay');
+  const toggle = document.getElementById('menu-toggle');
+  const close = document.getElementById('sidebar-close');
+
+  const setOpen = (open: boolean) => {
+    sidebar?.classList.toggle('translate-x-0', open);
+    sidebar?.classList.toggle('-translate-x-full', !open);
+    overlay?.classList.toggle('hidden', !open);
+  };
+
+  toggle?.addEventListener('click', () =>
+    setOpen(sidebar?.classList.contains('-translate-x-full') ?? false),
+  );
+  close?.addEventListener('click', () => setOpen(false));
+  overlay?.addEventListener('click', () => setOpen(false));
+</script>

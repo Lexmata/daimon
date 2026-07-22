@@ -1,0 +1,20 @@
+---
+import { icons, type IconName } from '../lib/icons';
+
+interface Props {
+  name: IconName;
+  class?: string;
+}
+
+const { name, class: className } = Astro.props;
+const [width, height, , , path] = icons[name].icon;
+const d = Array.isArray(path) ? path.join(' ') : path;
+---
+
+<svg
+  class:list={['fa-icon', className]}
+  viewBox={`0 0 ${width} ${height}`}
+  fill="currentColor"
+  aria-hidden="true"
+  ><path d={d}></path></svg
+>

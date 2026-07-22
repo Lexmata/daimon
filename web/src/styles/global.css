@@ -1,5 +1,4 @@
 @import "tailwindcss";
-@import "highlight.js/styles/github-dark.min.css";
 
 @theme {
   --color-primary: #f97316;
@@ -45,6 +44,14 @@
   ::-webkit-scrollbar-thumb:hover {
     background: var(--color-text-muted);
   }
+
+  /* Font Awesome SVGs rendered by Icon.astro: size like the old <fa-icon>
+     font glyphs (1em tall, width from the icon's aspect ratio). */
+  svg.fa-icon {
+    height: 1em;
+    display: inline-block;
+    vertical-align: -0.125em;
+  }
 }
 
 @layer components {
@@ -87,6 +94,15 @@
     margin-top: 1.5rem;
     margin-bottom: 0.5rem;
     color: var(--color-text);
+  }
+
+  /* Headings carry ids (anchors); offset them below the sticky header when
+     targeted via #fragment links. */
+  .prose h1[id],
+  .prose h2[id],
+  .prose h3[id],
+  .prose h4[id] {
+    scroll-margin-top: 5rem;
   }
 
   .prose p {

@@ -10,7 +10,7 @@ This guide helps experienced developers squeeze maximum performance from the Dai
 
 ```toml
 [dependencies]
-daimon = { version = "0.16", default-features = false, features = ["bedrock", "macros"] }
+daimon = { version = "0.22", default-features = false, features = ["bedrock", "macros"] }
 ```
 
 ### Default vs Minimal
@@ -97,9 +97,9 @@ use daimon::memory::TokenWindowMemory;
 
 let memory = TokenWindowMemory::new(4000);
 
-// Custom tokenizer for accuracy
+// Custom tokenizer for accuracy (Message.content is Option<String>)
 let memory = TokenWindowMemory::new(4000)
-    .with_token_counter(|msg| my_tokenizer.count(&msg.content.unwrap_or_default()));
+    .with_token_counter(|msg| my_tokenizer.count(msg.content.as_deref().unwrap_or("")));
 ```
 
 ### SummaryMemory
@@ -147,15 +147,15 @@ Otherwise → SlidingWindowMemory(50)
 - Called at build time (when constructing the agent). Pre-compiles JSON Schema validators and caches tool specs.
 - **Generation-based invalidation:** Specs are recomputed only when tools are registered or unregistered.
 
-### Benchmark: Cached vs Uncached
+### Benchmark: Tool Registry (50 tools)
 
-| Operation | Uncached | Cached | Improvement |
-|-----------|----------|--------|-------------|
-| `tool_specs()` (50 tools) | ~7.2 µs | ~10 ns | **~720×** |
-| `validate_input()` | — | ~14 ns | — |
-| `get("tool_25")` | — | ~11 ns | — |
+| Operation | Time | Notes |
+|-----------|------|-------|
+| `tool_specs()` | ~15 ns | After first call — the cache is lazy (interior mutability), so even an "uncached" registry only pays spec generation once |
+| `validate_input()` | ~13 ns | With pre-compiled validators (`warm_cache()`) |
+| `get("tool_25")` | ~10 ns | HashMap lookup |
 
-For 50+ tools, the cached specs make a measurable difference. Without `warm_cache()`, every iteration pays the uncached cost.
+Spec caching no longer needs `warm_cache()`: `tool_specs()` populates the cache on first call even through `&self`, and the ReAct loop calls it once per `prompt()` run (outside the iteration loop), so only the first call pays spec generation. What genuinely requires `warm_cache()` (or `compile_validators()`) is JSON Schema **validator** precompilation: without it, `validate_input()` compiles the schema on every call. `Agent::builder().build()` calls `warm_cache()` for you, so the uncached path only matters for hand-rolled `ToolRegistry` usage.
 
 ### Usage
 
@@ -214,7 +214,7 @@ impl Middleware for LoggingMiddleware {
 
 ## Parallel Tool Execution
 
-- Tools within a **single iteration** run in parallel via `tokio::task::JoinSet`.
+- Tools within a **single iteration** run in parallel via `tokio::task::JoinSet` (non-streaming `prompt()`; the streaming loop in `prompt_stream()` executes them sequentially).
 - If your tools are **I/O bound** (API calls, DB queries), this is a significant win. Multiple tool calls in one turn complete in roughly the time of the slowest call, not the sum.
 - If tools are **CPU-bound**, consider `tokio::task::spawn_blocking` inside the tool to avoid starving the async runtime:
 
@@ -237,8 +237,8 @@ async fn execute(&self, input: &Value) -> Result<ToolOutput> {
 | Component | Pool Implementation | Default | Tuning |
 |-----------|---------------------|---------|--------|
 | pgvector | `deadpool-postgres` | 16 | `pool_size(n)` |
-| OpenSearch | `opensearch-rs` (reqwest) | Built-in | Transport config |
-| Redis | `redis` + `tokio-comp` | Connection per operation | Connection pool in redis crate |
+| OpenSearch | `opensearch` crate (reqwest) | Built-in | Transport config |
+| Redis | `redis` ConnectionManager | Multiplexed, auto-reconnect | Shared per `RedisMemory` |
 | HTTP providers | reqwest | Built-in | Per-client, shared across requests |
 
 ### pgvector
@@ -252,25 +252,25 @@ let store = PgVectorStoreBuilder::new("postgresql://...", 1536)
 
 ### HTTP Providers
 
-OpenAI, Anthropic, Gemini, Azure, and Bedrock all use `reqwest`, which maintains connection pooling per client. **Reuse the same model instance** across requests—do not create a new `OpenAi` or `Anthropic` for every prompt.
+OpenAI, Anthropic, Gemini, Azure, and the local providers all use `reqwest`, which maintains connection pooling per client (Bedrock uses the AWS SDK instead, with its own connection management). **Reuse the same model instance** across requests—do not create a new `OpenAi` or `Anthropic` for every prompt.
 
 ```rust
 // Good: single model, shared across requests
 let model = Arc::new(OpenAi::new("gpt-4o").with_timeout(Duration::from_secs(60)));
-let agent = Agent::builder().model(Arc::clone(&model)).build()?;
+let agent = Agent::builder().shared_model(Arc::clone(&model)).build()?;
 // Reuse agent for many prompts
 ```
 
 ### Redis
 
-The `redis` crate with `tokio-comp` and `aio` features provides async connection handling. For high throughput, use a connection pool (e.g., `deadpool`-style or connection multiplexing) if your Redis client supports it.
+The `redis` crate is enabled with `tokio-comp`, `aio`, and `connection-manager` features. `RedisMemory` (and the Redis broker/checkpoint stores) use `redis::aio::ConnectionManager` — a single multiplexed, auto-reconnecting connection — so connection management is built in; no external pool is needed.
 
 ---
 
 ## Cost Control
 
 - **`max_budget`** — Set a dollar limit per prompt. Checked every iteration; aborts with `DaimonError::BudgetExceeded`.
-- **`CostTracker`** — Tracks cost per prompt (reset at each `prompt()` call). Sum `AgentResponse.cost` for session-level tracking.
+- **`CostTracker`** — A fresh tracker is created for each `prompt()` run, so cost is per-prompt. Sum `AgentResponse.cost` for session-level tracking.
 - **Streaming:** `StreamEvent::Usage { iteration, input_tokens, output_tokens, estimated_cost }` gives per-iteration estimates.
 - **Streaming cost** is estimated (input_chars/4 + output_chars/4). Non-streaming cost is exact from the API `usage` field.
 
@@ -284,7 +284,7 @@ let agent = Agent::builder()
 
 ### Cost Tracking Across Multiple Prompts
 
-The agent's `CostTracker` is reset at the start of each `prompt()` call. For session-level or batch-level tracking, sum `AgentResponse.cost` from each call:
+Each `prompt()` call gets a fresh `CostTracker` seeded from the shared cost model, so cost is tracked per prompt (and concurrent prompts account spend independently). For session-level or batch-level tracking, sum `AgentResponse.cost` from each call:
 
 ```rust
 let agent = Agent::builder()
@@ -303,7 +303,7 @@ for task in tasks {
 
 ### Streaming Cost Estimates
 
-In `prompt_stream()`, `StreamEvent::Usage` is emitted after each ReAct iteration. The `estimated_cost` uses character-based token estimation (~4 chars/token) when the API does not return exact counts. For precise tracking, prefer non-streaming or use the final `AgentResponse.cost` after the stream completes.
+In `prompt_stream()`, `StreamEvent::Usage` is emitted after each ReAct iteration. The `estimated_cost` uses character-based token estimation (~4 chars/token) when the API does not return exact counts. Note the streaming path yields no `AgentResponse` — for precise totals, sum the `estimated_cost` across `Usage` events, or use `prompt()` and read `AgentResponse.cost`.
 
 ---
 
@@ -353,25 +353,29 @@ The framework includes a `criterion` benchmark suite. Run with:
 cargo bench
 ```
 
-### Key Results (v0.16.0)
+### Key Results (v0.22.3)
 
 | Benchmark | Time | Notes |
 |-----------|------|-------|
-| `agent_prompt_simple` | ~1.9 µs | Mock model, no network |
+| `agent_prompt_simple` | ~2.0 µs | Mock model, no network |
 | `agent_prompt_with_tools` | ~2.0 µs | One tool, mock model |
-| `memory_sliding_window_50` | ~7.3 µs | Add 100, get 50 |
-| `memory_token_window_1000` | ~12 µs | Add 100, get within budget |
-| `tool_registry_specs_50_uncached` | ~7.2 µs | Spec generation |
-| `tool_registry_specs_50_cached` | ~10 ns | Cached Arc clone |
-| `tool_registry_lookup_50` | ~11 ns | HashMap lookup |
-| `chain_3_transforms` | ~216 ns | 3-step chain |
-| `dag_fan_out_3_merge` | ~9.4 µs | 3-way fan-out + merge |
+| `memory_sliding_window_50` | ~7.8 µs | Add 100, get 50 |
+| `memory_token_window_1000` | ~11 µs | Add 100, get within budget |
+| `tool_registry_specs_50_uncached` | ~15 ns | Lazy cache: only the first call pays generation |
+| `tool_registry_specs_50_cached` | ~15 ns | Cached read |
+| `tool_registry_validate_cached` | ~13 ns | Pre-compiled validators |
+| `tool_registry_lookup_50` | ~10 ns | HashMap lookup |
+| `chain_3_transforms` | ~212 ns | 3-step chain |
+| `dag_fan_out_3_merge` | ~8.8 µs | 3-way fan-out + merge |
 | `hot_swap_prompt_simple` | ~1.9 µs | HotSwapAgent overhead |
-| `hot_swap_swap_model` | ~131 ns | Model swap |
-| `broker_submit_receive_complete` | ~607 ns | InProcessBroker round-trip |
-| `checkpoint_save_load_memory` | — | In-memory checkpoint baseline |
+| `hot_swap_swap_model` | ~182 ns | Model swap |
+| `broker_submit_receive_complete` | ~633 ns | InProcessBroker round-trip |
+| `event_bus_publish_receive` | ~136 ns | Streaming event bus |
+| `checkpoint_save_load_memory` | ~291 ns | In-memory checkpoint baseline |
+| `stream_event_serialize` / `stream_event_deserialize` | ~56 ns / ~70 ns | `SerializableStreamEvent` JSON round-trip |
+| `token_estimate_4500_chars` | ~183 ps | ~4 chars/token estimator |
 
-*Note: Agent benchmarks use a mock model with no network I/O. Real latency is dominated by LLM API calls.*
+*Note: Agent benchmarks use a mock model with no network I/O. Real latency is dominated by LLM API calls. Numbers are from a single development machine — re-run `cargo bench` for figures on your hardware.*
 
 ---
 
@@ -430,7 +434,7 @@ cargo bench
   - `Cancelled` — user or timeout cancelled the run
   - `ToolExecution { tool, message }` — tool returned an error
   - `GuardrailBlocked(msg)` — input or output guardrail rejected
-  - `ModelError`, `Serialization`, etc.
+  - `Model(msg)`, `Serialization(_)`, `Storage { message, transient }`, etc. (the enum is `#[non_exhaustive]` — include a wildcard arm)
 
 ```rust
 match agent.prompt(input).await {
