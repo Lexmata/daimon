@@ -1501,6 +1501,7 @@ dependencies = [
  "daimon-provider-gemini",
  "daimon-provider-local",
  "daimon-provider-openai",
+ "daimon-provider-openrouter",
  "futures",
  "itoa",
  "jsonschema",
@@ -1665,6 +1666,20 @@ dependencies = [
 
 [[package]]
 name = "daimon-provider-openai"
+version = "0.22.3"
+dependencies = [
+ "async-stream",
+ "daimon-core",
+ "futures",
+ "reqwest 0.13.4",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "daimon-provider-openrouter"
 version = "0.22.3"
 dependencies = [
  "async-stream",

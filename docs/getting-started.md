@@ -24,6 +24,7 @@ Optional providers and plugins:
 |-----------|--------------------------------|
 | `gemini`  | Google Gemini / Vertex AI      |
 | `azure`   | Azure OpenAI Service           |
+| `openrouter` | OpenRouter multi-model gateway |
 | `bedrock` | AWS Bedrock                    |
 | `pgvector`| pgvector-backed vector store   |
 | `opensearch` | OpenSearch k-NN vector store |
