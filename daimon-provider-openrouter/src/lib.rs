@@ -411,6 +411,14 @@ fn handle_openrouter_sse_line(state: &mut OpenRouterStreamState, line: &str) -> 
     let chunk = match serde_json::from_str::<OpenRouterStreamChunk>(data) {
         Ok(chunk) => chunk,
         Err(e) => {
+            // OpenRouter can deliver errors in-band as
+            // `data: {"error": {"message": ..., "code": ...}}` — e.g. when an
+            // upstream provider fails mid-stream. Surface them instead of
+            // letting the stream end silently with a truncated response.
+            if let Ok(err) = serde_json::from_str::<OpenRouterStreamError>(data) {
+                events.push(StreamEvent::Error(err.error.message));
+                return events;
+            }
             tracing::debug!(error = %e, "dropping undeserializable OpenRouter SSE event");
             return events;
         }
@@ -676,6 +684,19 @@ struct OpenRouterPromptTokensDetails {
 #[derive(Deserialize)]
 struct OpenRouterStreamChunk {
     choices: Vec<OpenRouterStreamChoice>,
+}
+
+/// In-band error payload OpenRouter emits inside the SSE stream (as opposed
+/// to a non-200 response), typically when an upstream provider fails
+/// mid-generation. Only `message` is needed; `code`/`metadata` are ignored.
+#[derive(Deserialize)]
+struct OpenRouterStreamError {
+    error: OpenRouterStreamErrorBody,
+}
+
+#[derive(Deserialize)]
+struct OpenRouterStreamErrorBody {
+    message: String,
 }
 
 #[derive(Deserialize)]
@@ -1094,5 +1115,26 @@ mod tests {
         let mut state = OpenRouterStreamState::default();
         let events = feed(&mut state, &["data: {not json"]);
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_stream_in_band_error_payload_is_surfaced() {
+        // OpenRouter delivers mid-stream errors as
+        // `data: {"error": {"message": ..., "code": ...}}`; they must reach
+        // the consumer as an error event, not vanish into the drop path.
+        let mut state = OpenRouterStreamState::default();
+        let events = feed(
+            &mut state,
+            &[
+                r#"data: {"choices":[{"delta":{"content":"partial"}}]}"#,
+                r#"data: {"error":{"message":"upstream provider error","code":502}}"#,
+            ],
+        );
+        assert_eq!(events.len(), 2, "got {events:?}");
+        assert!(matches!(&events[0], StreamEvent::TextDelta(t) if t == "partial"));
+        assert!(
+            matches!(&events[1], StreamEvent::Error(msg) if msg == "upstream provider error"),
+            "in-band error must surface as StreamEvent::Error: {events:?}"
+        );
     }
 }
