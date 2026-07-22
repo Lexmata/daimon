@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **OpenRouter provider:** new `daimon-provider-openrouter` crate behind the
+  `openrouter` feature (also in `full`). `OpenRouter` implements `Model`
+  against OpenRouter's OpenAI-compatible Chat Completions API — one API key
+  (`OPENROUTER_API_KEY`) for hundreds of models in `vendor/model` form
+  (e.g. `openai/gpt-4o`, `anthropic/claude-sonnet-4`). Supports streaming,
+  tool calls, retries with exponential backoff, `with_response_format`,
+  `with_parallel_tool_calls`, and the `HTTP-Referer`/`X-Title` attribution
+  headers via `with_site_url`/`with_app_name`. Facade re-export at
+  `daimon::model::openrouter`; new `openrouter_agent` example.
+
 ## [0.22.3] - 2026-07-22
 
 ### Changed

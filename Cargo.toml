@@ -9,6 +9,7 @@ members = [
     "daimon-provider-llamacpp",
     "daimon-provider-openai",
     "daimon-provider-anthropic",
+    "daimon-provider-openrouter",
     "daimon-plugin-pgvector",
     "daimon-plugin-opensearch",
 ]
@@ -32,6 +33,7 @@ daimon-provider-azure = { path = "daimon-provider-azure", version = "0.22.3" }
 daimon-provider-llamacpp = { path = "daimon-provider-llamacpp", version = "0.22.3" }
 daimon-provider-openai = { path = "daimon-provider-openai", version = "0.22.3" }
 daimon-provider-anthropic = { path = "daimon-provider-anthropic", version = "0.22.3" }
+daimon-provider-openrouter = { path = "daimon-provider-openrouter", version = "0.22.3" }
 daimon-plugin-pgvector = { path = "daimon-plugin-pgvector", version = "0.22.3" }
 daimon-plugin-opensearch = { path = "daimon-plugin-opensearch", version = "0.22.3" }
 tokio = { version = "1" }
@@ -69,6 +71,7 @@ anthropic = ["dep:daimon-provider-anthropic"]
 a2a = ["dep:reqwest"]
 gemini = ["dep:daimon-provider-gemini"]
 azure = ["dep:daimon-provider-azure"]
+openrouter = ["dep:daimon-provider-openrouter"]
 llamacpp = ["dep:daimon-provider-local"]
 bedrock = ["dep:daimon-provider-bedrock"]
 sqs = ["bedrock", "daimon-provider-bedrock/sqs"]
@@ -89,7 +92,7 @@ pgvector = ["dep:daimon-plugin-pgvector"]
 opensearch = ["dep:daimon-plugin-opensearch"]
 grpc = ["dep:tonic", "dep:prost", "dep:tonic-prost"]
 eval = []
-full = ["openai", "anthropic", "a2a", "gemini", "azure", "bedrock", "ollama", "llamacpp", "llamars", "local", "macros", "mcp", "sqlite", "redis", "nats", "amqp", "otel", "http-server", "qdrant", "pgvector", "opensearch", "grpc", "eval", "sqs", "pubsub", "servicebus"]
+full = ["openai", "anthropic", "a2a", "gemini", "azure", "openrouter", "bedrock", "ollama", "llamacpp", "llamars", "local", "macros", "mcp", "sqlite", "redis", "nats", "amqp", "otel", "http-server", "qdrant", "pgvector", "opensearch", "grpc", "eval", "sqs", "pubsub", "servicebus"]
 
 [dependencies]
 daimon-core = { workspace = true }
@@ -114,6 +117,7 @@ daimon-provider-azure = { workspace = true, optional = true }
 daimon-provider-local = { workspace = true, optional = true }
 daimon-provider-openai = { workspace = true, optional = true }
 daimon-provider-anthropic = { workspace = true, optional = true }
+daimon-provider-openrouter = { workspace = true, optional = true }
 daimon-plugin-pgvector = { workspace = true, optional = true }
 daimon-plugin-opensearch = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
@@ -177,6 +181,11 @@ required-features = ["gemini"]
 name = "azure_agent"
 path = "examples/azure_agent.rs"
 required-features = ["azure"]
+
+[[example]]
+name = "openrouter_agent"
+path = "examples/openrouter_agent.rs"
+required-features = ["openrouter"]
 
 [[example]]
 name = "ollama_agent"

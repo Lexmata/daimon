@@ -2,8 +2,8 @@
 //!
 //! Implement [`Model`] (from [`daimon_core`]) to add new providers. Built-in providers
 //! ship as separate crates (each behind a feature flag): `openai`, `anthropic`,
-//! `gemini`, `azure`, `bedrock`. `ollama`, `llamacpp`, `llamars`, and `local` are
-//! all aliases into one shared `daimon-provider-local` crate.
+//! `gemini`, `azure`, `bedrock`, `openrouter`. `ollama`, `llamacpp`, `llamars`, and
+//! `local` are all aliases into one shared `daimon-provider-local` crate.
 
 mod traits;
 pub mod types;
@@ -40,6 +40,12 @@ pub mod azure {
 pub mod bedrock {
     //! Amazon Bedrock model provider (via [`daimon_provider_bedrock`]).
     pub use daimon_provider_bedrock::*;
+}
+
+#[cfg(feature = "openrouter")]
+pub mod openrouter {
+    //! OpenRouter model provider (via [`daimon_provider_openrouter`]).
+    pub use daimon_provider_openrouter::*;
 }
 
 #[cfg(any(
