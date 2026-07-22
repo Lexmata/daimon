@@ -88,6 +88,10 @@ impl Memory for RedisMemory {
         Ok(())
     }
 
+    // `with_messages` deliberately keeps the trait default: get_messages
+    // performs Redis IO (LLEN + incremental LRANGE) to refresh the local
+    // cache before returning, and duplicating that refresh logic to borrow
+    // the cache isn't worth it.
     async fn get_messages(&self) -> Result<Vec<Message>> {
         use redis::AsyncCommands;
 

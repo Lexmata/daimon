@@ -122,6 +122,9 @@ impl Memory for SqliteMemory {
         .map_err(|e| DaimonError::Other(format!("spawn_blocking: {e}")))?
     }
 
+    // `with_messages` deliberately keeps the trait default: get_messages
+    // materializes rows from SQLite on every call, so there is no in-process
+    // `&[Message]` storage to borrow.
     async fn get_messages(&self) -> Result<Vec<Message>> {
         let conn = self.conn.clone();
         let session_id = self.session_id.clone();
