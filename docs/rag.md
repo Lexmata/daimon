@@ -91,7 +91,8 @@ Uses `OLLAMA_HOST` (default `http://localhost:11434`) if not overridden. Feature
 use daimon::model::bedrock::BedrockEmbedding;
 use std::sync::Arc;
 
-// Titan Embeddings (amazon.titan-embed-text-v2:0) or Cohere
+// Titan Embeddings only (e.g. amazon.titan-embed-text-v2:0) — the request/
+// response wire format is Titan-specific; Cohere Embed is not supported.
 let embed = Arc::new(
     BedrockEmbedding::new("amazon.titan-embed-text-v2:0")
         .with_region("us-east-1")
@@ -157,7 +158,7 @@ No feature flag required. Data is lost when the process exits.
 `QdrantRetriever` implements `Retriever` directly (not `VectorStore`). It embeds queries and searches a Qdrant collection. You must ingest documents into Qdrant separately (e.g. via Qdrant SDK or another pipeline).
 
 ```rust
-use daimon::retriever::QdrantRetriever;
+use daimon::retriever::qdrant::QdrantRetriever;  // also re-exported via daimon::prelude
 use std::sync::Arc;
 
 let retriever = QdrantRetriever::new(
@@ -211,7 +212,10 @@ OpenSearch k-NN plugin. Implements `VectorStore`. Use `OpenSearchVectorStoreBuil
 
 ```rust
 use daimon_plugin_opensearch::{OpenSearchVectorStoreBuilder, SpaceType, Engine};
-// or: use daimon::prelude::*;
+// Note: the daimon prelude re-exports these types under renamed aliases to
+// avoid collisions — `OpenSearchVectorStoreBuilder`, `OpenSearchSpaceType`,
+// `OpenSearchEngine`. With `use daimon::prelude::*;` write
+// `OpenSearchSpaceType::CosineSimilarity` / `OpenSearchEngine::Lucene` below.
 
 let store = OpenSearchVectorStoreBuilder::new("http://localhost:9200", 1536)
     .index("my_docs")
@@ -239,16 +243,16 @@ let store = OpenSearchVectorStoreBuilder::new("http://localhost:9200", 1536)
 
 ```toml
 # Cargo.toml
-daimon-plugin-opensearch = { version = "0.16", features = ["aws-auth"] }
+daimon-plugin-opensearch = { version = "0.22", features = ["aws-auth"] }
 ```
 
 ```rust
 use opensearch::OpenSearch;
 use opensearch::http::transport::Transport;
 
-let transport = Transport::single_node("https://my-domain.us-east-1.es.amazonaws.com")
-    .build()?;  // Configure AWS auth per opensearch-rs docs
-let client = OpenSearch::new(transport);
+// Transport::single_node returns Result<Transport> directly (no .build()).
+let transport = Transport::single_node("https://my-domain.us-east-1.es.amazonaws.com")?;
+let client = OpenSearch::new(transport);  // Configure AWS auth per opensearch-rs docs
 
 let store = OpenSearchVectorStoreBuilder::new("https://my-domain.us-east-1.es.amazonaws.com", 1536)
     .index("my_docs")
@@ -265,6 +269,7 @@ Full example: create embedding model, vector store, compose into `SimpleKnowledg
 ```rust
 use daimon::prelude::*;
 use serde_json::json;
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -389,7 +394,7 @@ let doc = doc.with_score(0.92);
 | `metadata` | `HashMap<String, serde_json::Value>` | Arbitrary key-value metadata (source, page, etc.) |
 | `score` | `Option<f64>` | Relevance score from retrieval. `None` if backend does not provide scores |
 
-`ScoredDocument` is an internal type: `{ id: String, document: Document, score: f64 }`. `id` is the same stable id passed to `VectorStore::upsert` when the document was stored — implementations must populate it with the real id, not a synthetic/rank-derived value, so callers can round-trip a search result into `delete`. Vector stores return `Vec<ScoredDocument>`; `SimpleKnowledgeBase` converts to `Document` with `with_score` applied.
+`ScoredDocument` is the public query-result type: `{ id: String, document: Document, score: f64 }`. `id` is the same stable id passed to `VectorStore::upsert` when the document was stored — implementations must populate it with the real id, not a synthetic/rank-derived value, so callers can round-trip a search result into `delete`. Vector stores return `Vec<ScoredDocument>`; `SimpleKnowledgeBase` converts to `Document` with `with_score` applied.
 
 ---
 

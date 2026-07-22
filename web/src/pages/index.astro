@@ -21,12 +21,12 @@ const providers = [
 ];
 
 const codeSnippet = `use daimon::prelude::*;
+use daimon::model::openai::OpenAi;
 
 #[tokio::main]
-async fn main() -> Result<(), DaimonError> {
+async fn main() -> daimon::Result<()> {
     let agent = Agent::builder()
-        .name("assistant")
-        .model(OpenAiModel::builder("gpt-4o").build()?)
+        .model(OpenAi::new("gpt-4o"))
         .system_prompt("You are a helpful assistant.")
         .build()?;
 
@@ -80,7 +80,7 @@ async fn main() -> Result<(), DaimonError> {
         </div>
         <div class="hero-stats">
           <div class="stat">
-            <span class="stat-value">8</span>
+            <span class="stat-value">12</span>
             <span class="stat-label">Crates</span>
           </div>
           <div class="stat-divider"></div>
@@ -90,7 +90,7 @@ async fn main() -> Result<(), DaimonError> {
           </div>
           <div class="stat-divider"></div>
           <div class="stat">
-            <span class="stat-value">5</span>
+            <span class="stat-value">6</span>
             <span class="stat-label">Task Brokers</span>
           </div>
           <div class="stat-divider"></div>

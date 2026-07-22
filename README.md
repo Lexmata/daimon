@@ -22,7 +22,7 @@ Add Daimon to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-daimon = "0.19"
+daimon = "0.22"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -166,13 +166,13 @@ The core framework compiles with no features enabled. Enable only the providers 
 
 ```toml
 # Only Anthropic
-daimon = { version = "0.19", default-features = false, features = ["anthropic"] }
+daimon = { version = "0.22", default-features = false, features = ["anthropic"] }
 
 # All providers
-daimon = { version = "0.19", features = ["full"] }
+daimon = { version = "0.22", features = ["full"] }
 
 # Core only (bring your own Model impl)
-daimon = { version = "0.19", default-features = false }
+daimon = { version = "0.22", default-features = false }
 ```
 
 ## Provider Configuration
@@ -290,8 +290,8 @@ cargo test --features full
 # Core only (no providers)
 cargo test --no-default-features
 
-# Coverage (requires cargo-llvm-cov)
-cargo llvm-cov --features full --fail-under-lines 84
+# Coverage (requires cargo-llvm-cov; CI enforces 80 on full, 84 on core)
+cargo llvm-cov --features full --fail-under-lines 80
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for full testing and development setup.

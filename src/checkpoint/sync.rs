@@ -8,17 +8,17 @@
 //! pulling new checkpoints from the remote into the local store.
 //!
 //! ```ignore
-//! use daimon::checkpoint::{InMemoryCheckpoint, FileCheckpoint, CheckpointSync};
+//! use daimon::checkpoint::{CheckpointSync, ErasedCheckpoint, FileCheckpoint, InMemoryCheckpoint};
+//! use std::sync::Arc;
 //!
 //! let local = InMemoryCheckpoint::new();
-//! let remote = FileCheckpoint::new("/shared/nfs/checkpoints")?;
+//! let remote = FileCheckpoint::new("/shared/nfs/checkpoints");
 //! let synced = CheckpointSync::new(local, remote);
 //!
 //! // Use `synced` as the checkpoint backend — writes go to both stores.
-//! let agent = Agent::builder()
-//!     .model(model)
-//!     .checkpoint(synced)
-//!     .build()?;
+//! let agent = Agent::builder().model(model).build()?;
+//! let checkpoint: Arc<dyn ErasedCheckpoint> = Arc::new(synced);
+//! let response = agent.prompt_resumable("...", "run-1", &checkpoint).await?;
 //! ```
 
 use std::sync::Arc;

@@ -5,7 +5,7 @@ Thank you for your interest in contributing to Daimon. This document outlines th
 ## Getting Started
 
 1. Clone the repository and check out the `develop` branch.
-2. Install Rust 1.85+ (edition 2024).
+2. Install Rust 1.95+ (edition 2024).
 3. Install development tools:
    ```bash
    cargo install cargo-commitlint cargo-llvm-cov cargo-deny
@@ -47,7 +47,8 @@ Allowed types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `buil
 
 - Write tests for all new functionality.
 - Run: `cargo test --no-default-features && cargo test --features full`
-- Maintain ≥90% line coverage: `cargo llvm-cov --no-default-features --fail-under-lines 90`
+- Maintain ≥84% line coverage on the core build (enforced by the release workflow): `cargo llvm-cov --no-default-features --fail-under-lines 84`
+- CI additionally enforces ≥80% on the full build: `cargo llvm-cov --features full --fail-under-lines 80`
 - Use `#[tokio::test]` for async tests.
 
 ## Pull Request Process

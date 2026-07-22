@@ -51,9 +51,9 @@ cd daimon-provider-myllm
 ```toml
 [package]
 name = "daimon-provider-myllm"
-version = "0.16.0"
+version = "0.22.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.95"
 description = "MyLLM provider for the Daimon AI agent framework"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Lexmata/daimon"
@@ -61,9 +61,9 @@ keywords = ["ai", "agent", "llm", "myllm"]
 categories = ["asynchronous", "api-bindings"]
 
 [dependencies]
-daimon-core = { version = "0.16.0", path = "../daimon-core" }
+daimon-core = { version = "0.22.0", path = "../daimon-core" }
 tokio = { version = "1", features = ["rt", "time", "sync"] }
-reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"], default-features = false }
+reqwest = { version = "0.13", features = ["json", "rustls", "stream"], default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
@@ -73,10 +73,12 @@ futures = "0.3"
 
 ### 2. Implement the Model Trait
 
-The `Model` trait has two methods:
+The `Model` trait has two required methods:
 
 - `generate(&self, request: &ChatRequest) -> Result<ChatResponse>` — non-streaming
 - `generate_stream(&self, request: &ChatRequest) -> Result<ResponseStream>` — streaming
+
+(Plus an optional `model_id()` — defaults to `"default"`; override it with the configured model name so cost attribution works.)
 
 ```rust
 // src/lib.rs
@@ -298,7 +300,7 @@ cd daimon-plugin-myvectordb
 ```toml
 [package]
 name = "daimon-plugin-myvectordb"
-version = "0.16.0"
+version = "0.22.0"
 edition = "2024"
 description = "MyVectorDB VectorStore plugin for Daimon"
 license = "MIT OR Apache-2.0"
@@ -306,7 +308,7 @@ repository = "https://github.com/Lexmata/daimon"
 keywords = ["ai", "agent", "rag", "vector-store"]
 
 [dependencies]
-daimon-core = { version = "0.16.0", path = "../daimon-core" }
+daimon-core = { version = "0.22.0", path = "../daimon-core" }
 tokio = { version = "1", features = ["rt"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -531,7 +533,7 @@ myllm = ["dep:daimon-provider-myllm"]
 full = [..., "myllm"]
 
 [dependencies]
-daimon-provider-myllm = { path = "daimon-provider-myllm", version = "0.16.0", optional = true }
+daimon-provider-myllm = { path = "daimon-provider-myllm", version = "0.22.0", optional = true }
 ```
 
 ### 3. Add Re-export Module
@@ -579,14 +581,14 @@ pub use daimon_plugin_myvectordb::{MyVectorStore, MyVectorStoreBuilder};
 
 ### Version Alignment
 
-Keep plugin versions aligned with the workspace. When releasing `daimon 0.17.0`, bump `daimon-core`, all providers, and all plugins to `0.17.0`.
+Keep plugin versions aligned with the workspace. When releasing `daimon 0.23.0`, bump `daimon-core`, all providers, and all plugins to `0.23.0`.
 
 ### Cargo.toml Metadata
 
 ```toml
 [package]
 name = "daimon-provider-myllm"
-version = "0.16.0"
+version = "0.22.0"
 edition = "2024"
 description = "MyLLM provider for the Daimon AI agent framework"
 license = "MIT OR Apache-2.0"

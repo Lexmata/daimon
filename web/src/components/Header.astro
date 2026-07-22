@@ -1,6 +1,7 @@
 ---
 import Icon from './Icon.astro';
 import { withBase } from '../lib/base';
+import { CRATE_VERSION } from '../lib/version';
 
 interface Props {
   transparent?: boolean;
@@ -25,7 +26,7 @@ const { transparent = false, showMenuToggle = false } = Astro.props;
           <Icon name="rust" />
         </span>
         <span class="brand-text">Daimon</span>
-        <span class="version-badge">v0.22</span>
+        <span class="version-badge">v{CRATE_VERSION}</span>
       </a>
     </div>
 

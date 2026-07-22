@@ -303,7 +303,7 @@ Use `agent.fork_builder()` to create a mutated copy of an agent. The builder sta
 
 ### How It Works
 
-- `fork_builder()` returns a `ForkBuilder` pre-populated with the agent's model, tools, memory, hooks, etc.
+- `fork_builder()` returns a `ForkBuilder` pre-populated with the agent's model, tools, hooks, middleware, guardrails, limits, cost config, etc. — but **not** its memory.
 - Mutate with `.system_prompt()`, `.tool()`, `.remove_tool()`, `.model()`, `.memory()`, etc.
 - `build()` creates a new `Agent` with fresh memory (unless you set `.memory()` explicitly).
 - The forked agent is independent; changes do not affect the original.
@@ -335,12 +335,12 @@ let base = Agent::builder()
 let variant_a = base
     .fork_builder()
     .system_prompt("You are concise. Answer in 1-2 sentences.")
-    .build();
+    .build()?;
 
 let variant_b = base
     .fork_builder()
     .system_prompt("You are thorough. Provide detailed explanations.")
-    .build();
+    .build()?;
 
 let (resp_a, resp_b) = tokio::join!(
     variant_a.prompt("What is async in Rust?"),
@@ -410,6 +410,7 @@ let names = hot.tool_names().await;
 
 ```rust
 use daimon::prelude::*;
+use daimon::model::openai::OpenAi;
 
 let agent = Agent::builder()
     .model(OpenAi::new("gpt-4o"))
@@ -466,6 +467,9 @@ async fn update_prompt(hot: &HotSwapAgent, new_prompt: String) {
 You can use agents, supervisors, and handoff networks as nodes in Chains, Graphs, and DAGs.
 
 ```rust
+use daimon::orchestration::{Chain, FnNode, NodeOutcome};
+use std::sync::Arc;
+
 // Supervisor as a Graph node
 let supervisor = Arc::new(Supervisor::builder()
     .model(model)
@@ -483,16 +487,18 @@ let supervisor_node = FnNode::new(move |ctx| {
     })
 });
 
-// Handoff network as a Chain step
-let handoff = HandoffNetwork::builder()
-    .entry("triage")
-    .agent("triage", triage_agent)
-    .agent("specialist", specialist_agent)
-    .build()?;
+// Handoff network as a Chain step (HandoffNetwork is not Clone; share via Arc)
+let handoff = Arc::new(
+    HandoffNetwork::builder()
+        .entry("triage")
+        .agent("triage", triage_agent)
+        .agent("specialist", specialist_agent)
+        .build()?,
+);
 
 let chain = Chain::builder()
     .transform(|mut ctx| {
-        let h = handoff.clone();
+        let h = Arc::clone(&handoff);
         Box::pin(async move {
             let resp = h.run(&ctx.text).await?;
             ctx.text = resp.final_text;

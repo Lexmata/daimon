@@ -8,7 +8,7 @@ If you see errors about missing types or unresolved imports, you likely need to 
 
 ```toml
 # Enable only what you need
-daimon = { version = "0.16", features = ["anthropic", "bedrock", "pgvector"] }
+daimon = { version = "0.22", features = ["anthropic", "bedrock", "pgvector"] }
 ```
 
 To check which features are available:
@@ -34,7 +34,7 @@ cargo test --features "openai,anthropic"
 
 ## Runtime Errors
 
-### "Model returned empty response"
+### Agent returns empty text
 
 This usually means the provider returned a valid HTTP response but with no content. Common causes:
 
@@ -43,7 +43,7 @@ This usually means the provider returned a valid HTTP response but with no conte
 - The request exceeded the provider's context window
 - The provider is experiencing an outage
 
-### "Tool not found: <name>"
+### `tool '<name>' not found in registry`
 
 The agent's tool registry is case-sensitive. Ensure the tool name returned by `Tool::name()` matches exactly what the model requested. If the model hallucinates tool names, add a system prompt that lists available tools.
 
@@ -78,17 +78,17 @@ aws bedrock list-foundation-models --region us-east-1 | grep claude
 
 If agent memory grows unbounded:
 - Use `SlidingWindowMemory` with a reasonable limit (e.g., 50-100 messages)
-- For long-running agents, implement a custom `Memory` trait that summarizes old messages
+- For long-running agents, use the built-in `SummaryMemory` (summarizes old messages via LLM) or `TokenWindowMemory` (token budget)
 - Check that tool outputs are not excessively large (the full output is stored in memory)
 
 ## Testing
 
-### Tests fail with "no providers enabled"
+### Tests require specific feature flags
 
 Some tests require specific feature flags:
 
 ```bash
-# Run tests with default features (openai + anthropic)
+# Run tests with default features (openai + anthropic + ollama + macros)
 cargo test
 
 # Run tests with all features
@@ -130,7 +130,8 @@ Anthropic returns this when the API is under heavy load. The retry logic handles
 
 ### Gemini: Authentication failure
 
-The Gemini provider uses Google Cloud credentials. Ensure:
-- `GOOGLE_APPLICATION_CREDENTIALS` points to a valid service account JSON
-- The service account has the `aiplatform.user` role
-- The Vertex AI API is enabled in your project
+The Gemini provider authenticates with an API key sent via the `x-goog-api-key` header. Ensure:
+- `GOOGLE_API_KEY` is set to a valid Gemini API key (or pass one explicitly with `.with_api_key(...)`)
+- The key is enabled for the Generative Language API
+
+(Vertex AI is only reachable as an advanced manual path: `.with_base_url(...)` plus `.with_bearer_token()` with an OAuth2 access token you obtain yourself — there is no service-account/ADC flow in the crate.)

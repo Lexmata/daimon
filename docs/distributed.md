@@ -318,6 +318,12 @@ pub struct CheckpointState {
     pub completed: bool,
     pub metadata: HashMap<String, serde_json::Value>,
     pub created_at: u64,
+    /// Cost accumulated so far — restored on resume so budgets survive restarts.
+    #[serde(default)]
+    pub cumulative_cost: f64,
+    /// Token usage accumulated so far.
+    #[serde(default)]
+    pub usage: Usage,
 }
 ```
 
@@ -326,17 +332,23 @@ pub struct CheckpointState {
 Write-through to local + remote. Load prefers local, falls back to remote and backfills local.
 
 ```rust
-use daimon::checkpoint::{InMemoryCheckpoint, FileCheckpoint, CheckpointSync};
+use daimon::checkpoint::{CheckpointSync, ErasedCheckpoint, FileCheckpoint, InMemoryCheckpoint};
+use std::sync::Arc;
 
 let local = InMemoryCheckpoint::new();
 let remote = FileCheckpoint::new("/shared/nfs/checkpoints");
 let synced = CheckpointSync::new(local, remote);
 
-// Use synced as the checkpoint backend
+// Use synced as the checkpoint backend. Checkpoints are supplied per run
+// (there is no builder-level `.checkpoint(...)`):
 let agent = Agent::builder()
     .model(model)
-    .checkpoint(synced)
     .build()?;
+
+let checkpoint: Arc<dyn ErasedCheckpoint> = Arc::new(synced);
+let response = agent
+    .prompt_resumable("Summarize the quarter", "run-42", &checkpoint)
+    .await?;
 ```
 
 ### CheckpointReplicator
@@ -344,7 +356,7 @@ let agent = Agent::builder()
 Background task that periodically pulls from remote into local.
 
 ```rust
-use daimon::checkpoint::{InMemoryCheckpoint, FileCheckpoint, CheckpointReplicator};
+use daimon::checkpoint::{CheckpointReplicator, ErasedCheckpoint, FileCheckpoint, InMemoryCheckpoint};
 use std::sync::Arc;
 
 let local = Arc::new(InMemoryCheckpoint::new());
@@ -533,13 +545,13 @@ Enable the broker you need:
 
 ```toml
 [dependencies]
-daimon = { version = "0.19", features = ["redis"] }   # RedisBroker
-daimon = { version = "0.19", features = ["nats"] }     # NatsBroker
-daimon = { version = "0.19", features = ["amqp"] }     # AmqpBroker
-daimon = { version = "0.19", features = ["grpc"] }     # GrpcBrokerServer/Client
-daimon = { version = "0.19", features = ["sqs"] }      # SqsBroker (via daimon-provider-bedrock)
-daimon = { version = "0.19", features = ["pubsub"] }   # PubSubBroker (via daimon-provider-gemini)
-daimon = { version = "0.19", features = ["servicebus"] }  # ServiceBusBroker (via daimon-provider-azure)
+daimon = { version = "0.22", features = ["redis"] }   # RedisBroker
+daimon = { version = "0.22", features = ["nats"] }     # NatsBroker
+daimon = { version = "0.22", features = ["amqp"] }     # AmqpBroker
+daimon = { version = "0.22", features = ["grpc"] }     # GrpcBrokerServer/Client
+daimon = { version = "0.22", features = ["sqs"] }      # SqsBroker (via daimon-provider-bedrock)
+daimon = { version = "0.22", features = ["pubsub"] }   # PubSubBroker (via daimon-provider-gemini)
+daimon = { version = "0.22", features = ["servicebus"] }  # ServiceBusBroker (via daimon-provider-azure)
 ```
 
 InProcessBroker is always available (no feature).
