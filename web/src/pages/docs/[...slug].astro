@@ -1,0 +1,32 @@
+---
+import { getCollection, render } from 'astro:content';
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import Header from '../../components/Header.astro';
+import Sidebar from '../../components/Sidebar.astro';
+import { docTitle } from '../../lib/docs';
+
+export async function getStaticPaths() {
+  const docs = await getCollection('docs');
+  return docs.map((doc) => ({
+    params: { slug: doc.id },
+    props: { doc },
+  }));
+}
+
+const { doc } = Astro.props;
+const { Content } = await render(doc);
+const title = docTitle(doc);
+---
+
+<BaseLayout title={`${title} | Daimon`}>
+  <Header showMenuToggle />
+
+  <div class="flex min-h-screen">
+    <Sidebar activeSlug={doc.id} />
+    <main class="flex-1 min-w-0 px-6 py-8 lg:px-10">
+      <article class="prose">
+        <Content />
+      </article>
+    </main>
+  </div>
+</BaseLayout>

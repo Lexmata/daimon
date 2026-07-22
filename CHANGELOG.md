@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.3] - 2026-07-22
+
+### Changed
+
+- **Dependency updates:** `jsonschema` 0.47 → 0.48, `async-nats` 0.49 → 0.50,
+  `tokio-tungstenite` 0.29 → 0.30, `syn` 2 → 3.
+- **Docs site rewritten in Astro:** the Angular 21 SSG docs site has been
+  replaced with a zero-client-JS Astro build. Landing page, docs pages, and
+  sidebar navigation are now fully static; markdown is sourced from the
+  repo-root `docs/` directory via Astro content collections.
+
 ## [0.22.2] - 2026-07-22
 
 ### Added
