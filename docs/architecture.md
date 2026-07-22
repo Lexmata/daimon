@@ -42,6 +42,7 @@ daimon/
 ├── daimon-provider-azure/
 ├── daimon-provider-local/  # Ollama, llama.cpp, llama-rs, OpenAI-compatible
 ├── daimon-provider-llamacpp/
+├── daimon-provider-openrouter/
 ├── daimon-plugin-pgvector/
 ├── daimon-plugin-opensearch/
 ├── src/                    # Main daimon crate source
@@ -457,6 +458,7 @@ Every provider, storage backend, and protocol is behind a feature flag. The core
 | **anthropic** | daimon-provider-anthropic | Anthropic Claude API |
 | **gemini** | daimon-provider-gemini | Google Gemini / Vertex AI |
 | **azure** | daimon-provider-azure | Azure OpenAI Service |
+| **openrouter** | daimon-provider-openrouter | OpenRouter multi-model gateway |
 | **bedrock** | daimon-provider-bedrock | AWS Bedrock |
 | **ollama** | reqwest, daimon-provider-local | Ollama local models |
 | **llamacpp** | daimon-provider-local | llama.cpp (llama-server) provider |
@@ -491,6 +493,7 @@ daimon
 ├── daimon-provider-bedrock (bedrock)
 ├── daimon-provider-gemini (gemini)
 ├── daimon-provider-azure (azure)
+├── daimon-provider-openrouter (openrouter)
 ├── daimon-provider-local (ollama | llamacpp | llamars | local)
 ├── daimon-plugin-pgvector (pgvector)
 ├── daimon-plugin-opensearch (opensearch)

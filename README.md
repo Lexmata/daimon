@@ -7,7 +7,7 @@ Daimon implements the **ReAct** (Reason-Act-Observe) pattern: the agent calls a 
 ## Features
 
 - **ReAct agent loop** with configurable iteration limits
-- **Multiple LLM providers** behind feature flags — OpenAI, Anthropic, AWS Bedrock
+- **Multiple LLM providers** behind feature flags — OpenAI, Anthropic, AWS Bedrock, Google Gemini, Azure OpenAI, OpenRouter, local models
 - **Tool system** with async execution, parallel tool calls, and a typed registry
 - **Streaming** with full ReAct loop support (tool calls accumulate and re-invoke within a single stream)
 - **Conversation memory** with pluggable backends (sliding window included), plus an optional tiered memory subsystem (core/archival/episodic) for longer-lived agents
@@ -22,7 +22,7 @@ Add Daimon to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-daimon = "0.22"
+daimon = "0.23"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -144,6 +144,7 @@ async fn main() -> daimon::Result<()> {
 | `bedrock` | No | AWS Bedrock Converse API |
 | `gemini` | No | Google Gemini / Vertex AI provider |
 | `azure` | No | Azure OpenAI Service provider |
+| `openrouter` | No | OpenRouter multi-model gateway (via `daimon-provider-openrouter`) |
 | `ollama` | Yes | Ollama local model provider (via `daimon-provider-local`) |
 | `llamacpp` | No | llama.cpp (llama-server) provider |
 | `llamars` | No | llama-rs provider |
@@ -166,13 +167,13 @@ The core framework compiles with no features enabled. Enable only the providers 
 
 ```toml
 # Only Anthropic
-daimon = { version = "0.22", default-features = false, features = ["anthropic"] }
+daimon = { version = "0.23", default-features = false, features = ["anthropic"] }
 
 # All providers
-daimon = { version = "0.22", features = ["full"] }
+daimon = { version = "0.23", features = ["full"] }
 
 # Core only (bring your own Model impl)
-daimon = { version = "0.22", default-features = false }
+daimon = { version = "0.23", default-features = false }
 ```
 
 ## Provider Configuration
@@ -276,6 +277,7 @@ Each provider reads its API key from standard environment variables:
 | AWS Bedrock | Standard AWS credentials | `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` or IAM role |
 | Google Gemini | `GOOGLE_APPLICATION_CREDENTIALS` | Service account JSON path |
 | Azure OpenAI | `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT` | Required for `azure` feature |
+| OpenRouter | `OPENROUTER_API_KEY` | Required for `openrouter` feature |
 | Ollama | `OLLAMA_HOST` | Defaults to `http://localhost:11434` |
 
 ## Testing

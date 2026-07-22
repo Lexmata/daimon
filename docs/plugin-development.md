@@ -51,7 +51,7 @@ cd daimon-provider-myllm
 ```toml
 [package]
 name = "daimon-provider-myllm"
-version = "0.22.0"
+version = "0.23.0"
 edition = "2024"
 rust-version = "1.95"
 description = "MyLLM provider for the Daimon AI agent framework"
@@ -61,7 +61,7 @@ keywords = ["ai", "agent", "llm", "myllm"]
 categories = ["asynchronous", "api-bindings"]
 
 [dependencies]
-daimon-core = { version = "0.22.0", path = "../daimon-core" }
+daimon-core = { version = "0.23.0", path = "../daimon-core" }
 tokio = { version = "1", features = ["rt", "time", "sync"] }
 reqwest = { version = "0.13", features = ["json", "rustls", "stream"], default-features = false }
 serde = { version = "1", features = ["derive"] }
@@ -300,7 +300,7 @@ cd daimon-plugin-myvectordb
 ```toml
 [package]
 name = "daimon-plugin-myvectordb"
-version = "0.22.0"
+version = "0.23.0"
 edition = "2024"
 description = "MyVectorDB VectorStore plugin for Daimon"
 license = "MIT OR Apache-2.0"
@@ -308,7 +308,7 @@ repository = "https://github.com/Lexmata/daimon"
 keywords = ["ai", "agent", "rag", "vector-store"]
 
 [dependencies]
-daimon-core = { version = "0.22.0", path = "../daimon-core" }
+daimon-core = { version = "0.23.0", path = "../daimon-core" }
 tokio = { version = "1", features = ["rt"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -533,7 +533,7 @@ myllm = ["dep:daimon-provider-myllm"]
 full = [..., "myllm"]
 
 [dependencies]
-daimon-provider-myllm = { path = "daimon-provider-myllm", version = "0.22.0", optional = true }
+daimon-provider-myllm = { path = "daimon-provider-myllm", version = "0.23.0", optional = true }
 ```
 
 ### 3. Add Re-export Module
@@ -588,7 +588,7 @@ Keep plugin versions aligned with the workspace. When releasing `daimon 0.23.0`,
 ```toml
 [package]
 name = "daimon-provider-myllm"
-version = "0.22.0"
+version = "0.23.0"
 edition = "2024"
 description = "MyLLM provider for the Daimon AI agent framework"
 license = "MIT OR Apache-2.0"

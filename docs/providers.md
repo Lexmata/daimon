@@ -14,6 +14,7 @@ This document covers every LLM and embedding provider in the Daimon framework, w
 | Google Gemini | `gemini` | ✓ | ✓ | ✓ | ✓ (cached_content) | — | `PubSubBroker` (pubsub) |
 | Azure OpenAI | `azure` | ✓ | ✓ | ✓ | ✓ (system) | — | `ServiceBusBroker` (servicebus) |
 | AWS Bedrock | `bedrock` | ✓ | ✓ | ✓ | ✓ (Claude) | — | `SqsBroker` (sqs) |
+| OpenRouter | `openrouter` | ✓ | ✓ | — | — | — | — |
 
 ---
 
@@ -338,6 +339,34 @@ With feature `sqs`: `SqsBroker` for AWS SQS task distribution.
 
 ---
 
+## OpenRouter (feature = "openrouter")
+
+**Feature:** `openrouter`
+
+[OpenRouter](https://openrouter.ai) is an OpenAI-compatible gateway that routes to hundreds of models — OpenAI, Anthropic, Google, Meta, and more — behind a single API key. Model ids use OpenRouter's `vendor/model` form (e.g. `openai/gpt-4o`, `anthropic/claude-sonnet-4`).
+
+### Chat Model
+
+```rust
+use daimon::model::openrouter::OpenRouter;
+
+// Reads OPENROUTER_API_KEY from the environment
+let model = OpenRouter::new("openai/gpt-4o");
+
+// Full configuration
+let model = OpenRouter::with_api_key("anthropic/claude-sonnet-4", "sk-or-...")
+    .with_timeout(Duration::from_secs(60))
+    .with_max_retries(3)
+    .with_response_format("json_object")   // if the routed model supports it
+    .with_parallel_tool_calls(true)
+    .with_site_url("https://your-app.com") // HTTP-Referer header (rankings attribution)
+    .with_app_name("your-app");            // X-Title header (rankings display name)
+```
+
+**Capabilities:** Tool calls and streaming via the OpenAI-compatible Chat Completions API. No `EmbeddingModel`. Note that capabilities are only as strong as the routed model — e.g. `response_format` and parallel tool calls depend on the upstream provider. `max_tokens` is sent (not the OpenAI-specific `max_completion_tokens`) because OpenRouter normalizes it across upstreams.
+
+---
+
 ## Switching Providers at Runtime
 
 ### SharedModel and Arc&lt;dyn ErasedModel&gt;
@@ -448,6 +477,7 @@ All providers support reading API keys from the environment. Set these before ru
 | Ollama | `OLLAMA_HOST` (embedding provider only; default `http://localhost:11434` — chat uses `.with_base_url()`) |
 | Gemini | `GOOGLE_API_KEY` |
 | Azure OpenAI | `AZURE_OPENAI_API_KEY` |
+| OpenRouter | `OPENROUTER_API_KEY` |
 | Bedrock | AWS credentials (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`) or IAM role |
 
 Example:
@@ -467,16 +497,19 @@ let model = OpenAi::with_api_key("gpt-4o", api_key);
 ```toml
 [dependencies]
 # Default: openai, anthropic, ollama, macros
-daimon = "0.22"
+daimon = "0.23"
 
 # Minimal: only OpenAI
-daimon = { version = "0.22", default-features = false, features = ["openai"] }
+daimon = { version = "0.23", default-features = false, features = ["openai"] }
 
 # Add Gemini and Azure
-daimon = { version = "0.22", features = ["gemini", "azure"] }
+daimon = { version = "0.23", features = ["gemini", "azure"] }
+
+# Add OpenRouter
+daimon = { version = "0.23", features = ["openrouter"] }
 
 # Full: all providers + MCP, SQLite, Redis, etc.
-daimon = { version = "0.22", features = ["full"] }
+daimon = { version = "0.23", features = ["full"] }
 ```
 
 | Feature | Enables |

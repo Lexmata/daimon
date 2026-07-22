@@ -8,14 +8,14 @@ Add Daimon to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-daimon = "0.22"  # includes openai, anthropic, ollama, macros
+daimon = "0.23"  # includes openai, anthropic, ollama, macros
 ```
 
 To minimize dependencies, enable only what you need:
 
 ```toml
 [dependencies]
-daimon = { version = "0.22", default-features = false, features = ["openai", "macros"] }
+daimon = { version = "0.23", default-features = false, features = ["openai", "macros"] }
 ```
 
 Optional providers and plugins:
@@ -24,6 +24,7 @@ Optional providers and plugins:
 |-----------|--------------------------------|
 | `gemini`  | Google Gemini / Vertex AI      |
 | `azure`   | Azure OpenAI Service           |
+| `openrouter` | OpenRouter multi-model gateway |
 | `bedrock` | AWS Bedrock                    |
 | `pgvector`| pgvector-backed vector store   |
 | `opensearch` | OpenSearch k-NN vector store |
@@ -34,7 +35,7 @@ Optional providers and plugins:
 Example with Gemini and pgvector:
 
 ```toml
-daimon = { version = "0.22", features = ["openai", "gemini", "pgvector"] }
+daimon = { version = "0.23", features = ["openai", "gemini", "pgvector"] }
 ```
 
 ---
