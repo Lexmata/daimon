@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.1] - 2026-07-21
+
+### Added
+
+- **Orderly MCP shutdown for embedders:** `McpToolBridge::close()` closes the
+  bridge's underlying transport (e.g. reaping a stdio server's child process
+  at application exit) instead of relying on process teardown, and
+  `McpToolBridge::transport()` exposes the shared transport `Arc` so callers
+  holding many bridges can deduplicate by `Arc::ptr_eq` and close each server
+  connection exactly once. The built-in transports tolerate repeated
+  `close()` calls, so per-bridge closing is safe, just redundant. Additive
+  only — no existing API changes.
+
 ## [0.22.0] - 2026-07-12
 
 ### Changed
@@ -889,7 +902,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `commitlint.toml` for Conventional Commits enforcement.
 - `rustfmt.toml` and `clippy.toml` for consistent code style.
 
-[Unreleased]: https://github.com/Lexmata/daimon/compare/v0.22.0...HEAD
+[Unreleased]: https://github.com/Lexmata/daimon/compare/v0.22.1...HEAD
+[0.22.1]: https://github.com/Lexmata/daimon/compare/v0.22.0...v0.22.1
 [0.22.0]: https://github.com/Lexmata/daimon/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/Lexmata/daimon/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/Lexmata/daimon/compare/v0.18.1...v0.20.0
