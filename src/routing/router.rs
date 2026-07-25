@@ -174,16 +174,26 @@ impl ModelRouter {
             .expect("selected tier is populated")
             .1;
 
+        let decision = RouteDecision {
+            iteration,
+            difficulty,
+            required_tier,
+            selected_tier: reg.tier,
+            selected_model_id: reg.model.model_id_erased().to_string(),
+            escalated_from,
+        };
+        tracing::debug!(
+            iteration,
+            difficulty,
+            ?required_tier,
+            selected_tier = ?decision.selected_tier,
+            selected_model_id = %decision.selected_model_id,
+            "route selected model"
+        );
+
         Ok(RoutedModel {
             handle: reg.model.clone(),
-            decision: RouteDecision {
-                iteration,
-                difficulty,
-                required_tier,
-                selected_tier: reg.tier,
-                selected_model_id: reg.model.model_id_erased().to_string(),
-                escalated_from,
-            },
+            decision,
         })
     }
 }
@@ -301,6 +311,14 @@ mod tests {
     impl TaskScorer for StaticScorer {
         async fn score(&self, _request: &ChatRequest) -> Result<f64> {
             Ok(self.0)
+        }
+    }
+
+    struct FailingScorer;
+
+    impl TaskScorer for FailingScorer {
+        async fn score(&self, _request: &ChatRequest) -> Result<f64> {
+            Err(DaimonError::Model("scorer down".into()))
         }
     }
 
@@ -443,6 +461,31 @@ mod tests {
             .unwrap();
         let routed = router.route(1, &empty_request()).await.unwrap();
         assert_eq!(routed.decision.selected_model_id, "explicit-cheap");
+    }
+
+    #[tokio::test]
+    async fn scorer_failure_degrades_to_default_difficulty() {
+        let router = ModelRouter::builder()
+            .register_with_cost(
+                ModelTier::Small,
+                StubModel { id: "small" },
+                cost(1e-6, 1e-6),
+            )
+            .register_with_cost(
+                ModelTier::Medium,
+                StubModel { id: "medium" },
+                cost(2e-6, 2e-6),
+            )
+            .scorer(FailingScorer)
+            .build()
+            .unwrap();
+        let routed = router.route(1, &empty_request()).await.unwrap();
+        // A scorer outage must not fail the run: difficulty falls back to
+        // 0.5, which maps to Medium under the default bands.
+        assert_eq!(routed.decision.difficulty, 0.5);
+        assert_eq!(routed.decision.required_tier, ModelTier::Medium);
+        assert_eq!(routed.decision.selected_tier, ModelTier::Medium);
+        assert_eq!(routed.decision.selected_model_id, "medium");
     }
 
     #[tokio::test]

@@ -74,7 +74,9 @@ pub struct AgentResponse {
     pub messages: Vec<Message>,
     /// The final text response from the model.
     pub final_text: String,
-    /// How many model invocations were made.
+    /// How many ReAct loop iterations ran. Escalation retries within an
+    /// iteration are additional model invocations recorded in
+    /// `route_decisions`, not counted here.
     pub iterations: usize,
     /// Aggregated token usage across all iterations (if providers reported it).
     pub usage: Usage,
@@ -2372,7 +2374,7 @@ mod tests {
         );
     }
 
-    use crate::routing::{ModelCost, ModelRouter, ModelTier, TaskScorer};
+    use crate::routing::{ModelCost, ModelRouter, ModelTier, RouteDecision, TaskScorer};
 
     struct StaticScorer(f64);
 
@@ -2492,6 +2494,90 @@ mod tests {
             result.unwrap_err(),
             crate::error::DaimonError::Model(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn test_route_decisions_also_fire_hook() {
+        use std::sync::Mutex;
+
+        struct RecordingHook {
+            decisions: Arc<Mutex<Vec<RouteDecision>>>,
+        }
+
+        impl crate::hooks::AgentHook for RecordingHook {
+            async fn on_route_decision(&self, decision: &RouteDecision) -> Result<()> {
+                self.decisions.lock().unwrap().push(decision.clone());
+                Ok(())
+            }
+        }
+
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        // Small fails, so the run escalates to Medium: two decisions, and the
+        // hook must see exactly what `route_decisions` reports.
+        let router = ModelRouter::builder()
+            .register(ModelTier::Small, FailModel)
+            .register(ModelTier::Medium, IdModel { id: "medium-model" })
+            .scorer(StaticScorer(0.1))
+            .build()
+            .unwrap();
+        let agent = Agent::builder()
+            .router(router)
+            .hooks(RecordingHook {
+                decisions: captured.clone(),
+            })
+            .build()
+            .unwrap();
+
+        let response = agent.prompt("hi").await.unwrap();
+
+        let hooked = captured.lock().unwrap();
+        assert_eq!(
+            hooked.len(),
+            response.route_decisions.len(),
+            "hook captures must mirror response.route_decisions"
+        );
+        assert_eq!(hooked.len(), 2, "expected a decision per escalation leg");
+        for (from_hook, from_response) in hooked.iter().zip(&response.route_decisions) {
+            assert_eq!(from_hook.selected_model_id, from_response.selected_model_id);
+        }
+        assert_eq!(hooked[1].selected_model_id, "medium-model");
+    }
+
+    #[tokio::test]
+    async fn test_routed_cost_attributed_to_serving_model() {
+        use crate::cost::{CostModel, TokenDirection};
+        use std::sync::Mutex;
+
+        struct ProbeCostModel(Arc<Mutex<Vec<String>>>);
+
+        impl CostModel for ProbeCostModel {
+            fn cost_per_token(&self, model_id: &str, _direction: TokenDirection) -> f64 {
+                self.0.lock().unwrap().push(model_id.to_string());
+                1.0e-6
+            }
+        }
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let router = ModelRouter::builder()
+            .register_with_cost(ModelTier::Small, IdModel { id: "small-model" }, cost(1e-6))
+            .register_with_cost(ModelTier::Large, IdModel { id: "large-model" }, cost(50e-6))
+            .scorer(StaticScorer(0.9))
+            .build()
+            .unwrap();
+        let agent = Agent::builder()
+            .router(router)
+            .cost_model(ProbeCostModel(seen.clone()))
+            .build()
+            .unwrap();
+
+        agent.prompt("prove the riemann hypothesis").await.unwrap();
+
+        let seen = seen.lock().unwrap();
+        assert!(!seen.is_empty(), "cost model was never consulted");
+        assert!(
+            seen.iter().all(|m| m == "large-model"),
+            "cost must be attributed to the serving model, got {seen:?}"
+        );
     }
 
     struct StreamIdModel {

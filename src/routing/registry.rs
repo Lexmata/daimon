@@ -17,8 +17,9 @@ pub struct ModelCost {
 }
 
 impl ModelCost {
-    /// Ordering key for cheapest-first selection within a tier. Any fixed
-    /// blend of input/output gives the same ordering; we use the sum.
+    /// Ordering key for cheapest-first selection within a tier: the fixed
+    /// blend `input + output` per token. The blend is fixed so ordering is
+    /// deterministic.
     pub(crate) fn ordering_key(&self) -> f64 {
         self.input_per_token + self.output_per_token
     }

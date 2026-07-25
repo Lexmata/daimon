@@ -17,7 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `TierBands`, `RouteDecision`), `AgentBuilder::router`,
   `AgentHook::on_route_decision`, and `AgentResponse::route_decisions`
   (additive field — technically breaking for downstream `AgentResponse`
-  literal construction).
+  literal construction). `ErasedAgentHook` gains a required method
+  `on_route_decision_erased`; direct implementors of that public trait
+  (rather than of `AgentHook`) must add it.
 
 ## [0.23.0] - 2026-07-22
 

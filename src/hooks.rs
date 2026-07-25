@@ -1,7 +1,7 @@
 //! Lifecycle hooks for observing and controlling agent execution.
 //!
 //! Implement [`AgentHook`] to receive callbacks at key points in the ReAct loop:
-//! iteration start/end, model responses, tool calls, and errors.
+//! iteration start/end, model responses, tool calls, routing decisions, and errors.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -60,9 +60,11 @@ pub trait AgentHook: Send + Sync {
         async { Ok(()) }
     }
 
-    /// Called once per routing decision in a routed agent, after the serving
-    /// model call completes — including one call per escalation retry. Never
-    /// called for single-model agents.
+    /// Called once per routing decision in a routed agent's ReAct loop
+    /// (`prompt`/`prompt_stream`), after the serving model call completes —
+    /// including one call per escalation retry. Not fired for
+    /// `prompt_structured` or handoff network calls. Never called for
+    /// single-model agents.
     fn on_route_decision(
         &self,
         _decision: &RouteDecision,

@@ -74,7 +74,7 @@ pub struct HeuristicScorer {
     pub keyword_weight: f64,
     /// Cap on total keyword bonus.
     pub max_keyword_bonus: f64,
-    /// Weight scaled by last user message length (saturating at 2000 chars).
+    /// Weight scaled by last user message length (saturating at 2000 bytes).
     pub length_weight: f64,
     /// Flat bonus when the conversation contains tool calls or tool results.
     pub tool_history_weight: f64,

@@ -41,6 +41,7 @@ let agent = Agent::builder()
 |--------|------|---------|-------------|
 | `model` | `M: Model + 'static` | *required* | Sets the LLM provider. |
 | `shared_model` | `SharedModel` | *required* | Sets a pre-boxed shared model. |
+| `router` | `ModelRouter` | `None` | Routes each ReAct iteration's model call through a `ModelRouter` (dynamic per-call model selection with tier escalation). Last setter wins against `model`/`shared_model`. |
 | `system_prompt` | `impl Into<String>` | `None` | Static system prompt injected at conversation start. |
 | `prompt_template` | `PromptTemplate` | `None` | Dynamic prompt with `{variable}` interpolation. |
 | `tool` | `T: Tool + 'static` | `ToolRegistry::new()` | Registers a tool. Tools must have unique names. |
