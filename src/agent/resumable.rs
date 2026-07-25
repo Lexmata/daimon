@@ -13,6 +13,7 @@ use crate::agent::runner::{AgentResponse, StepOutcome};
 use crate::checkpoint::{CheckpointState, ErasedCheckpoint};
 use crate::error::{DaimonError, Result};
 use crate::model::types::{Message, Usage};
+use crate::routing::RouteDecision;
 
 /// Runs a prompt with checkpoint-based persistence.
 ///
@@ -66,6 +67,8 @@ impl Agent {
                         iterations: cp.iteration,
                         usage: cp.usage,
                         cost: cp.cumulative_cost,
+                        // decisions from prior process runs are not persisted in checkpoints
+                        route_decisions: Vec::new(),
                     });
                 }
                 tracing::info!(
@@ -121,6 +124,7 @@ impl Agent {
         let mut iteration = start_iteration;
         let mut total_usage = initial_usage;
         let mut total_cost = initial_cost;
+        let mut route_decisions: Vec<RouteDecision> = Vec::new();
 
         loop {
             if cancel.is_cancelled() {
@@ -144,6 +148,7 @@ impl Agent {
                     &mut total_cost,
                     run_tracker.as_ref(),
                     cancel,
+                    &mut route_decisions,
                 )
                 .await
             {
@@ -185,6 +190,7 @@ impl Agent {
                         iterations: iteration,
                         usage: total_usage,
                         cost: total_cost,
+                        route_decisions,
                     };
 
                     let completed_state =

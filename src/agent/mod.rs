@@ -99,8 +99,6 @@ impl Agent {
 pub(crate) struct GenerationOutcome {
     pub response: ChatResponse,
     pub serving_model_id: String,
-    // Read by the ReAct loop wiring (Task 8); produced but unread today.
-    #[allow(dead_code)]
     pub decisions: Vec<RouteDecision>,
 }
 

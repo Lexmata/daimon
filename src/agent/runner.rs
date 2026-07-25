@@ -9,6 +9,7 @@ use crate::error::{DaimonError, Result};
 use crate::guardrails::{ErasedOutputGuardrail, GuardrailResult};
 use crate::hooks::AgentState;
 use crate::model::types::{ChatRequest, ChatResponse, Message, Usage};
+use crate::routing::RouteDecision;
 use crate::stream::ResponseStream;
 use crate::tool::{ErasedTool, ToolRetryPolicy};
 
@@ -79,6 +80,9 @@ pub struct AgentResponse {
     pub usage: Usage,
     /// Estimated cost in USD for this prompt (requires a CostModel on the agent).
     pub cost: f64,
+    /// Routing decisions made during this prompt, one per iteration
+    /// (plus one per escalation retry). Empty for single-model agents.
+    pub route_decisions: Vec<RouteDecision>,
 }
 
 impl AgentResponse {
@@ -274,6 +278,7 @@ impl Agent {
         let mut iteration = 0;
         let mut total_usage = Usage::default();
         let mut total_cost = 0.0f64;
+        let mut route_decisions: Vec<RouteDecision> = Vec::new();
 
         // Budget is enforced per prompt call. A fresh per-run tracker (seeded
         // from the shared cost model, like the streaming path) keeps concurrent
@@ -292,6 +297,7 @@ impl Agent {
                     &mut total_cost,
                     run_tracker.as_ref(),
                     cancel,
+                    &mut route_decisions,
                 )
                 .await?;
 
@@ -303,6 +309,7 @@ impl Agent {
                         iterations: iteration,
                         usage: total_usage,
                         cost: total_cost,
+                        route_decisions,
                     });
                 }
                 StepOutcome::Continue => {
@@ -336,6 +343,7 @@ impl Agent {
         total_cost: &mut f64,
         tracker: Option<&CostTracker>,
         cancel: &CancellationToken,
+        route_decisions: &mut Vec<RouteDecision>,
     ) -> Result<StepOutcome> {
         use crate::middleware::MiddlewareAction;
 
@@ -397,6 +405,12 @@ impl Agent {
         *tool_specs_vec = std::mem::take(&mut request.tools);
 
         let outcome = result?;
+
+        for decision in &outcome.decisions {
+            self.hooks.on_route_decision_erased(decision).await?;
+        }
+        route_decisions.extend(outcome.decisions);
+
         let mut response = outcome.response;
 
         if let Some(ref usage) = response.usage {
@@ -2323,5 +2337,127 @@ mod tests {
             seen.iter().all(|m| m == "test-model-9000"),
             "expected the provider model id, got {seen:?}"
         );
+    }
+
+    use crate::routing::{ModelCost, ModelRouter, ModelTier, TaskScorer};
+
+    struct StaticScorer(f64);
+
+    impl TaskScorer for StaticScorer {
+        async fn score(&self, _request: &ChatRequest) -> Result<f64> {
+            Ok(self.0)
+        }
+    }
+
+    struct IdModel {
+        id: &'static str,
+    }
+
+    impl Model for IdModel {
+        async fn generate(&self, _request: &ChatRequest) -> Result<ChatResponse> {
+            Ok(ChatResponse {
+                message: Message::assistant(format!("served by {}", self.id)),
+                stop_reason: StopReason::EndTurn,
+                usage: Some(Usage {
+                    input_tokens: 1_000_000,
+                    output_tokens: 1_000_000,
+                    cached_tokens: 0,
+                }),
+            })
+        }
+
+        async fn generate_stream(&self, _request: &ChatRequest) -> Result<ResponseStream> {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+
+        fn model_id(&self) -> &str {
+            self.id
+        }
+    }
+
+    struct FailModel;
+
+    impl Model for FailModel {
+        async fn generate(&self, _request: &ChatRequest) -> Result<ChatResponse> {
+            Err(crate::error::DaimonError::Model("provider down".into()))
+        }
+
+        async fn generate_stream(&self, _request: &ChatRequest) -> Result<ResponseStream> {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+
+        fn model_id(&self) -> &str {
+            "fail-model"
+        }
+    }
+
+    fn cost(v: f64) -> ModelCost {
+        ModelCost {
+            input_per_token: v,
+            output_per_token: v,
+        }
+    }
+
+    fn routed_agent(score: f64) -> Agent {
+        let router = ModelRouter::builder()
+            .register_with_cost(ModelTier::Small, IdModel { id: "small-model" }, cost(1e-6))
+            .register_with_cost(ModelTier::Large, IdModel { id: "large-model" }, cost(50e-6))
+            .scorer(StaticScorer(score))
+            .build()
+            .unwrap();
+        Agent::builder().router(router).build().unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_easy_task_routes_to_small_model() {
+        let agent = routed_agent(0.1);
+        let response = agent.prompt("hi").await.unwrap();
+        assert_eq!(response.text(), "served by small-model");
+        assert_eq!(response.route_decisions.len(), 1);
+        assert_eq!(response.route_decisions[0].selected_model_id, "small-model");
+    }
+
+    #[tokio::test]
+    async fn test_hard_task_routes_to_large_model() {
+        let agent = routed_agent(0.9);
+        let response = agent.prompt("prove the riemann hypothesis").await.unwrap();
+        assert_eq!(response.text(), "served by large-model");
+        assert_eq!(response.route_decisions[0].selected_model_id, "large-model");
+    }
+
+    #[tokio::test]
+    async fn test_failure_escalates_to_next_tier() {
+        let router = ModelRouter::builder()
+            .register(ModelTier::Small, FailModel)
+            .register(ModelTier::Medium, IdModel { id: "medium-model" })
+            .scorer(StaticScorer(0.1))
+            .build()
+            .unwrap();
+        let agent = Agent::builder().router(router).build().unwrap();
+
+        let response = agent.prompt("hi").await.unwrap();
+        assert_eq!(response.text(), "served by medium-model");
+        assert_eq!(response.route_decisions.len(), 2);
+        assert_eq!(response.route_decisions[0].selected_tier, ModelTier::Small);
+        assert_eq!(
+            response.route_decisions[1].escalated_from,
+            Some(ModelTier::Small)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_escalation_exhausted_propagates_error() {
+        let router = ModelRouter::builder()
+            .register(ModelTier::Small, FailModel)
+            .scorer(StaticScorer(0.1))
+            .build()
+            .unwrap();
+        let agent = Agent::builder().router(router).build().unwrap();
+
+        let result = agent.prompt("hi").await;
+        assert!(matches!(
+            result.unwrap_err(),
+            crate::error::DaimonError::Model(_)
+        ));
     }
 }
