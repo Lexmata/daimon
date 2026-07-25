@@ -98,6 +98,7 @@ pub mod orchestration;
 pub mod prelude;
 pub mod prompt;
 pub mod retriever;
+pub mod routing;
 pub mod stream;
 pub mod tool;
 
