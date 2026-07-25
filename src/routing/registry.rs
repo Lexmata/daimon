@@ -19,8 +19,6 @@ pub struct ModelCost {
 impl ModelCost {
     /// Ordering key for cheapest-first selection within a tier. Any fixed
     /// blend of input/output gives the same ordering; we use the sum.
-    // Used by the router (later tasks); tests exercise it today.
-    #[allow(dead_code)]
     pub(crate) fn ordering_key(&self) -> f64 {
         self.input_per_token + self.output_per_token
     }
@@ -66,8 +64,6 @@ impl ModelRegistration {
     /// Resolves this registration's cost: explicit wins; otherwise the
     /// `CostModel` fallback is queried by `model_id()`. With neither, the
     /// registration sorts last within its tier (infinite cost).
-    // Used by the router (later tasks); tests exercise it today.
-    #[allow(dead_code)]
     pub(crate) fn effective_cost(&self, fallback: Option<&Arc<dyn CostModel>>) -> ModelCost {
         if let Some(cost) = self.cost {
             return cost;

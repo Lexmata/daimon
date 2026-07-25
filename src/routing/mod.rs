@@ -4,9 +4,11 @@
 //! the model call to the cheapest registered model competent to handle it.
 
 mod registry;
+mod router;
 mod scorer;
 mod tier;
 
 pub use registry::{ModelCost, ModelRegistration};
+pub use router::{ModelRouter, ModelRouterBuilder, RouteDecision, RoutedModel, TierBands};
 pub use scorer::{ErasedTaskScorer, HeuristicScorer, LlmScorer, SharedTaskScorer, TaskScorer};
 pub use tier::ModelTier;
