@@ -4,7 +4,9 @@
 //! the model call to the cheapest registered model competent to handle it.
 
 mod registry;
+mod scorer;
 mod tier;
 
 pub use registry::{ModelCost, ModelRegistration};
+pub use scorer::{ErasedTaskScorer, HeuristicScorer, SharedTaskScorer, TaskScorer};
 pub use tier::ModelTier;
