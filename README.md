@@ -264,7 +264,10 @@ println!("served by {}", response.route_decisions[0].selected_model_id);
 
 If the selected provider fails, the router retries the iteration on the next
 tier up. Every decision is recorded on `AgentResponse::route_decisions` and
-surfaced through the `AgentHook::on_route_decision` hook.
+surfaced through the `AgentHook::on_route_decision` hook. When using
+`LlmScorer`, the last user message (up to 4000 chars per scored iteration) is
+sent to the judge model — prefer a same-vendor or self-hosted judge when data
+residency matters.
 
 ## Architecture
 

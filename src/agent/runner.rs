@@ -3,7 +3,7 @@
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
-use crate::agent::{Agent, ModelSource};
+use crate::agent::Agent;
 use crate::cost::CostTracker;
 use crate::error::{DaimonError, Result};
 use crate::guardrails::{ErasedOutputGuardrail, GuardrailResult};
@@ -83,7 +83,8 @@ pub struct AgentResponse {
     /// Estimated cost in USD for this prompt (requires a CostModel on the agent).
     pub cost: f64,
     /// Routing decisions made during this prompt, one per iteration
-    /// (plus one per escalation retry). Empty for single-model agents.
+    /// (plus one per escalation retry). Persisted in checkpoints for
+    /// resumable runs. Empty for single-model agents.
     pub route_decisions: Vec<RouteDecision>,
 }
 
@@ -744,41 +745,8 @@ impl Agent {
                 // Pick this iteration's model: single-model agents use their
                 // model directly; routed agents route per iteration and
                 // escalate tiers when the stream cannot be obtained.
-                let (mut inner, decisions, serving_id) = match &model_source {
-                    ModelSource::Single(model) => {
-                        let stream = model.generate_stream_erased(&request).await?;
-                        (stream, Vec::new(), model.model_id_erased().to_string())
-                    }
-                    ModelSource::Routed(router) => {
-                        let mut routed = router.route(iteration, &request).await?;
-                        let mut decisions: Vec<RouteDecision> = Vec::new();
-                        loop {
-                            match routed.handle.generate_stream_erased(&request).await {
-                                Ok(stream) => {
-                                    let serving_id = routed.decision.selected_model_id.clone();
-                                    decisions.push(routed.decision);
-                                    break (stream, decisions, serving_id);
-                                }
-                                Err(DaimonError::Cancelled) => Err(DaimonError::Cancelled)?,
-                                Err(e) => {
-                                    decisions.push(routed.decision.clone());
-                                    match router.escalate(decisions.last().expect("decision just pushed")) {
-                                        Some(next) => {
-                                            tracing::warn!(
-                                                error = %e,
-                                                to_tier = ?next.decision.selected_tier,
-                                                to_model = %next.decision.selected_model_id,
-                                                "stream obtain failed; escalating tier"
-                                            );
-                                            routed = next;
-                                        }
-                                        None => Err(e)?,
-                                    }
-                                }
-                            }
-                        }
-                    }
-                };
+                let (mut inner, decisions, serving_id) =
+                    model_source.stream_routed(iteration, &request).await?;
                 messages = std::mem::take(&mut request.messages);
                 tool_specs_vec = std::mem::take(&mut request.tools);
 
@@ -1040,6 +1008,7 @@ mod tests {
     use crate::error::Result;
     use crate::model::Model;
     use crate::model::types::*;
+    use crate::routing::test_utils::StaticScorer;
     use crate::stream::ResponseStream;
     use crate::tool::{Tool, ToolOutput};
 
@@ -2376,14 +2345,6 @@ mod tests {
 
     use crate::routing::{ModelCost, ModelRouter, ModelTier, RouteDecision, TaskScorer};
 
-    struct StaticScorer(f64);
-
-    impl TaskScorer for StaticScorer {
-        async fn score(&self, _request: &ChatRequest) -> Result<f64> {
-            Ok(self.0)
-        }
-    }
-
     struct IdModel {
         id: &'static str,
     }
@@ -2676,5 +2637,295 @@ mod tests {
             }
         }
         assert!(text.contains("medium-stream"));
+    }
+
+    // ---- Cancellation guard + routing observability ----
+
+    /// A model whose calls always fail with [`DaimonError::Cancelled`], used
+    /// to pin that cancellation is never mistaken for an escalation-worthy
+    /// provider failure.
+    struct CancelledModel;
+
+    impl Model for CancelledModel {
+        async fn generate(&self, _request: &ChatRequest) -> Result<ChatResponse> {
+            Err(crate::error::DaimonError::Cancelled)
+        }
+
+        async fn generate_stream(&self, _request: &ChatRequest) -> Result<ResponseStream> {
+            Err(crate::error::DaimonError::Cancelled)
+        }
+
+        fn model_id(&self) -> &str {
+            "cancelled-model"
+        }
+    }
+
+    /// Module-level sibling of the hook double in
+    /// `test_route_decisions_also_fire_hook`, shared by the routing
+    /// observability tests below.
+    struct RecordingHook {
+        decisions: Arc<std::sync::Mutex<Vec<RouteDecision>>>,
+    }
+
+    impl crate::hooks::AgentHook for RecordingHook {
+        async fn on_route_decision(&self, decision: &RouteDecision) -> Result<()> {
+            self.decisions.lock().unwrap().push(decision.clone());
+            Ok(())
+        }
+    }
+
+    /// Scores a scripted sequence of difficulties (one per routing call),
+    /// repeating the last value if called more times than scripted.
+    struct SeqScorer {
+        scores: &'static [f64],
+        next: AtomicUsize,
+    }
+
+    impl TaskScorer for SeqScorer {
+        async fn score(&self, _request: &ChatRequest) -> Result<f64> {
+            let i = self.next.fetch_add(1, Ordering::SeqCst);
+            Ok(self.scores[i.min(self.scores.len() - 1)])
+        }
+    }
+
+    /// Module-level sibling of the probe in
+    /// `test_routed_cost_attributed_to_serving_model`: records every model id
+    /// the cost tracker attributes spend to.
+    struct ProbeCostModel(Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl crate::cost::CostModel for ProbeCostModel {
+        fn cost_per_token(&self, model_id: &str, _direction: crate::cost::TokenDirection) -> f64 {
+            self.0.lock().unwrap().push(model_id.to_string());
+            1.0e-6
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cancellation_does_not_escalate_nonstreaming() {
+        let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let router = ModelRouter::builder()
+            .register(ModelTier::Small, CancelledModel)
+            .register(ModelTier::Medium, IdModel { id: "medium-model" })
+            .scorer(StaticScorer(0.1))
+            .build()
+            .unwrap();
+        let agent = Agent::builder()
+            .router(router)
+            .hooks(RecordingHook {
+                decisions: captured.clone(),
+            })
+            .build()
+            .unwrap();
+
+        let result = agent.prompt("hi").await;
+        assert!(
+            matches!(result.unwrap_err(), crate::error::DaimonError::Cancelled),
+            "cancellation must propagate as-is, not be escalated away"
+        );
+
+        // No Medium decision may exist: cancellation short-circuits before
+        // escalation. And per the hook contract (not fired for decisions
+        // whose iteration ultimately fails), the cancelled iteration's Small
+        // decision is not reported either.
+        let hooked = captured.lock().unwrap();
+        assert!(
+            hooked.is_empty(),
+            "no route decision may be reported for a cancelled iteration: {hooked:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cancellation_does_not_escalate_streaming() {
+        use futures::StreamExt;
+
+        let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let router = ModelRouter::builder()
+            .register(ModelTier::Small, CancelledModel)
+            .register(
+                ModelTier::Medium,
+                StreamIdModel {
+                    id: "medium-stream",
+                    fail_obtain: false,
+                },
+            )
+            .scorer(StaticScorer(0.1))
+            .build()
+            .unwrap();
+        let agent = Agent::builder()
+            .router(router)
+            .hooks(RecordingHook {
+                decisions: captured.clone(),
+            })
+            .build()
+            .unwrap();
+
+        let mut stream = agent.prompt_stream("hi").await.unwrap();
+        let mut saw_cancelled = false;
+        while let Some(event) = stream.next().await {
+            if let Err(e) = event {
+                assert!(
+                    matches!(e, crate::error::DaimonError::Cancelled),
+                    "expected Cancelled, got: {e:?}"
+                );
+                saw_cancelled = true;
+            }
+        }
+        assert!(saw_cancelled, "the stream must surface the cancellation");
+
+        let hooked = captured.lock().unwrap();
+        assert!(
+            hooked.is_empty(),
+            "no route decision may be reported for a cancelled iteration: {hooked:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_streaming_hook_fires_per_route_decision() {
+        use futures::StreamExt;
+
+        // Streaming responses carry no `route_decisions` field, so the hook is
+        // the sole observability channel: it must fire once per decision,
+        // including the failed escalation leg.
+        let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let router = ModelRouter::builder()
+            .register(
+                ModelTier::Small,
+                StreamIdModel {
+                    id: "small-stream",
+                    fail_obtain: true,
+                },
+            )
+            .register(
+                ModelTier::Medium,
+                StreamIdModel {
+                    id: "medium-stream",
+                    fail_obtain: false,
+                },
+            )
+            .scorer(StaticScorer(0.1))
+            .build()
+            .unwrap();
+        let agent = Agent::builder()
+            .router(router)
+            .hooks(RecordingHook {
+                decisions: captured.clone(),
+            })
+            .build()
+            .unwrap();
+
+        let mut stream = agent.prompt_stream("hi").await.unwrap();
+        while let Some(event) = stream.next().await {
+            event.unwrap();
+        }
+
+        let hooked = captured.lock().unwrap();
+        assert_eq!(
+            hooked.len(),
+            2,
+            "expected one hook call per decision (failed leg + serving leg): {hooked:?}"
+        );
+        assert_eq!(hooked[0].selected_model_id, "small-stream");
+        assert_eq!(hooked[1].selected_model_id, "medium-stream");
+        assert_eq!(hooked[1].escalated_from, Some(ModelTier::Small));
+    }
+
+    #[tokio::test]
+    async fn test_streaming_routed_cost_attributed_to_serving_model() {
+        use futures::StreamExt;
+
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let router = ModelRouter::builder()
+            .register(
+                ModelTier::Small,
+                StreamIdModel {
+                    id: "small-stream",
+                    fail_obtain: false,
+                },
+            )
+            .register(
+                ModelTier::Large,
+                StreamIdModel {
+                    id: "large-stream",
+                    fail_obtain: false,
+                },
+            )
+            .scorer(StaticScorer(0.9))
+            .build()
+            .unwrap();
+        let agent = Agent::builder()
+            .router(router)
+            .cost_model(ProbeCostModel(seen.clone()))
+            .build()
+            .unwrap();
+
+        let mut stream = agent.prompt_stream("hard question").await.unwrap();
+        while let Some(event) = stream.next().await {
+            event.unwrap();
+        }
+
+        let seen = seen.lock().unwrap();
+        assert!(!seen.is_empty(), "cost model was never consulted");
+        assert!(
+            seen.iter().all(|m| m == "large-stream"),
+            "streaming cost must be attributed to the serving model, got {seen:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_multi_iteration_routed_run_reroutes_each_iteration() {
+        // The Small model makes a tool call on iteration 1, forcing a second
+        // iteration, which the router must score and route afresh (0.1 →
+        // Small, then 0.9 → Large).
+        let router = ModelRouter::builder()
+            .register(ModelTier::Small, ToolCallingModel::new())
+            .register(ModelTier::Large, IdModel { id: "large-model" })
+            .scorer(SeqScorer {
+                scores: &[0.1, 0.9],
+                next: AtomicUsize::new(0),
+            })
+            .build()
+            .unwrap();
+        let agent = Agent::builder()
+            .router(router)
+            .tool(AdderTool)
+            .build()
+            .unwrap();
+
+        let response = agent.prompt("add 2 and 3").await.unwrap();
+        assert_eq!(response.iterations, 2);
+        assert_eq!(response.text(), "served by large-model");
+        assert_eq!(
+            response.route_decisions.len(),
+            2,
+            "expected one route decision per iteration: {:?}",
+            response.route_decisions
+        );
+        assert_eq!(response.route_decisions[0].iteration, 1);
+        assert_eq!(response.route_decisions[1].iteration, 2);
+        assert_eq!(response.route_decisions[0].selected_tier, ModelTier::Small);
+        assert_eq!(response.route_decisions[1].selected_tier, ModelTier::Large);
+    }
+
+    #[tokio::test]
+    async fn test_single_model_agent_fires_no_route_decisions() {
+        let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let agent = Agent::builder()
+            .model(IdModel { id: "solo-model" })
+            .hooks(RecordingHook {
+                decisions: captured.clone(),
+            })
+            .build()
+            .unwrap();
+
+        let response = agent.prompt("hi").await.unwrap();
+        assert_eq!(response.text(), "served by solo-model");
+        assert!(
+            response.route_decisions.is_empty(),
+            "single-model agents never record route decisions"
+        );
+        assert!(
+            captured.lock().unwrap().is_empty(),
+            "the route-decision hook must never fire for single-model agents"
+        );
     }
 }

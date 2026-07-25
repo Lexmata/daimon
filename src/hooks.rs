@@ -60,11 +60,13 @@ pub trait AgentHook: Send + Sync {
         async { Ok(()) }
     }
 
-    /// Called once per routing decision in a routed agent's ReAct loop
-    /// (`prompt`/`prompt_stream`), after the serving model call completes —
-    /// including one call per escalation retry. Not fired for
-    /// `prompt_structured` or handoff network calls. Never called for
-    /// single-model agents.
+    /// Called once per routing decision in a routed agent's ReAct loop (all
+    /// `prompt*` methods, including resumable variants) — for `prompt`, after
+    /// the serving model call completes; for `prompt_stream`, once the serving
+    /// stream is successfully obtained. Includes one call per escalation retry.
+    /// Not fired for `prompt_structured` or handoff network calls, and not
+    /// fired for decisions whose iteration ultimately fails (escalation
+    /// exhausted). Never called for single-model agents.
     fn on_route_decision(
         &self,
         _decision: &RouteDecision,

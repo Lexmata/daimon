@@ -128,7 +128,7 @@ impl HandoffNetwork {
                     max_tokens: agent.max_tokens,
                 };
 
-                let outcome = agent.generate_routed(1, &request).await?;
+                let outcome = agent.generate_routed(agent_iterations, &request).await?;
                 let mut response = outcome.response;
 
                 if let Some(ref usage) = response.usage {
@@ -415,6 +415,7 @@ mod tests {
     use super::*;
     use crate::model::Model;
     use crate::model::types::*;
+    use crate::routing::test_utils::StaticScorer;
     use crate::stream::ResponseStream;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -916,6 +917,105 @@ mod tests {
                 .iter()
                 .any(|m| m.role == Role::Tool && m.content.as_deref() == Some("real tool output")),
             "the genuine tool must have executed"
+        );
+    }
+
+    // ---- Routing (dynamic model routing) ----
+
+    struct FailModel;
+
+    impl Model for FailModel {
+        async fn generate(&self, _request: &ChatRequest) -> Result<ChatResponse> {
+            Err(DaimonError::Model("provider down".into()))
+        }
+
+        async fn generate_stream(&self, _request: &ChatRequest) -> Result<ResponseStream> {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+
+        fn model_id(&self) -> &str {
+            "fail-model"
+        }
+    }
+
+    struct IdModel {
+        id: &'static str,
+    }
+
+    impl Model for IdModel {
+        async fn generate(&self, _request: &ChatRequest) -> Result<ChatResponse> {
+            Ok(ChatResponse {
+                message: Message::assistant(format!("served by {}", self.id)),
+                stop_reason: StopReason::EndTurn,
+                usage: Some(Usage {
+                    input_tokens: 1000,
+                    output_tokens: 1000,
+                    cached_tokens: 0,
+                }),
+            })
+        }
+
+        async fn generate_stream(&self, _request: &ChatRequest) -> Result<ResponseStream> {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+
+        fn model_id(&self) -> &str {
+            self.id
+        }
+    }
+
+    #[tokio::test]
+    async fn test_routed_agent_cost_attributed_to_serving_model() {
+        use crate::cost::{CostModel, TokenDirection};
+        use crate::routing::{ModelRouter, ModelTier};
+        use std::sync::Mutex;
+
+        struct ProbeCostModel(Arc<Mutex<Vec<String>>>);
+
+        impl CostModel for ProbeCostModel {
+            fn cost_per_token(&self, model_id: &str, _direction: TokenDirection) -> f64 {
+                self.0.lock().unwrap().push(model_id.to_string());
+                1.0e-6
+            }
+        }
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        // Small fails, so the active agent's turns escalate to Medium.
+        let router = ModelRouter::builder()
+            .register(ModelTier::Small, FailModel)
+            .register(ModelTier::Medium, IdModel { id: "medium-model" })
+            .scorer(StaticScorer(0.1))
+            .build()
+            .unwrap();
+        let a = Arc::new(
+            Agent::builder()
+                .router(router)
+                .cost_model(ProbeCostModel(seen.clone()))
+                .build()
+                .unwrap(),
+        );
+        let b = Arc::new(
+            Agent::builder()
+                .model(DirectResponseModel::new("b"))
+                .build()
+                .unwrap(),
+        );
+
+        let network = HandoffNetwork::builder()
+            .entry("a")
+            .agent("a", a)
+            .agent("b", b)
+            .build()
+            .unwrap();
+
+        let response = network.run("go").await.unwrap();
+        assert_eq!(response.text(), "served by medium-model");
+
+        let seen = seen.lock().unwrap();
+        assert!(!seen.is_empty(), "cost model was never consulted");
+        assert!(
+            seen.iter().all(|m| m == "medium-model"),
+            "cost must be attributed to the serving (escalated) model, got {seen:?}"
         );
     }
 }

@@ -4,7 +4,9 @@
 ///
 /// Ordered `Small < Medium < Large` (derived `Ord`), so "at least as
 /// competent as" is a simple `>=` comparison.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum ModelTier {
     /// Cheap, fast models (haiku, gpt-4o-mini, local models).
     Small,

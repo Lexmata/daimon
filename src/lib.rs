@@ -74,6 +74,7 @@
 //! - [`hooks`] — Lifecycle hooks for observability and control
 //! - [`orchestration`] — Chain, graph, DAG, and workflow orchestration
 //! - [`retriever`] — RAG retriever trait and tool adapter
+//! - [`routing`] — difficulty-based dynamic model routing across registered models
 //! - [`checkpoint`] — Checkpointing and state persistence
 //! - [`a2a`] — Google Agent-to-Agent protocol support (feature = "a2a")
 //! - [`distributed`] — Distributed agent execution across processes

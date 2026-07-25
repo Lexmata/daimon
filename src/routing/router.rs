@@ -9,7 +9,7 @@ use crate::model::types::ChatRequest;
 use crate::model::{Model, SharedModel};
 
 use super::registry::ModelRegistration;
-use super::scorer::{HeuristicScorer, SharedTaskScorer};
+use super::scorer::{FALLBACK_DIFFICULTY, HeuristicScorer, SharedTaskScorer};
 use super::tier::ModelTier;
 
 /// Difficulty→tier mapping. Difficulty below `small_below` routes Small,
@@ -47,7 +47,8 @@ impl TierBands {
 /// Plain-data record of one routing decision. Stored on
 /// [`AgentResponse`](crate::agent::AgentResponse) and passed to the
 /// `on_route_decision` hook.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RouteDecision {
     /// 1-based ReAct iteration this decision served.
     pub iteration: usize,
@@ -75,6 +76,14 @@ pub struct RoutedModel {
 /// Routes model calls to the cheapest competent registration.
 ///
 /// Construct via [`ModelRouter::builder`]. Cloning is cheap (`Arc`-backed).
+///
+/// # Cross-provider escalation
+///
+/// On failure, escalation replays the complete request — history, system
+/// prompt, and tool outputs — to the next tier's model, which may be a
+/// different provider. Registrations spanning providers therefore imply
+/// cross-provider data flow on failure; keep provider boundaries in mind
+/// when choosing tiers.
 #[derive(Clone)]
 pub struct ModelRouter {
     registrations: Arc<Vec<ModelRegistration>>,
@@ -95,49 +104,82 @@ impl ModelRouter {
     /// than failing the run.
     pub async fn route(&self, iteration: usize, request: &ChatRequest) -> Result<RoutedModel> {
         let difficulty = match self.scorer.score_erased(request).await {
-            Ok(d) => d.clamp(0.0, 1.0),
+            Ok(d) if d.is_finite() => d.clamp(0.0, 1.0),
+            Ok(d) => {
+                tracing::warn!(score = %d, "task scorer returned non-finite difficulty; using fallback 0.5");
+                FALLBACK_DIFFICULTY
+            }
+            Err(DaimonError::Cancelled) => return Err(DaimonError::Cancelled),
             Err(e) => {
                 tracing::warn!(error = %e, "task scorer failed; using fallback 0.5");
-                0.5
+                FALLBACK_DIFFICULTY
             }
         };
         let required_tier = self.bands.tier_for(difficulty);
-        self.select(iteration, difficulty, required_tier, None)
+        self.select(iteration, difficulty, required_tier, None, None)
     }
 
     /// Selects the cheapest registration in the next populated tier strictly
     /// above the failed decision's tier. `None` when no higher tier is
     /// populated (escalation exhausted).
+    ///
+    /// When the failed registration has a provider-group label, escalation
+    /// only considers registrations bearing the same label — keeping data
+    /// contained within the provider boundary.
     pub(crate) fn escalate(&self, decision: &RouteDecision) -> Option<RoutedModel> {
+        let failed_group_name = self
+            .registrations
+            .iter()
+            .find(|r| {
+                r.model.model_id_erased() == decision.selected_model_id
+                    && r.tier == decision.selected_tier
+            })
+            .and_then(|r| r.group.as_deref());
+
         let next_tier = [ModelTier::Small, ModelTier::Medium, ModelTier::Large]
             .into_iter()
             .filter(|t| *t > decision.selected_tier)
-            .find(|t| self.registrations.iter().any(|r| r.tier == *t))?;
-        Some(
-            self.select(
+            .find(|t| {
+                self.registrations
+                    .iter()
+                    .any(|r| r.tier == *t && group_matches(r, failed_group_name))
+            })?;
+        let mut routed = self
+            .select(
                 decision.iteration,
                 decision.difficulty,
                 next_tier,
                 Some(decision.selected_tier),
+                failed_group_name,
             )
-            .expect("escalation tier is populated"),
-        )
+            .ok()?;
+        routed.decision.required_tier = decision.required_tier;
+        Some(routed)
     }
 
     /// Core selection: smallest populated tier ≥ `required_tier` (best-effort
     /// highest populated tier when none qualifies), then cheapest by cost
     /// ordering key within the tier, ties broken by registration order.
+    ///
+    /// When `group` is `Some`, only registrations with that exact group
+    /// label are considered (unlabeled registrations are excluded).
+    /// `None` = no group filtering (all registrations qualify).
     fn select(
         &self,
         iteration: usize,
         difficulty: f64,
         required_tier: ModelTier,
         escalated_from: Option<ModelTier>,
+        group: Option<&str>,
     ) -> Result<RoutedModel> {
         let tier = [ModelTier::Small, ModelTier::Medium, ModelTier::Large]
             .into_iter()
             .filter(|t| *t >= required_tier)
-            .find(|t| self.registrations.iter().any(|r| r.tier == *t));
+            .find(|t| {
+                self.registrations
+                    .iter()
+                    .any(|r| r.tier == *t && group_matches(r, group))
+            });
 
         let tier = match tier {
             Some(t) => t,
@@ -145,11 +187,15 @@ impl ModelRouter {
                 let highest = self
                     .registrations
                     .iter()
+                    .filter(|r| group_matches(r, group))
                     .map(|r| r.tier)
                     .max()
                     .ok_or_else(|| {
                         DaimonError::Builder("model router has no registrations".into())
                     })?;
+                // Note: `highest` may be below `required_tier` when
+                // `route()` filters by group — this path is the last-resort
+                // fallback, not a correctness bug.
                 tracing::warn!(
                     ?required_tier,
                     ?highest,
@@ -163,7 +209,7 @@ impl ModelRouter {
             .registrations
             .iter()
             .enumerate()
-            .filter(|(_, r)| r.tier == tier)
+            .filter(|(_, r)| r.tier == tier && group_matches(r, group))
             .min_by(|(a_idx, a), (b_idx, b)| {
                 let ka = a.effective_cost(self.cost_fallback.as_ref()).ordering_key();
                 let kb = b.effective_cost(self.cost_fallback.as_ref()).ordering_key();
@@ -171,7 +217,7 @@ impl ModelRouter {
                     .unwrap_or(std::cmp::Ordering::Equal)
                     .then(a_idx.cmp(b_idx))
             })
-            .expect("selected tier is populated")
+            .ok_or_else(|| DaimonError::Other("router selected tier has no registrations".into()))?
             .1;
 
         let decision = RouteDecision {
@@ -195,6 +241,18 @@ impl ModelRouter {
             handle: reg.model.clone(),
             decision,
         })
+    }
+}
+
+/// Returns `true` when a registration matches the optional group filter:
+/// `None` (no filter) — every registration qualifies. `Some(g)` — only
+/// registrations whose group label exactly matches `g` qualify; unlabeled
+/// registrations are excluded to keep data contained within the provider
+/// boundary during escalation.
+fn group_matches(r: &ModelRegistration, group: Option<&str>) -> bool {
+    match group {
+        Some(g) => r.group.as_deref() == Some(g),
+        None => true,
     }
 }
 
@@ -223,6 +281,37 @@ impl ModelRouterBuilder {
     ) -> Self {
         self.registrations
             .push(ModelRegistration::new(tier, model).with_cost(cost));
+        self
+    }
+
+    /// Registers an owned model at a tier with a provider-group label.
+    /// Escalation from a grouped registration only considers registrations
+    /// in the same group, keeping the replayed request within one provider.
+    pub fn register_grouped<M: Model + 'static>(
+        mut self,
+        tier: ModelTier,
+        model: M,
+        group: impl Into<String>,
+    ) -> Self {
+        self.registrations
+            .push(ModelRegistration::new(tier, model).with_group(group));
+        self
+    }
+
+    /// Registers an owned model at a tier with explicit cost and a
+    /// provider-group label.
+    pub fn register_grouped_with_cost<M: Model + 'static>(
+        mut self,
+        tier: ModelTier,
+        model: M,
+        cost: super::registry::ModelCost,
+        group: impl Into<String>,
+    ) -> Self {
+        self.registrations.push(
+            ModelRegistration::new(tier, model)
+                .with_cost(cost)
+                .with_group(group),
+        );
         self
     }
 
@@ -258,12 +347,34 @@ impl ModelRouterBuilder {
         self
     }
 
-    /// Builds the router. Fails when no models were registered.
+    /// Builds the router. Fails when no models were registered or the
+    /// tier bands are not ordered within `[0.0, 1.0]`.
     pub fn build(self) -> Result<ModelRouter> {
         if self.registrations.is_empty() {
             return Err(DaimonError::Builder(
                 "model router requires at least one registration".into(),
             ));
+        }
+        // The chained comparison also rejects NaN bounds.
+        if !(0.0 <= self.bands.small_below
+            && self.bands.small_below <= self.bands.medium_below
+            && self.bands.medium_below <= 1.0)
+        {
+            return Err(DaimonError::Builder(format!(
+                "tier bands must satisfy 0.0 <= small_below ({}) <= medium_below ({}) <= 1.0",
+                self.bands.small_below, self.bands.medium_below
+            )));
+        }
+        if self.cost_fallback.is_none() {
+            for reg in &self.registrations {
+                if reg.cost.is_none() {
+                    let model_id = reg.model.model_id_erased();
+                    tracing::warn!(
+                        model_id = %model_id,
+                        "registration '{model_id}' has no cost metadata and no cost model is set; it will sort last in its tier"
+                    );
+                }
+            }
         }
         Ok(ModelRouter {
             registrations: Arc::new(self.registrations),
@@ -281,7 +392,7 @@ mod tests {
     use super::*;
     use crate::cost::TokenDirection;
     use crate::model::types::{ChatResponse, Message, StopReason};
-    use crate::routing::{ModelCost, TaskScorer};
+    use crate::routing::{ModelCost, TaskScorer, test_utils::StaticScorer};
     use crate::stream::ResponseStream;
 
     struct StubModel {
@@ -306,19 +417,19 @@ mod tests {
         }
     }
 
-    struct StaticScorer(f64);
-
-    impl TaskScorer for StaticScorer {
-        async fn score(&self, _request: &ChatRequest) -> Result<f64> {
-            Ok(self.0)
-        }
-    }
-
     struct FailingScorer;
 
     impl TaskScorer for FailingScorer {
         async fn score(&self, _request: &ChatRequest) -> Result<f64> {
             Err(DaimonError::Model("scorer down".into()))
+        }
+    }
+
+    struct CancelledScorer;
+
+    impl TaskScorer for CancelledScorer {
+        async fn score(&self, _request: &ChatRequest) -> Result<f64> {
+            Err(DaimonError::Cancelled)
         }
     }
 
@@ -350,6 +461,18 @@ mod tests {
     #[test]
     fn empty_router_fails_build() {
         let result = ModelRouter::builder().build();
+        assert!(matches!(result, Err(DaimonError::Builder(_))));
+    }
+
+    #[test]
+    fn inverted_bands_fail_build() {
+        let result = ModelRouter::builder()
+            .register(ModelTier::Small, StubModel { id: "small" })
+            .bands(TierBands {
+                small_below: 0.8,
+                medium_below: 0.2,
+            })
+            .build();
         assert!(matches!(result, Err(DaimonError::Builder(_))));
     }
 
@@ -489,6 +612,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn out_of_range_scores_are_clamped() {
+        let high = ModelRouter::builder()
+            .register_with_cost(
+                ModelTier::Large,
+                StubModel { id: "large" },
+                cost(1e-6, 1e-6),
+            )
+            .scorer(StaticScorer(1.7))
+            .build()
+            .unwrap();
+        let routed = high.route(1, &empty_request()).await.unwrap();
+        assert_eq!(routed.decision.difficulty, 1.0);
+        assert_eq!(routed.decision.required_tier, ModelTier::Large);
+
+        let low = ModelRouter::builder()
+            .register_with_cost(
+                ModelTier::Small,
+                StubModel { id: "small" },
+                cost(1e-6, 1e-6),
+            )
+            .scorer(StaticScorer(-0.2))
+            .build()
+            .unwrap();
+        let routed = low.route(1, &empty_request()).await.unwrap();
+        assert_eq!(routed.decision.difficulty, 0.0);
+        assert_eq!(routed.decision.required_tier, ModelTier::Small);
+    }
+
+    #[tokio::test]
+    async fn non_finite_scorer_output_uses_fallback() {
+        let router = ModelRouter::builder()
+            .register_with_cost(
+                ModelTier::Small,
+                StubModel { id: "small" },
+                cost(1e-6, 1e-6),
+            )
+            .register_with_cost(
+                ModelTier::Medium,
+                StubModel { id: "medium" },
+                cost(2e-6, 2e-6),
+            )
+            .scorer(StaticScorer(f64::NAN))
+            .build()
+            .unwrap();
+        let routed = router.route(1, &empty_request()).await.unwrap();
+        // NaN would survive clamp() and silently map to Large; the guard
+        // replaces it with the fallback difficulty.
+        assert_eq!(routed.decision.difficulty, 0.5);
+        assert_eq!(routed.decision.required_tier, ModelTier::Medium);
+        assert_eq!(routed.decision.selected_model_id, "medium");
+    }
+
+    #[tokio::test]
+    async fn cancelled_scorer_error_propagates() {
+        let router = ModelRouter::builder()
+            .register_with_cost(
+                ModelTier::Small,
+                StubModel { id: "small" },
+                cost(1e-6, 1e-6),
+            )
+            .scorer(CancelledScorer)
+            .build()
+            .unwrap();
+        let result = router.route(1, &empty_request()).await;
+        // Cancellation must not degrade to the 0.5 difficulty fallback.
+        assert!(matches!(result, Err(DaimonError::Cancelled)));
+    }
+
+    #[tokio::test]
     async fn escalate_moves_to_next_populated_tier() {
         let router = ModelRouter::builder()
             .register_with_cost(
@@ -511,5 +703,136 @@ mod tests {
         assert_eq!(escalated.decision.escalated_from, Some(ModelTier::Small));
         // No tier above Large: escalation is exhausted.
         assert!(router.escalate(&escalated.decision).is_none());
+    }
+
+    #[tokio::test]
+    async fn escalated_decision_keeps_original_required_tier() {
+        let router = ModelRouter::builder()
+            .register_with_cost(
+                ModelTier::Small,
+                StubModel { id: "small" },
+                cost(1e-6, 1e-6),
+            )
+            .register_with_cost(
+                ModelTier::Medium,
+                StubModel { id: "medium" },
+                cost(2e-6, 2e-6),
+            )
+            .scorer(StaticScorer(0.1))
+            .build()
+            .unwrap();
+        let routed = router.route(1, &empty_request()).await.unwrap();
+        assert_eq!(routed.decision.required_tier, ModelTier::Small);
+        // Small failed; escalation moves to Medium but the record must
+        // keep the difficulty-derived Small requirement.
+        let escalated = router.escalate(&routed.decision).unwrap();
+        assert_eq!(escalated.decision.required_tier, ModelTier::Small);
+        assert_eq!(escalated.decision.selected_tier, ModelTier::Medium);
+        assert_eq!(escalated.decision.escalated_from, Some(ModelTier::Small));
+    }
+
+    #[tokio::test]
+    async fn custom_bands_and_shared_registrations_apply() {
+        let shared_model: SharedModel = Arc::new(StubModel { id: "small" });
+        let shared_scorer: SharedTaskScorer = Arc::new(StaticScorer(0.4));
+        let router = ModelRouter::builder()
+            .register_shared(ModelTier::Small, shared_model)
+            .shared_scorer(shared_scorer)
+            .bands(TierBands {
+                small_below: 0.5,
+                medium_below: 0.9,
+            })
+            .build()
+            .unwrap();
+        let routed = router.route(1, &empty_request()).await.unwrap();
+        // 0.4 maps to Medium under the default bands; the widened Small
+        // band proves the custom bands were applied.
+        assert_eq!(routed.decision.required_tier, ModelTier::Small);
+        assert_eq!(routed.decision.selected_tier, ModelTier::Small);
+        assert_eq!(routed.decision.selected_model_id, "small");
+    }
+
+    // ---- Provider-group labels ----
+
+    #[tokio::test]
+    async fn group_labels_contain_escalation_to_same_group() {
+        let router = ModelRouter::builder()
+            .register_grouped_with_cost(
+                ModelTier::Small,
+                StubModel { id: "small-a" },
+                cost(1e-6, 1e-6),
+                "provider-a",
+            )
+            .register_grouped_with_cost(
+                ModelTier::Medium,
+                StubModel { id: "medium-a" },
+                cost(2e-6, 2e-6),
+                "provider-a",
+            )
+            .register_grouped_with_cost(
+                ModelTier::Medium,
+                StubModel { id: "medium-b" },
+                cost(1e-6, 1e-6), // cheaper but different group
+                "provider-b",
+            )
+            .scorer(StaticScorer(0.1))
+            .build()
+            .unwrap();
+        let routed = router.route(1, &empty_request()).await.unwrap();
+        assert_eq!(routed.decision.selected_model_id, "small-a");
+        let escalated = router.escalate(&routed.decision).unwrap();
+        // Must pick medium-a (same group), not the cheaper medium-b.
+        assert_eq!(escalated.decision.selected_model_id, "medium-a");
+        assert_eq!(escalated.decision.selected_tier, ModelTier::Medium);
+    }
+
+    #[tokio::test]
+    async fn group_labels_exhaust_when_no_same_group_populated_above() {
+        let router = ModelRouter::builder()
+            .register_grouped_with_cost(
+                ModelTier::Small,
+                StubModel { id: "small-a" },
+                cost(1e-6, 1e-6),
+                "provider-a",
+            )
+            .register_grouped_with_cost(
+                ModelTier::Medium,
+                StubModel { id: "medium-b" },
+                cost(2e-6, 2e-6),
+                "provider-b",
+            )
+            .scorer(StaticScorer(0.1))
+            .build()
+            .unwrap();
+        let routed = router.route(1, &empty_request()).await.unwrap();
+        assert_eq!(routed.decision.selected_model_id, "small-a");
+        assert!(router.escalate(&routed.decision).is_none());
+    }
+
+    #[tokio::test]
+    async fn grouped_escalation_skips_unlabeled_registrations() {
+        let router = ModelRouter::builder()
+            .register_grouped_with_cost(
+                ModelTier::Small,
+                StubModel { id: "small-a" },
+                cost(1e-6, 1e-6),
+                "provider-a",
+            )
+            // Unlabeled Medium — must NOT be reachable from a grouped fail.
+            .register_with_cost(
+                ModelTier::Medium,
+                StubModel { id: "medium-unlabeled" },
+                cost(2e-6, 2e-6),
+            )
+            .scorer(StaticScorer(0.1))
+            .build()
+            .unwrap();
+        let routed = router.route(1, &empty_request()).await.unwrap();
+        assert_eq!(routed.decision.selected_model_id, "small-a");
+        // Grouped Small fails; unlabeled Medium must NOT be eligible.
+        assert!(
+            router.escalate(&routed.decision).is_none(),
+            "grouped escalation must not leak to unlabeled registrations"
+        );
     }
 }

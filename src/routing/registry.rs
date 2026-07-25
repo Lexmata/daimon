@@ -28,37 +28,49 @@ impl ModelCost {
 /// One model registered with the router, at a competence tier, with optional
 /// explicit cost. When `cost` is `None`, cost is resolved through the
 /// router's [`CostModel`] fallback using the model's `model_id()`.
-pub struct ModelRegistration {
+pub(crate) struct ModelRegistration {
     /// The model to call when this registration is selected.
     pub model: SharedModel,
     /// Competence tier this model is registered at.
     pub tier: ModelTier,
     /// Explicit per-token cost; wins over the `CostModel` fallback.
     pub cost: Option<ModelCost>,
+    /// Optional provider-group label. When set, escalation stays within
+    /// registrations bearing the same group label.
+    pub group: Option<String>,
 }
 
 impl ModelRegistration {
     /// Registers an owned model at the given tier (cost via fallback).
-    pub fn new<M: Model + 'static>(tier: ModelTier, model: M) -> Self {
+    pub(crate) fn new<M: Model + 'static>(tier: ModelTier, model: M) -> Self {
         Self {
             model: Arc::new(model),
             tier,
             cost: None,
+            group: None,
         }
     }
 
     /// Registers a shared model at the given tier (cost via fallback).
-    pub fn shared(tier: ModelTier, model: SharedModel) -> Self {
+    pub(crate) fn shared(tier: ModelTier, model: SharedModel) -> Self {
         Self {
             model,
             tier,
             cost: None,
+            group: None,
         }
     }
 
     /// Sets an explicit per-token cost, overriding any `CostModel` fallback.
-    pub fn with_cost(mut self, cost: ModelCost) -> Self {
+    pub(crate) fn with_cost(mut self, cost: ModelCost) -> Self {
         self.cost = Some(cost);
+        self
+    }
+
+    /// Sets a provider-group label. Escalation from a grouped registration
+    /// stays within registrations bearing the same label.
+    pub(crate) fn with_group(mut self, group: impl Into<String>) -> Self {
+        self.group = Some(group.into());
         self
     }
 

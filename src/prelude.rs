@@ -39,8 +39,8 @@ pub use crate::retriever::{
     RetrieverTool, ScoredDocument, SimpleKnowledgeBase, VectorStore,
 };
 pub use crate::routing::{
-    HeuristicScorer, LlmScorer, ModelCost, ModelRegistration, ModelRouter, ModelTier,
-    RouteDecision, TaskScorer, TierBands,
+    HeuristicScorer, LlmScorer, ModelCost, ModelRouter, ModelRouterBuilder, ModelTier,
+    RouteDecision, RoutedModel, TaskScorer, TierBands,
 };
 pub use crate::stream::{ResponseStream, StreamEvent};
 pub use crate::tool::{Tool, ToolOutput, ToolRegistry, ToolRetryPolicy};

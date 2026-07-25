@@ -36,7 +36,31 @@ use crate::middleware::MiddlewareStack;
 use crate::model::SharedModel;
 use crate::model::types::{ChatRequest, ChatResponse};
 use crate::routing::{ModelRouter, RouteDecision};
+use crate::stream::ResponseStream;
 use crate::tool::{ToolRegistry, ToolRetryPolicy};
+
+/// Shared error-escalation tail for routed model calls. Wires the `Err` arm
+/// of a model-call `match` — move the failed decision, look up the next tier,
+/// and either reassign `routed` for a retry or return the original error.
+macro_rules! escalate_on_failure {
+    ($router:expr, $routed:ident, $decisions:ident, $error:expr) => {{
+        let failed = $routed.decision;
+        let next = $router.escalate(&failed);
+        $decisions.push(failed);
+        match next {
+            Some(next) => {
+                tracing::warn!(
+                    error = %$error,
+                    to_tier = ?next.decision.selected_tier,
+                    to_model = %next.decision.selected_model_id,
+                    "model call failed; escalating tier"
+                );
+                $routed = next;
+            }
+            None => return Err($error),
+        }
+    }};
+}
 
 /// What serves model calls for this agent: one fixed model, or a router
 /// choosing per call among registered models.
@@ -48,8 +72,10 @@ pub(crate) enum ModelSource {
 
 /// An AI agent that runs the ReAct loop: model → tool calls (optional) → model → … → final response.
 ///
-/// Construct via [`Agent::builder()`]. Requires a [`Model`](crate::model::Model); tools, memory,
-/// and hooks are optional. Memory defaults to [`SlidingWindowMemory`](crate::memory::SlidingWindowMemory) with 50 messages.
+/// Construct via [`Agent::builder()`]. Requires either a [`Model`](crate::model::Model)
+/// or a [`ModelRouter`](crate::routing::ModelRouter) (via [`AgentBuilder::router`]);
+/// tools, memory, and hooks are optional. Memory defaults to
+/// [`SlidingWindowMemory`](crate::memory::SlidingWindowMemory) with 50 messages.
 pub struct Agent {
     pub(crate) model: ModelSource,
     pub(crate) system_prompt: Option<String>,
@@ -102,7 +128,7 @@ pub(crate) struct GenerationOutcome {
     pub decisions: Vec<RouteDecision>,
 }
 
-impl Agent {
+impl ModelSource {
     /// Selects the model for one call and generates, applying routing and
     /// tier escalation when the agent has a router. Single-model agents call
     /// their model directly, exactly as before.
@@ -111,7 +137,7 @@ impl Agent {
         iteration: usize,
         request: &ChatRequest,
     ) -> Result<GenerationOutcome> {
-        match &self.model {
+        match self {
             ModelSource::Single(model) => {
                 let response = model.generate_erased(request).await?;
                 Ok(GenerationOutcome {
@@ -135,24 +161,56 @@ impl Agent {
                             });
                         }
                         Err(DaimonError::Cancelled) => return Err(DaimonError::Cancelled),
-                        Err(e) => {
-                            decisions.push(routed.decision);
-                            match router.escalate(decisions.last().expect("decision just pushed")) {
-                                Some(next) => {
-                                    tracing::warn!(
-                                        error = %e,
-                                        to_tier = ?next.decision.selected_tier,
-                                        to_model = %next.decision.selected_model_id,
-                                        "model call failed; escalating tier"
-                                    );
-                                    routed = next;
-                                }
-                                None => return Err(e),
-                            }
-                        }
+                        Err(e) => escalate_on_failure!(router, routed, decisions, e),
                     }
                 }
             }
         }
+    }
+
+    /// Streaming counterpart of [`generate_routed`](ModelSource::generate_routed):
+    /// selects and obtains a response stream, applying the same routing and
+    /// tier escalation. Escalation covers stream-obtain failures only —
+    /// mid-stream errors surface as `StreamEvent::Error` in the returned stream.
+    pub(crate) async fn stream_routed(
+        &self,
+        iteration: usize,
+        request: &ChatRequest,
+    ) -> Result<(ResponseStream, Vec<RouteDecision>, String)> {
+        match self {
+            ModelSource::Single(model) => {
+                let stream = model.generate_stream_erased(request).await?;
+                Ok((stream, Vec::new(), model.model_id_erased().to_string()))
+            }
+            ModelSource::Routed(router) => {
+                let mut routed = router.route(iteration, request).await?;
+                let mut decisions: Vec<RouteDecision> = Vec::new();
+                loop {
+                    match routed.handle.generate_stream_erased(request).await {
+                        Ok(stream) => {
+                            let serving_id = routed.decision.selected_model_id.clone();
+                            decisions.push(routed.decision);
+                            return Ok((stream, decisions, serving_id));
+                        }
+                        Err(DaimonError::Cancelled) => return Err(DaimonError::Cancelled),
+                        Err(e) => escalate_on_failure!(router, routed, decisions, e),
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl Agent {
+    /// Selects the model for one call and generates, applying routing and
+    /// tier escalation when the agent has a router. Thin delegate to
+    /// [`ModelSource::generate_routed`]; the streaming path uses
+    /// [`ModelSource::stream_routed`] directly on a cloned source.
+    pub(crate) async fn generate_routed(
+        &self,
+        iteration: usize,
+        request: &ChatRequest,
+    ) -> Result<GenerationOutcome> {
+        self.model.generate_routed(iteration, request).await
     }
 }
