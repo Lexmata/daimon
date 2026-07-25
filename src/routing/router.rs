@@ -108,8 +108,6 @@ impl ModelRouter {
     /// Selects the cheapest registration in the next populated tier strictly
     /// above the failed decision's tier. `None` when no higher tier is
     /// populated (escalation exhausted).
-    // Used by the agent loop (later tasks); tests exercise it today.
-    #[allow(dead_code)]
     pub(crate) fn escalate(&self, decision: &RouteDecision) -> Option<RoutedModel> {
         let next_tier = [ModelTier::Small, ModelTier::Medium, ModelTier::Large]
             .into_iter()

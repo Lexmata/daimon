@@ -128,12 +128,13 @@ impl HandoffNetwork {
                     max_tokens: agent.max_tokens,
                 };
 
-                let mut response = agent.model.generate_erased(&request).await?;
+                let outcome = agent.generate_routed(1, &request).await?;
+                let mut response = outcome.response;
 
                 if let Some(ref usage) = response.usage {
                     total_usage.accumulate(usage);
                     if let Some(tracker) = tracker {
-                        tracker.record(agent.model.model_id_erased(), usage);
+                        tracker.record(&outcome.serving_model_id, usage);
                     }
                 }
 

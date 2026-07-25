@@ -82,7 +82,8 @@ impl Agent {
                 max_tokens: self.max_tokens,
             };
 
-            let response = self.model.generate_erased(&request).await?;
+            let outcome = self.generate_routed(attempt + 1, &request).await?;
+            let response = outcome.response;
 
             if let Some(ref usage) = response.usage {
                 total_usage.accumulate(usage);

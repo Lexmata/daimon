@@ -28,7 +28,7 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
-use crate::agent::{Agent, AgentResponse};
+use crate::agent::{Agent, AgentResponse, ModelSource};
 use crate::cost::CostTracker;
 use crate::error::Result;
 use crate::guardrails::{InputGuardrail, OutputGuardrail};
@@ -132,12 +132,14 @@ impl HotSwapAgent {
     /// Replaces the LLM model at runtime.
     pub async fn swap_model<M: Model + 'static>(&self, model: M) {
         let model: SharedModel = Arc::new(model);
-        self.update(move |agent| agent.model = model).await;
+        self.update(move |agent| agent.model = ModelSource::Single(model))
+            .await;
     }
 
     /// Replaces the model with a pre-boxed shared model.
     pub async fn swap_shared_model(&self, model: SharedModel) {
-        self.update(move |agent| agent.model = model).await;
+        self.update(move |agent| agent.model = ModelSource::Single(model))
+            .await;
     }
 
     /// Replaces the system prompt.

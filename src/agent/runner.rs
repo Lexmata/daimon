@@ -3,7 +3,7 @@
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
-use crate::agent::Agent;
+use crate::agent::{Agent, ModelSource};
 use crate::cost::CostTracker;
 use crate::error::{DaimonError, Result};
 use crate::guardrails::{ErasedOutputGuardrail, GuardrailResult};
@@ -388,8 +388,7 @@ impl Agent {
 
         let result = {
             tracing::debug!(iteration, "calling model");
-            self.model
-                .generate_erased(&request)
+            self.generate_routed(iteration, &request)
                 .instrument(tracing::info_span!("model_generate", iteration))
                 .await
         };
@@ -397,7 +396,8 @@ impl Agent {
         *messages = std::mem::take(&mut request.messages);
         *tool_specs_vec = std::mem::take(&mut request.tools);
 
-        let mut response = result?;
+        let outcome = result?;
+        let mut response = outcome.response;
 
         if let Some(ref usage) = response.usage {
             tracing::debug!(
@@ -407,7 +407,7 @@ impl Agent {
             );
             total_usage.accumulate(usage);
             if let Some(tracker) = tracker {
-                *total_cost += tracker.record(self.model.model_id_erased(), usage);
+                *total_cost += tracker.record(&outcome.serving_model_id, usage);
             }
         }
 
@@ -668,7 +668,7 @@ impl Agent {
             self.tools.tool_specs().to_vec();
         let max_iterations = self.max_iterations;
 
-        let model = self.model.clone();
+        let model_source = self.model.clone();
         let tools = self.tools.clone();
         let memory = self.memory.clone();
         let hooks = self.hooks.clone();
@@ -723,6 +723,13 @@ impl Agent {
                     tools: std::mem::take(&mut tool_specs_vec),
                     temperature,
                     max_tokens,
+                };
+
+                // Pick this iteration's model. Routed agents route once per
+                // iteration here; obtain-failure escalation is a later task.
+                let model = match &model_source {
+                    ModelSource::Single(model) => model.clone(),
+                    ModelSource::Routed(router) => router.route(iteration, &request).await?.handle,
                 };
 
                 let stream_result = model.generate_stream_erased(&request).await;

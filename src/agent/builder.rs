@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use crate::agent::Agent;
 use crate::agent::hitl::{AskHumanTool, HumanInputHandler};
+use crate::agent::{Agent, ModelSource};
 use crate::cost::{CostModel, CostTracker};
 use crate::error::{DaimonError, Result};
 use crate::guardrails::{InputGuardrail, OutputGuardrail};
@@ -10,13 +10,14 @@ use crate::memory::{Memory, SharedMemory, SlidingWindowMemory};
 use crate::middleware::{Middleware, MiddlewareStack};
 use crate::model::{Model, SharedModel};
 use crate::prompt::PromptTemplate;
+use crate::routing::ModelRouter;
 use crate::tool::{Tool, ToolRegistry, ToolRetryPolicy};
 
 /// Fluent builder for constructing an [`Agent`].
 ///
 /// Model is required; all other fields have defaults. Call [`build`](AgentBuilder::build) to produce the agent.
 pub struct AgentBuilder {
-    model: Option<SharedModel>,
+    model: Option<ModelSource>,
     system_prompt: Option<String>,
     prompt_template: Option<PromptTemplate>,
     tools: ToolRegistry,
@@ -63,13 +64,22 @@ impl AgentBuilder {
 
     /// Sets the LLM provider. Required for [`build`](AgentBuilder::build) to succeed.
     pub fn model<M: Model + 'static>(mut self, model: M) -> Self {
-        self.model = Some(Arc::new(model));
+        self.model = Some(ModelSource::Single(Arc::new(model)));
         self
     }
 
     /// Sets a pre-boxed shared model. Use when you need to share a model across multiple agents.
     pub fn shared_model(mut self, model: SharedModel) -> Self {
-        self.model = Some(model);
+        self.model = Some(ModelSource::Single(model));
+        self
+    }
+
+    /// Routes each model call through the given router instead of using a
+    /// fixed model. Overrides any previously set model (and is overridden by
+    /// a later `.model()`/`.shared_model()` call), matching existing
+    /// last-setter-wins builder semantics.
+    pub fn router(mut self, router: ModelRouter) -> Self {
+        self.model = Some(ModelSource::Routed(router));
         self
     }
 
@@ -336,5 +346,17 @@ mod tests {
             result.unwrap_err(),
             DaimonError::DuplicateTool(name) if name == "fake"
         ));
+    }
+
+    #[test]
+    fn test_build_with_router_succeeds() {
+        use crate::routing::{ModelRouter, ModelTier};
+
+        let router = ModelRouter::builder()
+            .register(ModelTier::Small, FakeModel)
+            .build()
+            .unwrap();
+        let agent = AgentBuilder::new().router(router).build();
+        assert!(agent.is_ok());
     }
 }
