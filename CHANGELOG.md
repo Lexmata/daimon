@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Dynamic model routing:** `ModelRouter` scores each ReAct iteration's
+  difficulty and routes the model call to the cheapest competent registered
+  model, escalating to higher tiers on provider failure. New
+  `daimon::routing` module (`ModelTier`, `TaskScorer` with
+  `HeuristicScorer`/`LlmScorer`, `ModelCost`, `ModelRegistration`,
+  `TierBands`, `RouteDecision`), `AgentBuilder::router`,
+  `AgentHook::on_route_decision`, and `AgentResponse::route_decisions`
+  (additive field — technically breaking for downstream `AgentResponse`
+  literal construction).
+
 ## [0.23.0] - 2026-07-22
 
 ### Added

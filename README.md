@@ -15,6 +15,7 @@ Daimon implements the **ReAct** (Reason-Act-Observe) pattern: the agent calls a 
 - **Cancellation** via `tokio_util::CancellationToken`
 - **Tracing** instrumentation on all agent and provider operations
 - **Retry logic** with exponential backoff for transient provider errors
+- **Dynamic model routing** — score each iteration's difficulty and route to the cheapest competent registered model, with tier escalation on failure
 
 ## Quick Start
 
@@ -240,6 +241,30 @@ structured event log) — and still drops straight into `.memory()` since it
 implements the same `Memory` trait. See `daimon-core`'s `core_memory` /
 `archival_memory` / `episodic_memory` modules or the CHANGELOG's DAIM-23
 entry for details.
+
+## Model Routing
+
+Register multiple models at competence tiers and let a `ModelRouter` pick the
+cheapest competent one per ReAct iteration:
+
+```rust
+use daimon::prelude::*;
+
+let router = ModelRouter::builder()
+    .register(ModelTier::Small, cheap_model)
+    .register(ModelTier::Large, strong_model)
+    .scorer(HeuristicScorer::default())   // default; or LlmScorer::new(judge_model)
+    .cost_model(OpenAiCostModel)          // fallback pricing for registrations without explicit cost
+    .build()?;
+
+let agent = Agent::builder().router(router).build()?;
+let response = agent.prompt("...").await?;
+println!("served by {}", response.route_decisions[0].selected_model_id);
+```
+
+If the selected provider fails, the router retries the iteration on the next
+tier up. Every decision is recorded on `AgentResponse::route_decisions` and
+surfaced through the `AgentHook::on_route_decision` hook.
 
 ## Architecture
 

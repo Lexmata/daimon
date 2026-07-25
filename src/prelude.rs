@@ -38,6 +38,10 @@ pub use crate::retriever::{
     Document, InMemoryVectorStore, InMemoryVectorStoreBackend, KnowledgeBase, Retriever,
     RetrieverTool, ScoredDocument, SimpleKnowledgeBase, VectorStore,
 };
+pub use crate::routing::{
+    HeuristicScorer, LlmScorer, ModelCost, ModelRegistration, ModelRouter, ModelTier,
+    RouteDecision, TaskScorer, TierBands,
+};
 pub use crate::stream::{ResponseStream, StreamEvent};
 pub use crate::tool::{Tool, ToolOutput, ToolRegistry, ToolRetryPolicy};
 

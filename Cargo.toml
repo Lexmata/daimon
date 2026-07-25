@@ -193,6 +193,11 @@ path = "examples/ollama_agent.rs"
 required-features = ["ollama"]
 
 [[example]]
+name = "routed_agent"
+path = "examples/routed_agent.rs"
+required-features = ["openai"]
+
+[[example]]
 name = "tool_macro"
 path = "examples/tool_macro.rs"
 required-features = ["openai", "macros"]
