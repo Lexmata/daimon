@@ -216,7 +216,7 @@ If the response includes `usage`, it is accumulated into `total_usage` and `trac
   `Transform` rewrites it before persistence.
 - Call `hooks.on_iteration_end_erased(&state)`.
 - Add the (possibly transformed) assistant message to memory and to the message list.
-- Return `AgentResponse { messages, final_text, iterations, usage, cost }`.
+- Return `AgentResponse { messages, final_text, iterations, usage, cost, route_decisions }`.
 
 ### Prompt Methods Comparison
 
@@ -847,6 +847,9 @@ pub struct AgentResponse {
     pub usage: Usage,
     /// Estimated cost in USD (requires CostModel on agent)
     pub cost: f64,
+    /// Routing decisions, one per iteration (plus one per escalation retry).
+    /// Empty for single-model agents.
+    pub route_decisions: Vec<RouteDecision>,
 }
 
 impl AgentResponse {
@@ -863,6 +866,7 @@ impl AgentResponse {
 - **`iterations`** — How many times the model was invoked. 1 = no tool calls; 2+ = one or more tool rounds.
 - **`usage`** — `Usage { input_tokens, output_tokens, cached_tokens }` aggregated across all iterations.
 - **`cost`** — USD cost from the `CostTracker` if a `CostModel` was configured; otherwise 0.
+- **`route_decisions`** — Routing decisions made during the prompt, one per iteration plus one per escalation retry. Empty for single-model agents.
 
 ---
 
