@@ -739,17 +739,50 @@ impl Agent {
                     max_tokens,
                 };
 
-                // Pick this iteration's model. Routed agents route once per
-                // iteration here; obtain-failure escalation is a later task.
-                let model = match &model_source {
-                    ModelSource::Single(model) => model.clone(),
-                    ModelSource::Routed(router) => router.route(iteration, &request).await?.handle,
+                // Pick this iteration's model: single-model agents use their
+                // model directly; routed agents route per iteration and
+                // escalate tiers when the stream cannot be obtained.
+                let (mut inner, decisions, serving_id) = match &model_source {
+                    ModelSource::Single(model) => {
+                        let stream = model.generate_stream_erased(&request).await?;
+                        (stream, Vec::new(), model.model_id_erased().to_string())
+                    }
+                    ModelSource::Routed(router) => {
+                        let mut routed = router.route(iteration, &request).await?;
+                        let mut decisions: Vec<RouteDecision> = Vec::new();
+                        loop {
+                            match routed.handle.generate_stream_erased(&request).await {
+                                Ok(stream) => {
+                                    let serving_id = routed.decision.selected_model_id.clone();
+                                    decisions.push(routed.decision);
+                                    break (stream, decisions, serving_id);
+                                }
+                                Err(DaimonError::Cancelled) => Err(DaimonError::Cancelled)?,
+                                Err(e) => {
+                                    decisions.push(routed.decision.clone());
+                                    match router.escalate(decisions.last().expect("decision just pushed")) {
+                                        Some(next) => {
+                                            tracing::warn!(
+                                                error = %e,
+                                                to_tier = ?next.decision.selected_tier,
+                                                to_model = %next.decision.selected_model_id,
+                                                "stream obtain failed; escalating tier"
+                                            );
+                                            routed = next;
+                                        }
+                                        None => Err(e)?,
+                                    }
+                                }
+                            }
+                        }
+                    }
                 };
-
-                let stream_result = model.generate_stream_erased(&request).await;
                 messages = std::mem::take(&mut request.messages);
                 tool_specs_vec = std::mem::take(&mut request.tools);
-                let mut inner = stream_result?;
+
+                for decision in &decisions {
+                    hooks.on_route_decision_erased(decision).await?;
+                }
 
                 let mut pending_tool_calls: HashMap<String, (String, String)> = HashMap::new();
                 let mut tool_call_order: Vec<String> = Vec::new();
@@ -804,7 +837,7 @@ impl Agent {
                 };
                 let estimated_cost = cost_tracker
                     .as_ref()
-                    .map(|t| t.record(model.model_id_erased(), &est_usage))
+                    .map(|t| t.record(&serving_id, &est_usage))
                     .unwrap_or(0.0);
 
                 yield StreamEvent::Usage {
@@ -2459,5 +2492,103 @@ mod tests {
             result.unwrap_err(),
             crate::error::DaimonError::Model(_)
         ));
+    }
+
+    struct StreamIdModel {
+        id: &'static str,
+        fail_obtain: bool,
+    }
+
+    impl Model for StreamIdModel {
+        async fn generate(&self, _request: &ChatRequest) -> Result<ChatResponse> {
+            unimplemented!("stream-only test model")
+        }
+
+        async fn generate_stream(&self, _request: &ChatRequest) -> Result<ResponseStream> {
+            if self.fail_obtain {
+                return Err(crate::error::DaimonError::Model(
+                    "stream obtain failed".into(),
+                ));
+            }
+            let id = self.id;
+            Ok(Box::pin(futures::stream::iter(vec![
+                Ok(crate::stream::StreamEvent::TextDelta(format!(
+                    "streamed by {id}"
+                ))),
+                Ok(crate::stream::StreamEvent::Done),
+            ])))
+        }
+
+        fn model_id(&self) -> &str {
+            self.id
+        }
+    }
+
+    #[tokio::test]
+    async fn test_streaming_routes_to_selected_model() {
+        use futures::StreamExt;
+
+        let router = ModelRouter::builder()
+            .register(
+                ModelTier::Small,
+                StreamIdModel {
+                    id: "small-stream",
+                    fail_obtain: false,
+                },
+            )
+            .register(
+                ModelTier::Large,
+                StreamIdModel {
+                    id: "large-stream",
+                    fail_obtain: false,
+                },
+            )
+            .scorer(StaticScorer(0.9))
+            .build()
+            .unwrap();
+        let agent = Agent::builder().router(router).build().unwrap();
+
+        let mut stream = agent.prompt_stream("hard question").await.unwrap();
+        let mut text = String::new();
+        while let Some(event) = stream.next().await {
+            if let crate::stream::StreamEvent::TextDelta(t) = event.unwrap() {
+                text.push_str(&t);
+            }
+        }
+        assert!(text.contains("large-stream"));
+    }
+
+    #[tokio::test]
+    async fn test_streaming_escalates_on_obtain_failure() {
+        use futures::StreamExt;
+
+        let router = ModelRouter::builder()
+            .register(
+                ModelTier::Small,
+                StreamIdModel {
+                    id: "small-stream",
+                    fail_obtain: true,
+                },
+            )
+            .register(
+                ModelTier::Medium,
+                StreamIdModel {
+                    id: "medium-stream",
+                    fail_obtain: false,
+                },
+            )
+            .scorer(StaticScorer(0.1))
+            .build()
+            .unwrap();
+        let agent = Agent::builder().router(router).build().unwrap();
+
+        let mut stream = agent.prompt_stream("hi").await.unwrap();
+        let mut text = String::new();
+        while let Some(event) = stream.next().await {
+            if let crate::stream::StreamEvent::TextDelta(t) = event.unwrap() {
+                text.push_str(&t);
+            }
+        }
+        assert!(text.contains("medium-stream"));
     }
 }
