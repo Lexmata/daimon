@@ -8,5 +8,5 @@ mod scorer;
 mod tier;
 
 pub use registry::{ModelCost, ModelRegistration};
-pub use scorer::{ErasedTaskScorer, HeuristicScorer, SharedTaskScorer, TaskScorer};
+pub use scorer::{ErasedTaskScorer, HeuristicScorer, LlmScorer, SharedTaskScorer, TaskScorer};
 pub use tier::ModelTier;

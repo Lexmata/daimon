@@ -5,7 +5,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::error::Result;
-use crate::model::types::{ChatRequest, Role};
+use crate::model::types::{ChatRequest, Message, Role};
+use crate::model::{Model, SharedModel};
 
 /// Scores the difficulty of a task (one ReAct iteration's request) on a
 /// 0.0 (trivial) to 1.0 (hardest) scale.
@@ -124,10 +125,161 @@ impl TaskScorer for HeuristicScorer {
     }
 }
 
+/// Difficulty scored by a judge model: the request snapshot is summarized
+/// into a classification prompt and the judge's numeric reply is parsed.
+///
+/// Scoring is fail-soft: a judge error or unparseable reply yields 0.5
+/// (middle band) with a warning, so a scorer outage never breaks a run.
+pub struct LlmScorer {
+    judge: SharedModel,
+}
+
+impl LlmScorer {
+    /// Uses an owned model as the difficulty judge (typically a cheap,
+    /// Small-tier model).
+    pub fn new<M: Model + 'static>(judge: M) -> Self {
+        Self {
+            judge: Arc::new(judge),
+        }
+    }
+
+    /// Uses a shared model as the difficulty judge.
+    pub fn shared(judge: SharedModel) -> Self {
+        Self { judge }
+    }
+}
+
+const JUDGE_SYSTEM: &str = "You are a task-difficulty classifier. Given a \
+    conversation snapshot, reply with ONLY a number from 0.0 to 1.0: 0.0 \
+    trivial (chit-chat, simple lookup), 0.5 moderate (multi-step reasoning, \
+    tool use), 1.0 very hard (deep analysis, proofs, complex code). No \
+    explanation.";
+
+/// Difficulty used when the judge fails or replies with no parseable number.
+const FALLBACK_DIFFICULTY: f64 = 0.5;
+
+/// Maximum characters of the last user message sent to the judge.
+const JUDGE_SNAPSHOT_CHARS: usize = 4000;
+
+impl TaskScorer for LlmScorer {
+    async fn score(&self, request: &ChatRequest) -> Result<f64> {
+        let last_user = request
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == Role::User)
+            .and_then(|m| m.content.as_deref())
+            .unwrap_or("");
+        let snapshot: String = last_user.chars().take(JUDGE_SNAPSHOT_CHARS).collect();
+        let judge_prompt = format!(
+            "Conversation length: {} messages\nTools available: {}\nLast user message:\n{snapshot}",
+            request.messages.len(),
+            request.tools.len(),
+        );
+        let judge_request = ChatRequest {
+            messages: vec![Message::system(JUDGE_SYSTEM), Message::user(judge_prompt)],
+            tools: Vec::new(),
+            temperature: Some(0.0),
+            max_tokens: Some(16),
+        };
+
+        let text = match self.judge.generate_erased(&judge_request).await {
+            Ok(response) => response.text().to_string(),
+            Err(e) => {
+                tracing::warn!(error = %e, "difficulty judge call failed; using fallback 0.5");
+                return Ok(FALLBACK_DIFFICULTY);
+            }
+        };
+
+        match text.split_whitespace().find_map(|tok| {
+            tok.trim_matches(|c: char| !c.is_ascii_digit() && c != '.')
+                .trim_end_matches('.')
+                .parse::<f64>()
+                .ok()
+        }) {
+            Some(d) => Ok(d.clamp(0.0, 1.0)),
+            None => {
+                tracing::warn!(reply = %text, "judge reply had no parseable number; using fallback 0.5");
+                Ok(FALLBACK_DIFFICULTY)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::types::{Message, ToolSpec};
+
+    use crate::model::Model;
+    use crate::model::types::{ChatResponse, StopReason};
+    use crate::stream::ResponseStream;
+
+    struct JudgeModel {
+        reply: &'static str,
+        fail: bool,
+    }
+
+    impl Model for JudgeModel {
+        async fn generate(&self, _request: &ChatRequest) -> Result<ChatResponse> {
+            if self.fail {
+                return Err(crate::error::DaimonError::Model("judge down".into()));
+            }
+            Ok(ChatResponse {
+                message: Message::assistant(self.reply),
+                stop_reason: StopReason::EndTurn,
+                usage: None,
+            })
+        }
+
+        async fn generate_stream(&self, _request: &ChatRequest) -> Result<ResponseStream> {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+
+        fn model_id(&self) -> &str {
+            "judge"
+        }
+    }
+
+    #[tokio::test]
+    async fn llm_scorer_parses_plain_number() {
+        let scorer = LlmScorer::new(JudgeModel {
+            reply: "0.85",
+            fail: false,
+        });
+        let req = request_with(vec![Message::user("anything")], vec![]);
+        assert_eq!(scorer.score(&req).await.unwrap(), 0.85);
+    }
+
+    #[tokio::test]
+    async fn llm_scorer_parses_number_from_prose() {
+        let scorer = LlmScorer::new(JudgeModel {
+            reply: "I'd say 0.7.",
+            fail: false,
+        });
+        let req = request_with(vec![Message::user("anything")], vec![]);
+        assert_eq!(scorer.score(&req).await.unwrap(), 0.7);
+    }
+
+    #[tokio::test]
+    async fn llm_scorer_falls_back_on_garbage() {
+        let scorer = LlmScorer::new(JudgeModel {
+            reply: "hard to say",
+            fail: false,
+        });
+        let req = request_with(vec![Message::user("anything")], vec![]);
+        assert_eq!(scorer.score(&req).await.unwrap(), 0.5);
+    }
+
+    #[tokio::test]
+    async fn llm_scorer_falls_back_on_error() {
+        let scorer = LlmScorer::new(JudgeModel {
+            reply: "",
+            fail: true,
+        });
+        let req = request_with(vec![Message::user("anything")], vec![]);
+        assert_eq!(scorer.score(&req).await.unwrap(), 0.5);
+    }
 
     fn request_with(messages: Vec<Message>, tools: Vec<ToolSpec>) -> ChatRequest {
         ChatRequest {
