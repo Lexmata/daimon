@@ -39,8 +39,9 @@ let agent = Agent::builder()
 
 | Method | Type | Default | Description |
 |--------|------|---------|-------------|
-| `model` | `M: Model + 'static` | *required* | Sets the LLM provider. |
-| `shared_model` | `SharedModel` | *required* | Sets a pre-boxed shared model. |
+| `model` | `M: Model + 'static` | *required unless `router` is set* | Sets the LLM provider. |
+| `shared_model` | `SharedModel` | *required unless `router` is set* | Sets a pre-boxed shared model. |
+| `router` | `ModelRouter` | `None` | Routes each ReAct iteration's model call through a `ModelRouter` (dynamic per-call model selection with tier escalation). Last setter wins against `model`/`shared_model`. |
 | `system_prompt` | `impl Into<String>` | `None` | Static system prompt injected at conversation start. |
 | `prompt_template` | `PromptTemplate` | `None` | Dynamic prompt with `{variable}` interpolation. |
 | `tool` | `T: Tool + 'static` | `ToolRegistry::new()` | Registers a tool. Tools must have unique names. |
@@ -216,7 +217,7 @@ If the response includes `usage`, it is accumulated into `total_usage` and `trac
   `Transform` rewrites it before persistence.
 - Call `hooks.on_iteration_end_erased(&state)`.
 - Add the (possibly transformed) assistant message to memory and to the message list.
-- Return `AgentResponse { messages, final_text, iterations, usage, cost }`.
+- Return `AgentResponse { messages, final_text, iterations, usage, cost, route_decisions }`.
 
 ### Prompt Methods Comparison
 
@@ -434,6 +435,7 @@ The `AgentHook` trait provides lifecycle callbacks. All methods have default no-
 | `on_tool_result(&self, call: &ToolCall, result: &ToolOutput)` | After each tool completes |
 | `on_iteration_end(&self, state: &AgentState)` | End of iteration, after tools run or final response |
 | `on_error(&self, error: &DaimonError)` | When a tool execution fails (error still propagated to model) |
+| `on_route_decision(&self, decision: &RouteDecision)` | After each routing decision in a routed agent's ReAct loop (including one per escalation retry; not fired for `prompt_structured`/handoffs or when the iteration ultimately fails) |
 
 ### AgentState
 
@@ -847,6 +849,9 @@ pub struct AgentResponse {
     pub usage: Usage,
     /// Estimated cost in USD (requires CostModel on agent)
     pub cost: f64,
+    /// Routing decisions, one per iteration (plus one per escalation retry).
+    /// Empty for single-model agents.
+    pub route_decisions: Vec<RouteDecision>,
 }
 
 impl AgentResponse {
@@ -860,9 +865,10 @@ impl AgentResponse {
 
 - **`messages`** — Complete conversation including system prompt, history, user message, assistant messages (with tool calls), tool results, and final response.
 - **`final_text`** — The model's last text response (no tool calls). Use `text()` for convenient access.
-- **`iterations`** — How many times the model was invoked. 1 = no tool calls; 2+ = one or more tool rounds.
+- **`iterations`** — How many ReAct loop iterations ran (1 = no tool calls). Escalation retries within an iteration are extra model invocations recorded in `route_decisions`, not counted here.
 - **`usage`** — `Usage { input_tokens, output_tokens, cached_tokens }` aggregated across all iterations.
 - **`cost`** — USD cost from the `CostTracker` if a `CostModel` was configured; otherwise 0.
+- **`route_decisions`** — Routing decisions made during the prompt, one per iteration plus one per escalation retry. Persisted in checkpoints for resumable runs. Empty for single-model agents.
 
 ---
 

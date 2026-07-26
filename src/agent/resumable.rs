@@ -13,6 +13,7 @@ use crate::agent::runner::{AgentResponse, StepOutcome};
 use crate::checkpoint::{CheckpointState, ErasedCheckpoint};
 use crate::error::{DaimonError, Result};
 use crate::model::types::{Message, Usage};
+use crate::routing::RouteDecision;
 
 /// Runs a prompt with checkpoint-based persistence.
 ///
@@ -51,53 +52,61 @@ impl Agent {
     ) -> Result<AgentResponse> {
         let existing = checkpoint.load_erased(run_id).await?;
 
-        let (mut messages, start_iteration, resuming, initial_usage, initial_cost) =
-            if let Some(cp) = existing {
-                if cp.completed {
-                    tracing::info!(run_id, "checkpoint already completed, replaying result");
-                    let final_text = cp
-                        .messages
-                        .last()
-                        .and_then(|m| m.content.clone())
-                        .unwrap_or_default();
-                    return Ok(AgentResponse {
-                        messages: cp.messages,
-                        final_text,
-                        iterations: cp.iteration,
-                        usage: cp.usage,
-                        cost: cp.cumulative_cost,
-                    });
-                }
-                tracing::info!(
-                    run_id,
-                    iteration = cp.iteration,
-                    messages = cp.messages.len(),
-                    cumulative_cost = cp.cumulative_cost,
-                    "resuming from checkpoint"
-                );
-                (
-                    cp.messages,
-                    cp.iteration,
-                    true,
-                    cp.usage,
-                    cp.cumulative_cost,
-                )
-            } else {
-                let actual_input = self.run_input_guardrails(input).await?;
-                let history = self.memory.get_messages_erased().await?;
+        let (
+            mut messages,
+            start_iteration,
+            resuming,
+            initial_usage,
+            initial_cost,
+            initial_decisions,
+        ) = if let Some(cp) = existing {
+            if cp.completed {
+                tracing::info!(run_id, "checkpoint already completed, replaying result");
+                let final_text = cp
+                    .messages
+                    .last()
+                    .and_then(|m| m.content.clone())
+                    .unwrap_or_default();
+                return Ok(AgentResponse {
+                    messages: cp.messages,
+                    final_text,
+                    iterations: cp.iteration,
+                    usage: cp.usage,
+                    cost: cp.cumulative_cost,
+                    route_decisions: cp.route_decisions,
+                });
+            }
+            tracing::info!(
+                run_id,
+                iteration = cp.iteration,
+                messages = cp.messages.len(),
+                cumulative_cost = cp.cumulative_cost,
+                "resuming from checkpoint"
+            );
+            (
+                cp.messages,
+                cp.iteration,
+                true,
+                cp.usage,
+                cp.cumulative_cost,
+                cp.route_decisions,
+            )
+        } else {
+            let actual_input = self.run_input_guardrails(input).await?;
+            let history = self.memory.get_messages_erased().await?;
 
-                let mut msgs = Vec::new();
-                if let Some(system) = &self.system_prompt {
-                    msgs.push(Message::system(system));
-                }
-                msgs.extend(history);
-                msgs.push(Message::user(&actual_input));
+            let mut msgs = Vec::new();
+            if let Some(system) = &self.system_prompt {
+                msgs.push(Message::system(system));
+            }
+            msgs.extend(history);
+            msgs.push(Message::user(&actual_input));
 
-                self.memory
-                    .add_message_erased(&Message::user(&actual_input))
-                    .await?;
-                (msgs, 0, false, Usage::default(), 0.0f64)
-            };
+            self.memory
+                .add_message_erased(&Message::user(&actual_input))
+                .await?;
+            (msgs, 0, false, Usage::default(), 0.0f64, Vec::new())
+        };
 
         // A checkpoint saved at the iteration limit has no budget left: without
         // this guard each resume would increment past the limit only AFTER
@@ -121,13 +130,15 @@ impl Agent {
         let mut iteration = start_iteration;
         let mut total_usage = initial_usage;
         let mut total_cost = initial_cost;
+        let mut route_decisions: Vec<RouteDecision> = initial_decisions;
 
         loop {
             if cancel.is_cancelled() {
                 checkpoint
                     .save_erased(
                         &CheckpointState::new(run_id, messages.clone(), iteration)
-                            .with_cost_usage(total_cost, total_usage.clone()),
+                            .with_cost_usage(total_cost, total_usage.clone())
+                            .with_route_decisions(route_decisions.clone()),
                     )
                     .await?;
                 return Err(DaimonError::Cancelled);
@@ -144,6 +155,7 @@ impl Agent {
                     &mut total_cost,
                     run_tracker.as_ref(),
                     cancel,
+                    &mut route_decisions,
                 )
                 .await
             {
@@ -152,7 +164,8 @@ impl Agent {
                     checkpoint
                         .save_erased(
                             &CheckpointState::new(run_id, messages.clone(), iteration)
-                                .with_cost_usage(total_cost, total_usage.clone()),
+                                .with_cost_usage(total_cost, total_usage.clone())
+                                .with_route_decisions(route_decisions.clone()),
                         )
                         .await?;
                     return Err(DaimonError::Cancelled);
@@ -165,7 +178,8 @@ impl Agent {
                     checkpoint
                         .save_erased(
                             &CheckpointState::new(run_id, messages.clone(), iteration)
-                                .with_cost_usage(total_cost, total_usage.clone()),
+                                .with_cost_usage(total_cost, total_usage.clone())
+                                .with_route_decisions(route_decisions.clone()),
                         )
                         .await?;
                     if iteration >= self.max_iterations {
@@ -185,11 +199,13 @@ impl Agent {
                         iterations: iteration,
                         usage: total_usage,
                         cost: total_cost,
+                        route_decisions,
                     };
 
                     let completed_state =
                         CheckpointState::new(run_id, response.messages.clone(), iteration)
                             .with_cost_usage(response.cost, response.usage.clone())
+                            .with_route_decisions(response.route_decisions.clone())
                             .mark_completed();
                     checkpoint.save_erased(&completed_state).await?;
 
@@ -263,6 +279,7 @@ mod tests {
     use crate::error::Result;
     use crate::model::Model;
     use crate::model::types::{ChatRequest, ChatResponse, Message, StopReason, Usage};
+    use crate::routing::{ModelTier, test_utils::StaticScorer};
     use crate::stream::ResponseStream;
     use crate::tool::{Tool, ToolOutput};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -756,5 +773,129 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(replayed.final_text, "SANITIZED");
+    }
+
+    // ---- Routing (dynamic model routing) ----
+
+    struct RoutedIdModel {
+        id: &'static str,
+    }
+
+    impl Model for RoutedIdModel {
+        async fn generate(&self, _request: &ChatRequest) -> Result<ChatResponse> {
+            Ok(ChatResponse {
+                message: Message::assistant(format!("served by {}", self.id)),
+                stop_reason: StopReason::EndTurn,
+                usage: Some(Usage::default()),
+            })
+        }
+
+        async fn generate_stream(&self, _request: &ChatRequest) -> Result<ResponseStream> {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+
+        fn model_id(&self) -> &str {
+            self.id
+        }
+    }
+
+    #[tokio::test]
+    async fn test_routed_run_reports_route_decisions_for_serving_model() {
+        use crate::routing::{ModelRouter, ModelTier};
+
+        let checkpoint = cp();
+        // Difficulty 0.9 routes to Large, so Large serves every iteration.
+        let router = ModelRouter::builder()
+            .register(ModelTier::Small, RoutedIdModel { id: "small-model" })
+            .register(ModelTier::Large, RoutedIdModel { id: "large-model" })
+            .scorer(StaticScorer(0.9))
+            .build()
+            .unwrap();
+        let agent = Agent::builder().router(router).build().unwrap();
+
+        let resp = agent
+            .prompt_resumable("prove the riemann hypothesis", "run-routed", &checkpoint)
+            .await
+            .unwrap();
+
+        assert_eq!(resp.final_text, "served by large-model");
+        assert!(
+            !resp.route_decisions.is_empty(),
+            "a routed run must record route decisions"
+        );
+        assert!(
+            resp.route_decisions
+                .iter()
+                .all(|d| d.selected_model_id == "large-model"),
+            "every decision must name the serving Large model: {:?}",
+            resp.route_decisions
+        );
+    }
+
+    #[tokio::test]
+    async fn test_checkpoint_persists_route_decisions() {
+        use crate::routing::ModelRouter;
+
+        // In-memory checkpoint shared across two prompt_resumable calls,
+        // simulating a cross-process resume from a completed run.
+        let checkpoint = cp();
+        let router = ModelRouter::builder()
+            .register(ModelTier::Small, RoutedIdModel { id: "small" })
+            .register(ModelTier::Large, RoutedIdModel { id: "large" })
+            .scorer(StaticScorer(0.9))
+            .build()
+            .unwrap();
+        let agent = Agent::builder().router(router).build().unwrap();
+
+        let resp1 = agent
+            .prompt_resumable("hi", "persist-decisions", &checkpoint)
+            .await
+            .unwrap();
+        assert_eq!(
+            resp1.route_decisions.len(),
+            1,
+            "first run must record exactly one decision (one ReAct iteration)"
+        );
+
+        // Same run_id on the same checkpoint → completed replay.
+        let resp2 = agent
+            .prompt_resumable("hi", "persist-decisions", &checkpoint)
+            .await
+            .unwrap();
+        assert_eq!(
+            resp2.route_decisions, resp1.route_decisions,
+            "replayed run must restore persisted route_decisions"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_seeded_route_decisions_are_restored() {
+        let checkpoint = cp();
+        let fake_decision = RouteDecision {
+            iteration: 0,
+            difficulty: 0.0,
+            required_tier: ModelTier::Small,
+            selected_tier: ModelTier::Small,
+            selected_model_id: "seeded-model".into(),
+            escalated_from: None,
+        };
+
+        let seeded = CheckpointState::new("seed-decisions", vec![Message::user("hi")], 0)
+            .with_route_decisions(vec![fake_decision.clone()]);
+        checkpoint.save_erased(&seeded).await.unwrap();
+
+        let agent = Agent::builder().model(EchoModel).build().unwrap();
+        let resp = agent
+            .prompt_resumable("hello", "seed-decisions", &checkpoint)
+            .await
+            .unwrap();
+        assert!(
+            !resp.route_decisions.is_empty(),
+            "response must include the seeded decision"
+        );
+        assert_eq!(
+            resp.route_decisions[0], fake_decision,
+            "seeded decision must be first in the response"
+        );
     }
 }

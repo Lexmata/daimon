@@ -81,6 +81,13 @@ pub struct CheckpointState {
     /// Aggregated token usage accumulated so far in this run.
     #[serde(default, with = "usage_serde")]
     pub usage: Usage,
+    /// Routing decisions accumulated so far in this run.
+    ///
+    /// Persisted so a cross-process resume can restore the full decision
+    /// trail into the response; otherwise pre-resume decisions would be
+    /// missing from the returned `route_decisions`.
+    #[serde(default)]
+    pub route_decisions: Vec<crate::routing::RouteDecision>,
 }
 
 impl CheckpointState {
@@ -100,6 +107,7 @@ impl CheckpointState {
             created_at: now,
             cumulative_cost: 0.0,
             usage: Usage::default(),
+            route_decisions: Vec::new(),
         }
     }
 
@@ -110,6 +118,15 @@ impl CheckpointState {
     pub fn with_cost_usage(mut self, cost: f64, usage: Usage) -> Self {
         self.cumulative_cost = cost;
         self.usage = usage;
+        self
+    }
+
+    /// Records the routing decisions accumulated so far.
+    ///
+    /// Set before saving so a later resume can restore the full decision
+    /// trail into the returned `AgentResponse`.
+    pub fn with_route_decisions(mut self, decisions: Vec<crate::routing::RouteDecision>) -> Self {
+        self.route_decisions = decisions;
         self
     }
 

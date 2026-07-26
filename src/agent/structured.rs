@@ -52,6 +52,9 @@ impl Agent {
     /// If the model's response is not valid JSON or cannot be deserialized
     /// into `T`, a retry is attempted with the error message to let the
     /// model correct itself (up to 3 total attempts).
+    ///
+    /// Note: route decisions are made internally for routed agents but
+    /// `on_route_decision` is never fired from this method.
     #[tracing::instrument(skip_all, fields(type_name = %type_name))]
     pub async fn prompt_structured<T: DeserializeOwned>(
         &self,
@@ -82,7 +85,8 @@ impl Agent {
                 max_tokens: self.max_tokens,
             };
 
-            let response = self.model.generate_erased(&request).await?;
+            let outcome = self.generate_routed(attempt + 1, &request).await?;
+            let response = outcome.response;
 
             if let Some(ref usage) = response.usage {
                 total_usage.accumulate(usage);
@@ -152,6 +156,7 @@ mod tests {
     use super::*;
     use crate::model::Model;
     use crate::model::types::*;
+    use crate::routing::test_utils::StaticScorer;
     use crate::stream::ResponseStream;
     use serde::Deserialize;
 
@@ -260,5 +265,72 @@ mod tests {
     #[test]
     fn test_extract_json_whitespace() {
         assert_eq!(extract_json("  \n  {\"a\": 1}  \n  "), "{\"a\": 1}");
+    }
+
+    // ---- Routing (dynamic model routing) ----
+
+    struct FailModel;
+
+    impl Model for FailModel {
+        async fn generate(&self, _request: &ChatRequest) -> Result<ChatResponse> {
+            Err(DaimonError::Model("provider down".into()))
+        }
+
+        async fn generate_stream(&self, _request: &ChatRequest) -> Result<ResponseStream> {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+
+        fn model_id(&self) -> &str {
+            "fail-model"
+        }
+    }
+
+    #[tokio::test]
+    async fn test_routed_prompt_structured_escalates_and_fires_no_route_hook() {
+        use crate::routing::{ModelRouter, ModelTier, RouteDecision};
+        use std::sync::{Arc, Mutex};
+
+        struct RecordingHook {
+            decisions: Arc<Mutex<Vec<RouteDecision>>>,
+        }
+
+        impl crate::hooks::AgentHook for RecordingHook {
+            async fn on_route_decision(&self, decision: &RouteDecision) -> Result<()> {
+                self.decisions.lock().unwrap().push(decision.clone());
+                Ok(())
+            }
+        }
+
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        // Small fails, so the extraction is served by Medium via escalation.
+        let router = ModelRouter::builder()
+            .register(ModelTier::Small, FailModel)
+            .register(
+                ModelTier::Medium,
+                JsonModel::new(r#"{"label": "positive", "confidence": 0.9}"#),
+            )
+            .scorer(StaticScorer(0.1))
+            .build()
+            .unwrap();
+        let agent = Agent::builder()
+            .router(router)
+            .hooks(RecordingHook {
+                decisions: captured.clone(),
+            })
+            .build()
+            .unwrap();
+
+        let result: StructuredOutput<Sentiment> =
+            agent.prompt_structured("test", "Sentiment").await.unwrap();
+        assert_eq!(result.data.label, "positive");
+        assert_eq!(result.data.confidence, 0.9);
+
+        // prompt_structured documents a no-hook contract: route decisions are
+        // made internally but on_route_decision is never fired.
+        let hooked = captured.lock().unwrap();
+        assert!(
+            hooked.is_empty(),
+            "prompt_structured must not fire on_route_decision, got {hooked:?}"
+        );
     }
 }
