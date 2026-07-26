@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use crate::agent::Agent;
+use crate::agent::{Agent, ModelSource};
 use crate::checkpoint::ErasedCheckpoint;
 use crate::cost::CostTracker;
 use crate::error::{DaimonError, Result};
@@ -17,7 +17,7 @@ use crate::guardrails::{InputGuardrail, OutputGuardrail};
 use crate::hooks::{AgentHook, ErasedAgentHook};
 use crate::memory::{Memory, SharedMemory, SlidingWindowMemory};
 use crate::middleware::{Middleware, MiddlewareStack};
-use crate::model::{Model, SharedModel};
+use crate::model::Model;
 use crate::tool::{Tool, ToolRegistry, ToolRetryPolicy};
 
 impl Agent {
@@ -177,7 +177,7 @@ impl Agent {
 /// parent agent's values; call setters to override specific fields,
 /// then [`build()`](ForkBuilder::build) to produce the new agent.
 pub struct ForkBuilder {
-    model: SharedModel,
+    model: ModelSource,
     system_prompt: Option<String>,
     tools: ToolRegistry,
     memory: Option<SharedMemory>,
@@ -200,7 +200,7 @@ pub struct ForkBuilder {
 impl ForkBuilder {
     /// Replaces the LLM model.
     pub fn model<M: Model + 'static>(mut self, model: M) -> Self {
-        self.model = Arc::new(model);
+        self.model = ModelSource::Single(Arc::new(model));
         self
     }
 

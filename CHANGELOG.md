@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Dynamic model routing:** `ModelRouter` scores each ReAct iteration's
+  difficulty and routes the model call to the cheapest competent registered
+  model, escalating to higher tiers on provider failure. New
+  `daimon::routing` module (`ModelTier`, `TaskScorer` with
+  `HeuristicScorer`/`LlmScorer`, `ModelCost`, `ModelRegistration`,
+  `TierBands`, `RouteDecision`), `AgentBuilder::router`,
+  `AgentHook::on_route_decision`, and `AgentResponse::route_decisions`
+  (additive field — technically breaking for downstream `AgentResponse`
+  literal construction). `ErasedAgentHook` gains a required method
+  `on_route_decision_erased`; direct implementors of that public trait
+  (rather than of `AgentHook`) must add it.
+
+- **LlmScorer privacy & safety knobs:** `LlmScorer::metadata_only`
+  withholds message content from the judge; `LlmScorer::with_redaction`
+  rewrites the snapshot before sending; `LlmScorer::with_heuristic_blend`
+  clamps the judge's score within a band of the deterministic heuristic
+  score as a prompt-injection mitigation. Metadata-only mode takes
+  precedence when both are set.
+
+- **Provider-group labels:** `ModelRouterBuilder::register_grouped` /
+  `register_grouped_with_cost` attach a provider-group label to a
+  registration. Escalation from a grouped registration stays within the
+  same group, keeping replayed request data contained within the provider
+  boundary. Unlabeled registrations are excluded from grouped escalation.
+
+- **RouteDecision serde:** `RouteDecision` implements `Serialize`/
+  `Deserialize` and is persisted in `CheckpointState::route_decisions`
+  for cross-process resume. The serialization format is locked with
+  `#[serde(deny_unknown_fields)]`.
+
+- **TierBands validation:** `ModelRouterBuilder::build()` rejects
+  inverted or out-of-range tier bands with a `Builder` error, catching
+  configuration errors at construction time rather than silently routing
+  to unexpected tiers.
+
+- **Non-finite score guard:** `ModelRouter::route()` replaces non-finite
+  (NaN, Inf) scorer output with the fallback difficulty instead of
+  routing via a corrupted score.
+
+### Changed
+
+- **`ModelRegistration` is crate-private** — previously public but never
+  intended for direct use. Registry interaction goes through
+  `ModelRouterBuilder` methods.
+
 ## [0.23.0] - 2026-07-22
 
 ### Added
