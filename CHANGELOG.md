@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.24.0] - 2026-07-25
 
 ### Added
 
@@ -38,6 +38,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Deserialize` and is persisted in `CheckpointState::route_decisions`
   for cross-process resume. The serialization format is locked with
   `#[serde(deny_unknown_fields)]`.
+
+## [Unreleased]
 
 - **TierBands validation:** `ModelRouterBuilder::build()` rejects
   inverted or out-of-range tier bands with a `Builder` error, catching
