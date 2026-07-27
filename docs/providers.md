@@ -112,7 +112,7 @@ let model = Anthropic::with_api_key("claude-sonnet-5", std::env::var("ANTHROPIC_
 | `.with_max_retries(n)` | Retries for 429, 529, 5xx (default: 3) |
 | `.with_prompt_caching()` | Enables `cache_control` breakpoints (system, tools) |
 
-**Models:** `claude-sonnet-5`, `claude-opus-4-8`, `claude-haiku-4-5`, etc.
+**Models:** `claude-sonnet-5`, `claude-opus-5`, `claude-opus-4-8`, `claude-haiku-4-5`, etc.
 
 **Capabilities:** Tool calls, streaming, overloaded retry (429/529/5xx). Caching: native `cache_control` breakpoints for system and tool definitions; `usage.cached_tokens` reports cache reads.
 
