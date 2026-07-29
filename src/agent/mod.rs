@@ -73,7 +73,7 @@ pub(crate) enum ModelSource {
 /// An AI agent that runs the ReAct loop: model → tool calls (optional) → model → … → final response.
 ///
 /// Construct via [`Agent::builder()`]. Requires either a [`Model`](crate::model::Model)
-/// or a [`ModelRouter`](crate::routing::ModelRouter) (via [`AgentBuilder::router`]);
+/// or a [`ModelRouter`] (via [`AgentBuilder::router`]);
 /// tools, memory, and hooks are optional. Memory defaults to
 /// [`SlidingWindowMemory`](crate::memory::SlidingWindowMemory) with 50 messages.
 pub struct Agent {

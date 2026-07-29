@@ -41,7 +41,7 @@ impl CostModel for AnthropicCostModel {
         match (model_id, direction) {
             (m, TokenDirection::Input) if m.contains("fable") || m.contains("mythos") => 10.0e-6,
             (m, TokenDirection::Output) if m.contains("fable") || m.contains("mythos") => 50.0e-6,
-            // Claude 3 Opus was $15/$75; every Opus 4.x is $5/$25.
+            // Claude 3 Opus was $15/$75; Opus 4.x and Opus 5 are both $5/$25.
             (m, TokenDirection::Input) if m.contains("3-opus") => 15.0e-6,
             (m, TokenDirection::Output) if m.contains("3-opus") => 75.0e-6,
             (m, TokenDirection::Input) if m.contains("opus") => 5.0e-6,
@@ -95,7 +95,7 @@ mod tests {
             m.cost_per_token("claude-fable-5", TokenDirection::Output),
             50.0e-6
         );
-        // Opus 4.x: $5/$25 — a generation cheaper than Claude 3 Opus
+        // Opus 4.x and Opus 5: $5/$25 — a generation cheaper than Claude 3 Opus
         assert_eq!(
             m.cost_per_token("claude-opus-4-8", TokenDirection::Input),
             5.0e-6
@@ -103,6 +103,20 @@ mod tests {
         assert_eq!(
             m.cost_per_token("claude-opus-4-8", TokenDirection::Output),
             25.0e-6
+        );
+        assert_eq!(
+            m.cost_per_token("claude-opus-5", TokenDirection::Input),
+            5.0e-6
+        );
+        assert_eq!(
+            m.cost_per_token("claude-opus-5", TokenDirection::Output),
+            25.0e-6
+        );
+        // The "3-opus" arm is matched by substring, so an id without a
+        // generation prefix must not fall into the legacy $15/$75 rate.
+        assert_eq!(
+            m.cost_per_token("us.anthropic.claude-opus-5", TokenDirection::Input),
+            5.0e-6
         );
         assert_eq!(
             m.cost_per_token("claude-3-opus-20240229", TokenDirection::Input),
