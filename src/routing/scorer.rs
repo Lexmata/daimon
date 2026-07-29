@@ -147,7 +147,7 @@ impl TaskScorer for HeuristicScorer {
 ///
 /// Scoring is fail-soft: a judge error or unparseable reply yields 0.5
 /// (middle band) with a warning, so a scorer outage never breaks a run.
-/// Cancellation ([`DaimonError::Cancelled`](crate::error::DaimonError::Cancelled))
+/// Cancellation ([`DaimonError::Cancelled`])
 /// is propagated instead of falling back.
 ///
 /// # Security & privacy
