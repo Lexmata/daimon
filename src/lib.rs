@@ -78,6 +78,7 @@
 //! - [`checkpoint`] — Checkpointing and state persistence
 //! - [`a2a`] — Google Agent-to-Agent protocol support (feature = "a2a")
 //! - [`distributed`] — Distributed agent execution across processes
+//! - [`session`] — Inter-session communication (message passing between concurrent sessions)
 //! - [`mcp`] — Model Context Protocol client and server (stdio, HTTP)
 //! - [`telemetry`] — OpenTelemetry OTLP export (feature = "otel")
 //! - [`server`] — HTTP agent server (feature = "http-server")
@@ -100,6 +101,7 @@ pub mod prelude;
 pub mod prompt;
 pub mod retriever;
 pub mod routing;
+pub mod session;
 pub mod stream;
 pub mod tool;
 
