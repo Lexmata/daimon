@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.25.0] - 2026-09-13
+
+### Added
+
+- **Inter-session communication:** a first-class messaging layer that lets
+  independent, concurrently-running agent sessions exchange messages —
+  distinct from the `distributed` layer, which hands stateless work to a
+  worker pool. New `daimon::session` module (re-exporting the core
+  `daimon_core::session` traits and types):
+  - `SessionId` and `SessionMessage` (directed and broadcast), the
+    `SessionBus` trait plus its object-safe `ErasedSessionBus` mirror,
+    `SessionReceiver`/`ReceiverStream`, and the `SharedSessionBus` alias,
+    following the same erased-trait/RPITIT conventions as `distributed`.
+  - `InProcessSessionBus`, backed by one bounded `tokio::mpsc` FIFO mailbox
+    per session. Directed `send` queues behind a session's in-progress work,
+    delivers in order, and applies backpressure when a busy session falls
+    behind (lossless). `broadcast` is best-effort fire-and-fan-out via
+    per-recipient `try_send`, skipping (and logging) a full or closed mailbox
+    so one stuck session never stalls the fan-out. A session's mailbox is
+    single-consumer: re-subscribing retires the previous receiver.
+  - `SendMessageTool`, which exposes send/broadcast to a running agent.
+  - `DaimonError::InvalidSessionMessage` for a directed `send` with no
+    recipient (additive to the `#[non_exhaustive]` error enum).
+
+### Fixed
+
+- **Dependency advisories:** bumped `h2` (RUSTSEC-2026-0258, unbounded empty
+  DATA frames) and the yanked `chacha20` patch release via lockfile update.
+
 ## [0.24.0] - 2026-07-25
 
 ### Added
