@@ -42,6 +42,10 @@ pub use crate::routing::{
     HeuristicScorer, LlmScorer, ModelCost, ModelRouter, ModelRouterBuilder, ModelTier,
     RouteDecision, RoutedModel, TaskScorer, TierBands,
 };
+pub use crate::session::{
+    InProcessSessionBus, SendMessageTool, SessionBus, SessionId, SessionMessage, SessionReceiver,
+    SharedSessionBus,
+};
 pub use crate::stream::{ResponseStream, StreamEvent};
 pub use crate::tool::{Tool, ToolOutput, ToolRegistry, ToolRetryPolicy};
 

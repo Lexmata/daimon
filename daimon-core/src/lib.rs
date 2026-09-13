@@ -36,6 +36,7 @@ mod episodic_memory;
 mod error;
 mod memory;
 mod model;
+pub mod session;
 mod stream;
 pub mod stream_util;
 mod tool;
@@ -58,6 +59,10 @@ pub use episodic_memory::{
 pub use error::{DaimonError, Result};
 pub use memory::{ErasedMemory, Memory, SharedMemory};
 pub use model::{ErasedModel, Model, SharedModel};
+pub use session::{
+    ErasedSessionBus, ReceiverStream, SessionBus, SessionId, SessionMessage, SessionReceiver,
+    SharedSessionBus,
+};
 pub use stream::{ResponseStream, StreamEvent};
 pub use tool::{
     BackoffStrategy, ErasedTool, SharedTool, Tool, ToolChoice, ToolOutput, ToolRetryPolicy,
