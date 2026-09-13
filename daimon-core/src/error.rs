@@ -99,6 +99,11 @@ pub enum DaimonError {
         transient: bool,
     },
 
+    /// A session-bus message was malformed for the requested operation
+    /// (e.g. a directed `send` with no recipient).
+    #[error("invalid session message: {0}")]
+    InvalidSessionMessage(String),
+
     /// A catch-all for other errors.
     #[error("{0}")]
     Other(String),

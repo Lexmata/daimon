@@ -15,7 +15,7 @@ use crate::tool::{Tool, ToolRegistry, ToolRetryPolicy};
 
 /// Fluent builder for constructing an [`Agent`].
 ///
-/// A model (or a [`ModelRouter`](crate::routing::ModelRouter) via [`router`](AgentBuilder::router)) is required; all other fields have defaults. Call [`build`](AgentBuilder::build) to produce the agent.
+/// A model (or a [`ModelRouter`] via [`router`](AgentBuilder::router)) is required; all other fields have defaults. Call [`build`](AgentBuilder::build) to produce the agent.
 pub struct AgentBuilder {
     model: Option<ModelSource>,
     system_prompt: Option<String>,
